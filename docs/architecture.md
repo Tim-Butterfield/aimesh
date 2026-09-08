@@ -30,7 +30,7 @@ The three are **separate Go modules** joined by `go.work`:
 
 ## The meshcore boundary
 
-The dependency direction is one-way and **enforced by `make boundary-check`** (`scripts/boundarycheck`, part of the standard gate contributors run before every change; there is no CI wired up yet). It fails the build on:
+The dependency direction is one-way and **enforced by `make boundary-check`** (`scripts/boundarycheck`, part of the standard gate contributors run before every change, and which CI runs on every push and pull request). It fails the build on:
 
 1. any reverse import — meshcore importing a `reviewmesh`/`exploremesh` package;
 2. any app ↔ app import — the two apps importing each other;

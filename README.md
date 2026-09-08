@@ -46,8 +46,8 @@ distribution, not organization — meshcore is meant to be published on its own,
 `explore` are never released independently and have exactly one consumer. They are therefore internal
 packages of the one application, which is also why refactoring across them costs nothing.
 
-The dependency direction is one-way and enforced by `make boundary-check` (part of the standard gate; no
-CI is wired up yet): **the domains import meshcore; meshcore imports neither; the two domains never
+The dependency direction is one-way and enforced by `make boundary-check` (part of the standard gate,
+which CI runs on every push and pull request): **the domains import meshcore; meshcore imports neither; the two domains never
 import each other.** That last rule used to be enforced by the module graph as well; inside one module
 the static check is the only thing holding it, which is why it is not optional (see
 [CONTRIBUTING.md](CONTRIBUTING.md#the-meshcore-boundary)).
@@ -63,8 +63,11 @@ agent driving `aimesh` over MCP or ACP, names the panel per run and never touche
 saved profile is the optional shortcut that lets a no-flag run mean something; a fresh install ships
 the `default` profile **unconfigured**, and `doctor` says so honestly until you save one.
 
-**1. Clone the repository and install `aimesh` globally.** There is one binary; `review` and
-`explore` are subcommands of it.
+**1. Install `aimesh`.** There is one binary; `review` and `explore` are subcommands of it. Prebuilt
+archives for macOS and Linux (and an experimental Windows one) are on the
+[Releases page](https://github.com/Tim-Butterfield/aimesh/releases); each carries a signed build-provenance
+attestation you can check with `gh attestation verify <archive> --owner Tim-Butterfield`. Or build
+from a clone, which needs nothing but Go:
 
 ```bash
 git clone https://github.com/Tim-Butterfield/aimesh.git
@@ -219,7 +222,7 @@ Whatever posture the server ends up in, **`review_doctor` reports it** — trust
 
 reviewmesh runs an ordered **blind reviewer panel** (1..16 seats, host-computed agreement), judges an artifact against declared **authority documents**, and confines every path to roots a human authorized. exploremesh has named **profiles** (ordered explorers + a collator + a default mode, with `--profile` / `--count` subset selection) and app-owned **exploration modes** selected with `--mode`. Adapter binary paths and user-defined ACP instances are shared between the apps through `~/.aimesh/adapters.yaml`.
 
-**Stated limitations.** There is **no CI workflow** in this repository — `make gate` is run locally before every change, by contributors. Windows support is coded for (drive-letter-agnostic root rules, reparse-point detection, NTFS stream stripping) and there is a `make windows-build` cross-compile target, but **Windows is untested against real CLIs and against a real filesystem**: it is not part of the standard gate, no adapter has been exercised against a real CLI there, and no containment assertion on this page or in [docs/security.md](docs/security.md) has ever been executed on a real NTFS volume. The Windows-conditional code paths are exercised *as branches* on any platform (by substituting the variable that selects them), which tests the decision the code makes — not the answer the filesystem gives it. Two guarantees are genuinely **weaker or absent** there rather than merely untested: the hardlink rule does not fire (Windows cannot report a link count through the API used), and there is no `O_NOFOLLOW` equivalent, so no-follow rests on the reparse-point checks alone. [docs/security.md → Platform matrix](docs/security.md#7-platform-matrix--where-each-guarantee-actually-holds) gives the per-guarantee answer. The per-adapter status legend in [docs/adapters.md](docs/adapters.md#status-legend) says which adapters are confirmed against a real CLI and which are not; [docs/security.md](docs/security.md) states plainly what containment does and does not stop.
+**Stated limitations.** CI is minimal on purpose: one workflow runs `make gate` on every push and pull request, and the release workflow runs it again before cutting artifacts — the same command contributors run locally, so the two cannot drift. Nothing runs on a Windows or macOS runner. Windows support is coded for (drive-letter-agnostic root rules, reparse-point detection, NTFS stream stripping) and there is a `make windows-build` cross-compile target, but **Windows is untested against real CLIs and against a real filesystem**: it is not part of the standard gate, no adapter has been exercised against a real CLI there, and no containment assertion on this page or in [docs/security.md](docs/security.md) has ever been executed on a real NTFS volume. The Windows-conditional code paths are exercised *as branches* on any platform (by substituting the variable that selects them), which tests the decision the code makes — not the answer the filesystem gives it. Two guarantees are genuinely **weaker or absent** there rather than merely untested: the hardlink rule does not fire (Windows cannot report a link count through the API used), and there is no `O_NOFOLLOW` equivalent, so no-follow rests on the reparse-point checks alone. [docs/security.md → Platform matrix](docs/security.md#7-platform-matrix--where-each-guarantee-actually-holds) gives the per-guarantee answer. The per-adapter status legend in [docs/adapters.md](docs/adapters.md#status-legend) says which adapters are confirmed against a real CLI and which are not; [docs/security.md](docs/security.md) states plainly what containment does and does not stop.
 
 A generic **ACP adapter** (`meshcore/model/acpagent`) additionally drives any [ACP](https://agentclientprotocol.com/)-capable model CLI (`cursor-agent`, `devin`, `gemini`, `copilot`, `opencode`, `qwen`, …) over one protocol — reporting the agent's active model as a **verified** identity where the protocol exposes it. There is **no fixed ACP catalog**: each ACP adapter is a user-defined instance under `acpAdapters` in `~/.aimesh/adapters.yaml`, added by hand or with `setup --acp add`. See [meshcore/README.md](meshcore/README.md#extending--adding-an-adapter) and [docs/adapters.md](docs/adapters.md).
 

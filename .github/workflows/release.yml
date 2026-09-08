@@ -1,0 +1,91 @@
+# A release is cut by pushing a `v*` tag. The workflow re-runs the full gate on the tagged
+# commit, builds the archives with the same script `make dist` uses locally, smokes the
+# host archive, attests provenance for every artifact, and publishes the GitHub Release.
+#
+# What a consumer can verify from this: `gh attestation verify <archive> --owner Tim-Butterfield`
+# proves the archive was built by THIS workflow from THAT commit, on GitHub's runners. Builds
+# are `-trimpath` with CGO disabled and a pinned Go toolchain, so rebuilding the tag locally
+# reproduces the same bytes.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: gate, build, attest, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write      # create the release and upload assets
+      id-token: write      # Sigstore signing for the provenance attestation
+      attestations: write  # store the attestation on the repository
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            meshcore/go.sum
+
+      - name: Standard gate on the tagged commit
+        run: make gate
+
+      - name: Build release archives
+        env:
+          REVIEWMESH_VERSION: ${{ github.ref_name }}
+          REVIEWMESH_COMMIT: ${{ github.sha }}
+          REVIEWMESH_DIRTY: "false"
+        run: make dist
+
+      - name: Smoke the host archive from outside the repository
+        env:
+          REVIEWMESH_VERSION: ${{ github.ref_name }}
+        run: make smoke-dist
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/aimesh_*.tar.gz
+            dist/aimesh_*.zip
+            dist/checksums.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          cat > notes.md <<EOF
+          Built by the [Release workflow](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) from \`${SHA}\` after a green \`make gate\`.
+
+          ## Install
+
+          Download the archive for your platform, extract it, and put \`aimesh\` on your \`PATH\`.
+          Then run \`aimesh agents-md\` (or the README quick start) — every run composes its panel
+          from model CLIs you have installed and authenticated yourself.
+
+          ## Verify
+
+          Every archive and \`checksums.txt\` carry a signed build-provenance attestation:
+
+              gh attestation verify aimesh_${TAG}_<os>_<arch>.tar.gz --owner Tim-Butterfield
+
+          \`checksums.txt\` holds the SHA-256 of each archive.
+
+          ## Platforms
+
+          macOS (arm64, amd64) and Linux (amd64, arm64) are the tested targets. The **Windows archive is
+          experimental**: the code is cross-compiled and its Windows-specific branches are unit-tested,
+          but nothing has been exercised against real model CLIs or a real NTFS volume — see the README's
+          stated limitations.
+          EOF
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md --verify-tag \
+            dist/aimesh_*.tar.gz dist/aimesh_*.zip dist/checksums.txt

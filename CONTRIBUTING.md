@@ -31,10 +31,21 @@ Individual targets:
 | `make golden-run-exploremesh` | the same behavior-unchanged assertion for exploremesh |
 | `make fmt` / `make vet` | `gofmt -w .` / `go vet` across every module |
 | `make windows-build` | cross-compile every module for `GOOS=windows` (**not** part of `make gate`) |
-| `make dist` / `make smoke-dist` | build the release artifacts, and smoke them |
+| `make dist` / `make smoke-dist` | build the release archives, and smoke the host archive from outside the repo — what the release workflow runs |
 
-There is **no CI workflow in this repository** — the local gate is the enforcement point, so run it.
-The standard gate (`make gate`) must be green before a change lands. Both golden runs are part of it, so an intentional output change in either app means regenerating that app's baseline deliberately (`GOLDEN_UPDATE=1`), never loosening the comparison.
+### Releases
+
+A release is cut by pushing a tag: `git tag v0.2.0 && git push origin v0.2.0`. The
+[release workflow](.github/workflows/release.yml) re-runs `make gate` on that commit, builds the
+archives with `make dist` (version, commit and dirty flag stamped from the tag), smokes the host
+archive, attests build provenance for every artifact, and publishes the GitHub Release. Nothing is
+built on a laptop. A consumer verifies an archive with
+`gh attestation verify <archive> --owner Tim-Butterfield`. Only a repository admin can create or move
+a `v*` tag (a tag ruleset enforces it).
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make gate` on every push and pull
+request and nothing else, so the Makefile stays the single definition of green; run it locally too, so
+a red push never happens. The standard gate (`make gate`) must be green before a change lands. Both golden runs are part of it, so an intentional output change in either app means regenerating that app's baseline deliberately (`GOLDEN_UPDATE=1`), never loosening the comparison.
 
 ## The meshcore boundary
 
