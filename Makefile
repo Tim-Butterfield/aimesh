@@ -1,15 +1,14 @@
 # aimesh — developer Makefile.
-# `dist`/`smoke-dist` simulate the future release-artifact flow LOCALLY (no commit,
-# tag, push, or GitHub Actions). Artifacts land in ./dist/ (gitignored).
+# `dist`/`smoke-dist` are what the release workflow (.github/workflows/release.yml) runs on a
+# `v*` tag; locally they build unstamped dev-local archives. Artifacts land in ./dist/ (gitignored).
 .PHONY: build install test race race-all vet vet-all fmt fmt-check dist smoke-dist windows-build build-all test-all boundary-check golden-run golden-run-exploremesh gate
 
 # The aimesh "Standard gate": format + vet + build + test + race + boundary-check + a golden
 # equivalence run for EACH shipped binary (reviewmesh + exploremesh).
 #
-# This repo has NO CI, so the gate is the only enforcement point there is — which is why the cheap
-# static checks live here rather than being left to a workflow that does not exist yet. When CI
-# lands (backlog G1) it must invoke `make gate` rather than restate these steps, or the two drift
-# and the local one loses.
+# CI (.github/workflows/ci.yml) invokes THIS target and nothing else, so the cheap static checks
+# live here rather than in the workflow: this file is the single definition of green, and a
+# workflow that restated the steps would drift from it and the local one would lose.
 gate: fmt-check vet-all build-all test-all race-all boundary-check golden-run golden-run-exploremesh
 	@echo "gate: ALL GREEN"
 

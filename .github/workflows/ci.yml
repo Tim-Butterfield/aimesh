@@ -1,0 +1,38 @@
+# CI runs the SAME gate contributors run locally, and nothing else. The Makefile is the
+# single definition of what "green" means; this file only invokes it, so the two cannot drift.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: make gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            meshcore/go.sum
+
+      - name: Standard gate (fmt, vet, build, test, race, boundary, both golden runs)
+        run: make gate
+
+      # Not part of the gate (see the Makefile): the Windows build is cross-compiled to catch a
+      # compile break early, but nothing here executes on Windows or claims it works there.
+      - name: Windows cross-compile
+        run: make windows-build

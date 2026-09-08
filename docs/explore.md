@@ -273,9 +273,10 @@ writes it to the shared `~/.aimesh/adapters.yaml` both domains read.
 
 `go install` writes to `go env GOBIN`, or `$(go env GOPATH)/bin` when `GOBIN` is unset; that
 directory has to be on your `PATH`. See the [README quick start](../README.md#quick-start) for the
-`PATH` setup and the `make install` variant. Installing without cloning (`go install …/cmd/aimesh@latest`) is not
-available: the root module `replace`s the unpublished meshcore module, and that form refuses modules
-with a `replace` directive.
+`PATH` setup and the `make install` variant. Prebuilt, provenance-attested archives are on the
+[Releases page](https://github.com/Tim-Butterfield/aimesh/releases). `go install …/cmd/aimesh@latest` is
+not available: the root module `replace`s the unpublished meshcore module, and that form refuses
+modules with a `replace` directive.
 
 ## Profiles
 

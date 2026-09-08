@@ -25,15 +25,32 @@ WS="${SMOKE}/ws"
 mkdir -p "${WS}"
 printf 'package main\n\nfunc main() {}\n' > "${WS}/main.go"
 
+# Hermetic: a throwaway home so the smoke never reads a real config, and run artifacts kept
+# beside it. The fake adapter is the internal test harness (see CONTRIBUTING.md) — it is the only
+# way to drive a real end-to-end run on a machine with no model CLI installed, which is exactly
+# what a release runner is.
+export AIMESH_HOME="${SMOKE}/home"
 export REVIEWMESH_ARTIFACT_DIR="${SMOKE}/artifacts"
+export EXPLOREMESH_ARTIFACT_DIR="${SMOKE}/artifacts"
+export AIMESH_INTERNAL_FAKE=1
+mkdir -p "${AIMESH_HOME}"
 
 echo "== ${BIN} --version --json"
 "${BIN}" --version --json
 echo "== ${BIN} --help (suppressed)"
 "${BIN}" --help >/dev/null
 echo "== ${BIN} doctor"
-"${BIN}" doctor
-echo "== ${BIN} review --report ${WS}"
-"${BIN}" review --report "${WS}"
+( cd "${WS}" && "${BIN}" doctor )
+echo "== ${BIN} review list --json / explore list --json (suppressed)"
+"${BIN}" review list --json >/dev/null
+"${BIN}" explore list --json >/dev/null
+echo "== ${BIN} agents-md (suppressed)"
+"${BIN}" agents-md >/dev/null
+echo "== ${BIN} review run --report --profile fake-smoke ${WS}"
+( cd "${WS}" && "${BIN}" review run --report --profile fake-smoke . )
+echo "== ${BIN} explore run (ad-hoc fake panel)"
+( cd "${WS}" && "${BIN}" explore run "smoke: pick a queue" --criteria cost,latency \
+    --explorer adapter=fake,model=fake-a --explorer adapter=fake,model=fake-b \
+    --collator adapter=fake,model=fake-c >/dev/null )
 
 echo "smoke OK from extracted binary: ${BIN}"

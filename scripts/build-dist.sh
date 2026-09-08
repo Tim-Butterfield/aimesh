@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# build-dist.sh — LOCAL release-artifact simulation for the reviewmesh binary.
+# build-dist.sh — builds the release archives for the aimesh binary.
 #
-# This builds the same archive layout a future GitHub Actions release will produce,
-# under ./dist/, using version ldflags. It is NOT a published release: with no git
-# commit it stamps dev-local/nohead/dirty. Pure-Go (CGO disabled) so every target
-# cross-compiles locally. Generated artifacts are gitignored (never source).
+# The Release workflow (.github/workflows/release.yml) runs this on a `v*` tag with the version,
+# commit and dirty flag stamped from the tag; run locally with no variables set it stamps
+# dev-local/nohead/dirty so a local build can never be mistaken for a release. Pure-Go (CGO
+# disabled) and -trimpath, so every target cross-compiles anywhere and the same toolchain
+# reproduces the same bytes. Generated artifacts are gitignored (never source).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,8 +15,12 @@ VERSION="${REVIEWMESH_VERSION:-dev-local}"
 COMMIT="${REVIEWMESH_COMMIT:-nohead}"
 DIRTY="${REVIEWMESH_DIRTY:-true}"
 DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-PKG="github.com/Tim-Butterfield/aimesh/internal/review/version"
-LDFLAGS="-s -w -X ${PKG}.Version=${VERSION} -X ${PKG}.Commit=${COMMIT} -X ${PKG}.Date=${DATE} -X ${PKG}.Dirty=${DIRTY}"
+# Both domains carry a version package; `aimesh --version` reads one of them, each domain's own
+# surfaces read their own, so both are stamped or a surface would report `dev` from a release.
+LDFLAGS="-s -w"
+for PKG in github.com/Tim-Butterfield/aimesh/internal/review/version github.com/Tim-Butterfield/aimesh/internal/explore/version; do
+  LDFLAGS="${LDFLAGS} -X ${PKG}.Version=${VERSION} -X ${PKG}.Commit=${COMMIT} -X ${PKG}.Date=${DATE} -X ${PKG}.Dirty=${DIRTY}"
+done
 
 rm -rf "${DIST}"
 mkdir -p "${DIST}"

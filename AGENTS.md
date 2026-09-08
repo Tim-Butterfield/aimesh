@@ -17,7 +17,7 @@ A Go monorepo of three modules joined by `go.work`:
 
 ## Ground rules (do not violate)
 
-1. **The meshcore boundary is mechanically checked and mandatory** (`make boundary-check`, part of `make gate`; there is no CI workflow in this repo, so the local gate is the enforcement point):
+1. **The meshcore boundary is mechanically checked and mandatory** (`make boundary-check`, part of `make gate`, which CI runs on every push and pull request; run it locally before pushing):
    - meshcore must not import `reviewmesh`/`exploremesh`; the two apps must not import each other.
    - meshcore must not import `net/http` or any UI/frontend package.
    - No app-domain vocabulary in a meshcore **exported** identifier (`review`, `lane`, `finding`,
