@@ -34,9 +34,12 @@ func TestJSON_RetainsFullMetadata(t *testing.T) {
 // The default --version line is exactly "reviewmesh <version>" — a single user-facing
 // line with no commit/date/dirty/go/os-arch.
 func TestString_SingleUserFacingLine(t *testing.T) {
-	s := Get().String()
-	if s != "reviewmesh "+Version {
-		t.Errorf("String() = %q, want %q", s, "reviewmesh "+Version)
+	// Compared against Get().Version, not the package variable: Get may resolve a version the
+	// toolchain embedded, and the line must show whatever Get resolved.
+	i := Get()
+	s := i.String()
+	if s != "reviewmesh "+i.Version {
+		t.Errorf("String() = %q, want %q", s, "reviewmesh "+i.Version)
 	}
 	if strings.Contains(s, "\n") {
 		t.Errorf("version line must be a single line, got %q", s)

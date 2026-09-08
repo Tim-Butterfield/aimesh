@@ -6,6 +6,8 @@ package version
 import (
 	"encoding/json"
 	"runtime"
+
+	"github.com/Tim-Butterfield/aimesh/meshcore/buildinfo"
 )
 
 // These are set at build time via:
@@ -32,9 +34,12 @@ type Info struct {
 	Arch      string `json:"arch"`
 }
 
-// Get returns the current build info.
+// Get returns the current build info. The -ldflags-stamped values win when a release set them;
+// otherwise the facts the Go toolchain embedded on its own are used, so a plain
+// `go install ./cmd/aimesh` from a tagged checkout reports that tag (and a pseudo-version after
+// it) instead of "dev". "dev" remains the answer only when neither source knows better.
 func Get() Info {
-	return Info{
+	i := Info{
 		Version:   Version,
 		Commit:    Commit,
 		Date:      Date,
@@ -43,6 +48,18 @@ func Get() Info {
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
 	}
+	if Version == "dev" {
+		if f, ok := buildinfo.Read(); ok {
+			i.Version, i.Dirty = f.Version, f.Dirty
+			if f.Commit != "" {
+				i.Commit = f.Commit
+			}
+			if f.Date != "" {
+				i.Date = f.Date
+			}
+		}
+	}
+	return i
 }
 
 // String renders the single user-facing version line: "exploremesh <version>" (e.g.
