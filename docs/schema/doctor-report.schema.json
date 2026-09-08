@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aimesh.dev/schema/doctor-report.schema.json",
+  "title": "DoctorReport",
+  "description": "The machine-readable readiness projection emitted by `doctor --json`. It is produced by meshcore's domain-free doctor primitives, so both applications emit the identical shape. Exit semantics are unchanged by the rendering: a report with ok=false still exits 3.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "ok", "checks"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "ok": { "type": "boolean", "description": "the AND of every check's ok" },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "ok"],
+        "properties": {
+          "name": { "type": "string", "description": "human check name; stable enough to correlate across runs but NOT an enum — checks are composed per app" },
+          "ok": { "type": "boolean" },
+          "detail": { "type": "string" },
+          "probe": {
+            "type": "boolean",
+            "description": "true when the check came from an EXECUTED adapter probe rather than a static check. Present so a consumer can tell the two apart without pattern-matching the check name."
+          },
+          "deep": {
+            "type": "boolean",
+            "description": "true when the check came from a DEEP probe: one real, bounded model invocation in an isolated throwaway directory, which SPENT tokens. Deep implies probe. Only ever present when the operator passed --probe-deep."
+          }
+        }
+      }
+    }
+  }
+}

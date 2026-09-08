@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","result":"claude-opus-4-8[1m]","modelUsage":{"claude-opus-4-8[1m]":{"inputTokens":100,"outputTokens":15,"contextWindow":1000000}}}

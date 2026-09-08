@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="560" viewBox="0 0 1040 560" font-family="Helvetica,Arial">
+  <rect width="1040" height="560" fill="#fff"/>
+  <text x="20" y="26" font-size="15" fill="#111" font-weight="bold">reviewmesh — Static Architecture</text>
+
+  <!-- left layer labels -->
+  <text x="18" y="92"  font-size="12" fill="#555" font-weight="bold">Clients</text>
+  <text x="18" y="205" font-size="12" fill="#555" font-weight="bold">Business Logic</text>
+  <text x="18" y="314" font-size="12" fill="#555" font-weight="bold">Resource Access</text>
+  <text x="18" y="395" font-size="12" fill="#555" font-weight="bold">Resources</text>
+
+  <!-- Clients -->
+  <rect x="120" y="64" width="100" height="44" rx="5" fill="#5cb85c" stroke="#333" stroke-width="1.5"/>
+  <text x="170" y="90" font-size="13" text-anchor="middle" fill="#111">cli</text>
+  <rect x="235" y="64" width="260" height="44" rx="5" fill="#5cb85c" stroke="#333" stroke-width="1.5"/>
+  <text x="365" y="82" font-size="12" text-anchor="middle" fill="#111">ACP IDEs:</text>
+  <text x="365" y="99" font-size="12" text-anchor="middle" fill="#111">devin-desktop · zed · jetbrains · vscode</text>
+  <rect x="510" y="64" width="100" height="44" rx="5" fill="#5cb85c" stroke="#333" stroke-width="1.5"/>
+  <text x="560" y="90" font-size="13" text-anchor="middle" fill="#111">ci</text>
+
+  <line x1="20" y1="124" x2="720" y2="124" stroke="#999" stroke-width="1.2" stroke-dasharray="6 4"/>
+
+  <!-- Business Logic: Managers above Engines -->
+  <text x="120" y="146" font-size="10" fill="#888">Managers</text>
+  <rect x="120" y="150" width="180" height="42" rx="5" fill="#f5d33a" stroke="#333" stroke-width="1.5"/>
+  <text x="210" y="175" font-size="12" text-anchor="middle" fill="#111">ReviewManager</text>
+  <rect x="320" y="150" width="160" height="42" rx="5" fill="#f5d33a" stroke="#333" stroke-width="1.5"/>
+  <text x="400" y="175" font-size="12" text-anchor="middle" fill="#111">SetupManager</text>
+
+  <text x="120" y="212" font-size="10" fill="#888">Engines</text>
+  <rect x="120" y="216" width="175" height="42" rx="5" fill="#e8961e" stroke="#333" stroke-width="1.5"/>
+  <text x="207" y="241" font-size="12" text-anchor="middle" fill="#111">AdjudicationEngine</text>
+  <rect x="310" y="216" width="180" height="42" rx="5" fill="#e8961e" stroke="#333" stroke-width="1.5"/>
+  <text x="400" y="241" font-size="12" text-anchor="middle" fill="#111">RemediationEngine</text>
+  <rect x="505" y="216" width="130" height="42" rx="5" fill="#e8961e" stroke="#333" stroke-width="1.5"/>
+  <text x="570" y="241" font-size="12" text-anchor="middle" fill="#111">SetupEngine</text>
+
+  <line x1="20" y1="276" x2="720" y2="276" stroke="#999" stroke-width="1.2" stroke-dasharray="6 4"/>
+
+  <!-- Resource Access -->
+  <rect x="120" y="288" width="165" height="44" rx="5" fill="#cfcfcf" stroke="#333" stroke-width="1.5"/>
+  <text x="202" y="315" font-size="11" text-anchor="middle" fill="#111">ModelAccess (adapters)</text>
+  <rect x="295" y="288" width="160" height="44" rx="5" fill="#cfcfcf" stroke="#333" stroke-width="1.5"/>
+  <text x="375" y="315" font-size="12" text-anchor="middle" fill="#111">WorkspaceAccess</text>
+  <rect x="470" y="288" width="110" height="44" rx="5" fill="#cfcfcf" stroke="#333" stroke-width="1.5"/>
+  <text x="525" y="315" font-size="12" text-anchor="middle" fill="#111">AuditAccess</text>
+  <rect x="595" y="288" width="110" height="44" rx="5" fill="#cfcfcf" stroke="#333" stroke-width="1.5"/>
+  <text x="650" y="315" font-size="12" text-anchor="middle" fill="#111">ConfigAccess</text>
+
+  <line x1="20" y1="350" x2="720" y2="350" stroke="#999" stroke-width="1.2" stroke-dasharray="6 4"/>
+
+  <!-- Resources (cylinders) -->
+  <g stroke="#333" stroke-width="1.5" fill="#3bb8b0">
+    <path d="M120,372 L120,410 A55,9 0 0 0 230,410 L230,372 A55,9 0 0 0 120,372 Z"/>
+    <ellipse cx="175" cy="372" rx="55" ry="9"/>
+    <path d="M250,372 L250,410 A55,9 0 0 0 360,410 L360,372 A55,9 0 0 0 250,372 Z"/>
+    <ellipse cx="305" cy="372" rx="55" ry="9"/>
+    <path d="M380,372 L380,410 A55,9 0 0 0 490,410 L490,372 A55,9 0 0 0 380,372 Z"/>
+    <ellipse cx="435" cy="372" rx="55" ry="9"/>
+    <path d="M510,372 L510,410 A55,9 0 0 0 620,410 L620,372 A55,9 0 0 0 510,372 Z"/>
+    <ellipse cx="565" cy="372" rx="55" ry="9"/>
+  </g>
+  <g font-size="11" text-anchor="middle" fill="#06403c">
+    <text x="175" y="392">model CLIs /</text><text x="175" y="405">gateways</text>
+    <text x="305" y="392">workspace /</text><text x="305" y="405">filesystem</text>
+    <text x="435" y="392">run</text><text x="435" y="405">directory</text>
+    <text x="565" y="392">config</text><text x="565" y="405">store</text>
+  </g>
+
+  <!-- Utilities sidebar -->
+  <rect x="740" y="60" width="280" height="470" rx="10" fill="none" stroke="#9a4a9a" stroke-width="1.6" stroke-dasharray="6 4"/>
+  <text x="880" y="82" font-size="13" text-anchor="middle" fill="#7a2a7a" font-weight="bold">Utilities (cross-cutting)</text>
+  <g stroke="#333" stroke-width="1.5" fill="#d9a6d9">
+    <rect x="760" y="96"  width="240" height="40" rx="5"/>
+    <rect x="760" y="152" width="240" height="40" rx="5"/>
+    <rect x="760" y="208" width="240" height="40" rx="5"/>
+    <rect x="760" y="264" width="240" height="40" rx="5"/>
+    <rect x="760" y="320" width="240" height="40" rx="5"/>
+    <rect x="760" y="376" width="240" height="40" rx="5"/>
+    <rect x="760" y="432" width="240" height="40" rx="5"/>
+  </g>
+  <g font-size="12" text-anchor="middle" fill="#111">
+    <text x="880" y="120">model-verify</text>
+    <text x="880" y="176">halt / retry</text>
+    <text x="880" y="232">config / resolver</text>
+    <text x="880" y="288">reporter / prompter</text>
+    <text x="880" y="344">logging / diagnostics</text>
+    <text x="880" y="400">message / queue</text>
+    <text x="880" y="456">security / containment</text>
+  </g>
+</svg>

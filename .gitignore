@@ -1,0 +1,20 @@
+# Build and test outputs.
+# /dist/ holds the release artifacts from `make dist` / `make smoke-dist`; /aimesh is what
+# `go build ./cmd/aimesh` leaves at the repo root; *.test is `go test -c`; *.out is a coverage profile.
+/dist/
+/aimesh
+/aimesh.exe
+*.exe
+*.test
+*.out
+*.prof
+
+# go.work IS tracked here: the workspace is the build (see CONTRIBUTING.md), so the usual
+# Go-template rule that ignores it does not apply.
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Personal tooling (editor, agent and local-state directories) is NOT listed here on purpose:
+# it belongs in each contributor's global gitignore or in .git/info/exclude.

@@ -1,0 +1,19 @@
+{
+  "id": "env-21a84eab8b3075d9",
+  "identity": {
+    "adapter": "fake",
+    "model": "fake-a",
+    "effort": "high"
+  },
+  "identityStatus": "verified",
+  "identityEvidence": "invocation_tag",
+  "order": 0,
+  "payloadHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+  "response": {
+    "candidates": [
+      "Postgres",
+      "SQLite"
+    ],
+    "notes": "coverage notes from explorer A"
+  }
+}

@@ -1,0 +1,215 @@
+{
+  "decision": "3 ballot(s) cast by 3 panel member(s) (3 respondents) over 2 confirmed candidate(s) at partition ba09510bfaa1, under decision inputs frozen as 33dc2cf5b7ec [host-ballot-tally@v1]. This is an INFORMED PREFERENCE UNDER SHARED FRAMING tallied by the host — it is NOT consensus, and it is NOT `emergent` (which is host-counted blind round-1 salience: how many members independently NAMED a candidate, not how good it is).",
+  "decisionInputsHash": "33dc2cf5b7ec9c16b787772ed6dfb3199875bb33536e1077ce486caa8df0b8c0",
+  "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+  "method": "host-positional-ballot@v1",
+  "ranked": [
+    {
+      "rank": 1,
+      "canonicalId": "canon-1",
+      "name": "SQLite",
+      "score": 6,
+      "approvals": 3,
+      "support": 3,
+      "claim": {
+        "query": "ballot-over-confirmed-universe@v1",
+        "subject": "canon-1",
+        "subjectLabel": "SQLite",
+        "value": 3,
+        "kOfPanel": {
+          "k": 3,
+          "m": 3,
+          "basis": "panel"
+        },
+        "kOfRespondents": {
+          "k": 3,
+          "m": 3,
+          "basis": "respondents"
+        },
+        "formulationHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+        "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+        "rulesVersion": "exploremesh-governance-rules@v1",
+        "policyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf",
+        "baselineRoundId": "round-2",
+        "contributingSourceIds": [
+          "r2:envelope#0",
+          "r2:envelope#1",
+          "r2:envelope#2"
+        ],
+        "label": "ranked"
+      },
+      "voters": [
+        {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        },
+        {
+          "adapter": "fake",
+          "model": "fake-b",
+          "effort": "medium"
+        },
+        {
+          "adapter": "fake",
+          "model": "fake-c",
+          "effort": "low"
+        }
+      ],
+      "provenance": [
+        {
+          "explorer": {
+            "adapter": "fake",
+            "model": "fake-a",
+            "effort": "high"
+          },
+          "envelopeRef": "envelope#0",
+          "rawNomination": "SQLite"
+        },
+        {
+          "explorer": {
+            "adapter": "fake",
+            "model": "fake-b",
+            "effort": "medium"
+          },
+          "envelopeRef": "envelope#1",
+          "rawNomination": "SQLite"
+        },
+        {
+          "explorer": {
+            "adapter": "fake",
+            "model": "fake-c",
+            "effort": "low"
+          },
+          "envelopeRef": "envelope#2",
+          "rawNomination": "SQLite"
+        }
+      ],
+      "emergentSalience": {
+        "query": "corroboration-over-blind-round-1@v1",
+        "subject": "canon-1",
+        "subjectLabel": "SQLite",
+        "value": 3,
+        "kOfPanel": {
+          "k": 3,
+          "m": 3,
+          "basis": "panel"
+        },
+        "kOfRespondents": {
+          "k": 3,
+          "m": 3,
+          "basis": "respondents"
+        },
+        "formulationHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+        "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+        "rulesVersion": "exploremesh-governance-rules@v1",
+        "policyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf",
+        "baselineRoundId": "round-1",
+        "contributingSourceIds": [
+          "envelope#0",
+          "envelope#1",
+          "envelope#2"
+        ],
+        "label": "corroborated"
+      }
+    }
+  ],
+  "rejects": [
+    {
+      "rank": 2,
+      "canonicalId": "canon-0",
+      "name": "Postgres",
+      "score": 3,
+      "approvals": 0,
+      "support": 3,
+      "reason": "ranked 2 (score 3, placed by 3 ballot(s), 0 approval(s)) — below the frozen shortlist cut at rank 1",
+      "provenance": [
+        {
+          "explorer": {
+            "adapter": "fake",
+            "model": "fake-a",
+            "effort": "high"
+          },
+          "envelopeRef": "envelope#0",
+          "rawNomination": "Postgres"
+        },
+        {
+          "explorer": {
+            "adapter": "fake",
+            "model": "fake-b",
+            "effort": "medium"
+          },
+          "envelopeRef": "envelope#1",
+          "rawNomination": "Postgres"
+        },
+        {
+          "explorer": {
+            "adapter": "fake",
+            "model": "fake-c",
+            "effort": "low"
+          },
+          "envelopeRef": "envelope#2",
+          "rawNomination": "Postgres"
+        }
+      ]
+    }
+  ],
+  "criteria": [
+    {
+      "name": "cost",
+      "origin": "user",
+      "aggregationMethod": "ballot"
+    },
+    {
+      "name": "latency",
+      "origin": "user",
+      "aggregationMethod": "ballot"
+    },
+    {
+      "name": "operability",
+      "origin": "user",
+      "aggregationMethod": "ballot"
+    }
+  ],
+  "ballotsCast": 3,
+  "panelSize": 3,
+  "respondents": 3,
+  "quorumMet": true,
+  "collatorNarrative": [
+    {
+      "source": {
+        "adapter": "fake",
+        "model": "fake-collator",
+        "effort": "high"
+      },
+      "phase": "canonicalize",
+      "prose": "canonicalizer A: fake canonicalizer: clustered nominations by exact name match.\ncanonicalizer B: fake canonicalizer: clustered nominations by exact name match."
+    },
+    {
+      "source": {
+        "adapter": "fake",
+        "model": "fake-a",
+        "effort": "high"
+      },
+      "phase": "ballot",
+      "prose": "preference of voter A under the frozen criteria"
+    },
+    {
+      "source": {
+        "adapter": "fake",
+        "model": "fake-b",
+        "effort": "medium"
+      },
+      "phase": "ballot",
+      "prose": "preference of voter A under the frozen criteria"
+    },
+    {
+      "source": {
+        "adapter": "fake",
+        "model": "fake-c",
+        "effort": "low"
+      },
+      "phase": "ballot",
+      "prose": "preference of voter A under the frozen criteria"
+    }
+  ]
+}

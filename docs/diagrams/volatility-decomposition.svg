@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="830" viewBox="0 0 980 830" font-family="Helvetica,Arial">
+  <rect width="980" height="830" fill="#fff"/>
+  <text x="20" y="28" font-size="15" fill="#111" font-weight="bold">reviewmesh — Volatility-Based Decomposition</text>
+
+  <!-- Row 1 -->
+  <rect x="30" y="55" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="175" y="79" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Host-surface variation</text>
+  <rect x="60" y="110" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="175" y="135" font-size="11" fill="#111" text-anchor="middle">Clients (cli · acp · ci)</text>
+
+  <rect x="345" y="55" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="490" y="79" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Adapter / CLI variation</text>
+  <rect x="375" y="110" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="490" y="135" font-size="11" fill="#111" text-anchor="middle">ModelAccess (adapters)</text>
+
+  <rect x="660" y="55" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="805" y="79" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Review sequence &amp; mode</text>
+  <rect x="690" y="110" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="805" y="135" font-size="11" fill="#111" text-anchor="middle">ReviewManager</text>
+
+  <!-- Row 2 -->
+  <rect x="30" y="205" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="175" y="229" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Adjudication logic</text>
+  <rect x="60" y="260" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="175" y="285" font-size="11" fill="#111" text-anchor="middle">AdjudicationEngine</text>
+
+  <rect x="345" y="205" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="490" y="229" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Remediation strategy</text>
+  <rect x="375" y="260" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="490" y="285" font-size="11" fill="#111" text-anchor="middle">RemediationEngine</text>
+
+  <rect x="660" y="205" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="805" y="229" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Containment &amp; workspace I/O</text>
+  <rect x="690" y="260" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="805" y="285" font-size="11" fill="#111" text-anchor="middle">WorkspaceAccess</text>
+
+  <!-- Row 3 -->
+  <rect x="30" y="355" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="175" y="379" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Model catalog &amp; identity</text>
+  <rect x="45" y="410" width="120" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="105" y="435" font-size="11" fill="#111" text-anchor="middle">ModelCatalog</text>
+  <rect x="180" y="410" width="120" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="240" y="435" font-size="11" fill="#111" text-anchor="middle">ModelVerifier</text>
+
+  <rect x="345" y="355" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="490" y="379" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Halt / retry policy</text>
+  <rect x="360" y="410" width="120" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="420" y="435" font-size="11" fill="#111" text-anchor="middle">HaltClassifier</text>
+  <rect x="495" y="410" width="120" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="555" y="435" font-size="11" fill="#111" text-anchor="middle">RetryPolicy</text>
+
+  <rect x="660" y="355" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="805" y="379" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Audit &amp; persistence</text>
+  <rect x="690" y="410" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="805" y="435" font-size="11" fill="#111" text-anchor="middle">AuditAccess</text>
+
+  <!-- Row 4 -->
+  <rect x="30" y="505" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="175" y="529" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Configuration &amp; resolution</text>
+  <rect x="45" y="560" width="120" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="105" y="585" font-size="11" fill="#111" text-anchor="middle">Resolver</text>
+  <rect x="180" y="560" width="120" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="240" y="585" font-size="11" fill="#111" text-anchor="middle">config store</text>
+
+  <rect x="345" y="505" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="490" y="529" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Setup / repair sequence</text>
+  <rect x="375" y="560" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="490" y="585" font-size="11" fill="#111" text-anchor="middle">SetupManager</text>
+
+  <rect x="660" y="505" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="805" y="529" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Setup / repair decisions</text>
+  <rect x="690" y="560" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="805" y="585" font-size="11" fill="#111" text-anchor="middle">SetupEngine</text>
+
+  <!-- Row 5 -->
+  <rect x="30" y="655" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="175" y="679" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Configuration mutation</text>
+  <rect x="60" y="710" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="175" y="735" font-size="11" fill="#111" text-anchor="middle">ConfigAccess</text>
+
+  <rect x="345" y="655" width="290" height="130" rx="14" fill="#f5f7ff" stroke="#5577cc" stroke-width="1.6"/>
+  <text x="490" y="679" font-size="12" fill="#33509a" font-weight="bold" text-anchor="middle">Interactive prompting</text>
+  <rect x="375" y="710" width="230" height="40" rx="5" fill="#e8eefc" stroke="#333" stroke-width="1.5"/>
+  <text x="490" y="735" font-size="11" fill="#111" text-anchor="middle">Prompter · Reporter</text>
+
+  <text x="30" y="810" font-size="11" fill="#666">Each region names a volatility (what changes), not an entity or function; the encapsulating service(s) sit inside. Encapsulation view — no call arrows.</text>
+</svg>

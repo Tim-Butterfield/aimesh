@@ -1,0 +1,8 @@
+{
+  "requestedModel": "opus",
+  "evidence": "self_report",
+  "expectedActual": "Claude Opus 4.8",
+  "expectedStatus": "unknown",
+  "note": "A WEAK self-report whose display name does not clearly match the requested alias is ambiguous → unknown caveat, NOT a mismatch halt (self-report is not authoritative).",
+  "fixtureKind": "real"
+}

@@ -1,0 +1,7 @@
+{
+  "requestedModel": "claude-opus-4-8-medium",
+  "evidence": "self_report",
+  "expectedActual": "gpt-5-4-medium",
+  "expectedStatus": "unknown",
+  "fixtureKind": "synthetic"
+}

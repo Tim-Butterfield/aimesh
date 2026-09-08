@@ -1,0 +1,1 @@
+codex exec -m gpt-5.5 Output only your model identifier/name

@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/authority-manifest.schema.json",
+  "title": "AuthorityInclusionManifest",
+  "description": "Written to `authority/inclusion-manifest.json` in the run record, and projected (as the `authority` array) into the review projection, run-state.json, and the ACP prompt result. It is the auditable answer to \"which intent was this run judged against\": one entry per declared authority/context document, recording the full-content hash, the hash of EXACTLY the bytes that reached the prompt, the byte counts, and whether the inclusion was complete. Partial inclusion only ever happens through caller-declared ranges — an oversized `requireFull` document is a fail-closed halt, never a silent truncation — so `complete: false` always means the CALLER asked for less, and `embeddedHash != fullHash` proves it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documents"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "runId": { "type": "string" },
+    "documents": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/inclusion" }
+    }
+  },
+  "$defs": {
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "description": "A half-open byte range [start, end) of the document.",
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "inclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source", "fullHash", "embeddedHash", "bytesEmbedded", "bytesTotal", "complete"],
+      "properties": {
+        "name": { "type": "string", "description": "the caller's stable label for the document (unique within a run)" },
+        "source": {
+          "type": "string",
+          "enum": ["path", "inline"],
+          "description": "`path` = read root-scoped through meshcore/scope (allowed in every mode and every judging phase). `inline` = supplied by the caller; REPORT MODE ONLY, and excluded from the host-adjudication prompt (the provenance split)."
+        },
+        "mediaType": { "type": "string", "description": "advisory only; never changes how bytes are handled" },
+        "fullHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "sha256 over the document's FULL bytes — what the caller's optional `expectedHash` pin is checked against"
+        },
+        "embeddedHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "sha256 over EXACTLY the bytes that reached the prompt. Equal to fullHash for a complete inclusion; different for a ranged one — so `complete` is verifiable rather than merely asserted."
+        },
+        "bytesEmbedded": { "type": "integer", "minimum": 0 },
+        "bytesTotal": { "type": "integer", "minimum": 0 },
+        "complete": { "type": "boolean", "description": "whether the whole document was embedded" },
+        "ranges": {
+          "type": "array",
+          "description": "the caller-declared byte ranges, present only for an incomplete (ranges) inclusion",
+          "items": { "$ref": "#/$defs/range" }
+        }
+      }
+    }
+  }
+}

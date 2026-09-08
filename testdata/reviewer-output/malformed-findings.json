@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "role": "reviewer",
+  "phase": "semantic_iterate",
+  "verdict": "request_changes",
+  "findings": [
+    { "id": "F-001", "kind": "fail", "severity": "high", "title": "truncated on purpose

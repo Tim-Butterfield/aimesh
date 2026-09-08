@@ -1,0 +1,7 @@
+{
+  "requestedModel": "gpt-5.5",
+  "evidence": "self_report",
+  "expectedActual": "GPT-5 Codex",
+  "expectedStatus": "unknown",
+  "fixtureKind": "real"
+}

@@ -1,0 +1,1 @@
+REAL capture (sanitized — no session/UUID/cost/account data). macOS. Envelope from `--output-format json`; modelUsage key is the billed model. Requested matches the CLI-configured model (no --model passed; Claude Code used its configured opus-4.8).

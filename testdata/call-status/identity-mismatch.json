@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "callId": "c-0002",
+  "runId": "20260101T000000-0001",
+  "role": "cross_check",
+  "phase": "semantic_cross_check",
+  "adapter": "agy-cli",
+  "requestedModel": "google-gemini-3.1-pro-high",
+  "actualModel": "gemini-2.5-pro",
+  "nativeThinking": "unsupported (name-bound)",
+  "exitCode": 0,
+  "verificationStatus": "mismatch",
+  "resultArtifact": "calls/c-0002/reviewer-result.json",
+  "stderrArtifact": "calls/c-0002/stderr.txt",
+  "haltClass": "E",
+  "reasonCode": "model_identity_mismatch",
+  "completedAt": "2026-01-01T00:00:20Z"
+}

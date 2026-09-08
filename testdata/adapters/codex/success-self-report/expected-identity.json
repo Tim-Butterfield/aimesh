@@ -1,0 +1,7 @@
+{
+  "requestedModel": "gpt-5.5",
+  "evidence": "self_report",
+  "expectedActual": "gpt-5.5",
+  "expectedStatus": "self_reported",
+  "fixtureKind": "synthetic"
+}

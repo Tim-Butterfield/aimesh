@@ -1,0 +1,6 @@
+{
+  "result": "hello",
+  "model": "Gemini 3.1 Pro",
+  "effort": "High",
+  "source": "system metadata/user settings change notification"
+}

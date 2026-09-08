@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/halt-record.schema.json",
+  "title": "HaltRecord",
+  "description": "Written to calls/<call-id>/halt-record.json (and referenced from run-state) whenever a run halts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runId", "haltClass", "reasonCode", "occurredAt"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "runId": { "type": "string" },
+    "callId": { "type": ["string", "null"] },
+    "haltClass": { "type": "string", "enum": ["A", "B", "C", "D", "E", "F", "G", "M1", "M2", "M3", "M4", "M5", "M6"] },
+    "exitCode": { "type": "integer", "description": "the mapped public CLI exit code (0-8)", "minimum": 0, "maximum": 8 },
+    "reasonCode": {
+      "type": "string",
+      "description": "STABLE MACHINE code for the halt — lower_snake, never a sentence (e.g. adapter_exited_nonzero, containment_mutation_detected, scope_write_denied, scope_outside_root, cancelled, outer_cycle_cap_reached). Note that NO model-identity classification produces a halt record: identity is recorded as a caveat on the run and the response is used (see ../model-identity.md). An unclassified fault still yields a code derived from its exit code (usage_error, configuration_error, adapter_unavailable, containment_breach, policy_halt, internal_error), so this field is never prose. The human rendering lives in `detail`.",
+      "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$"
+    },
+    "signal": {
+      "type": "string",
+      "description": "Classified actionability hint for the underlying tool invocation, when the failure produced one (meshcore/clihint). Absent when nothing classified. It answers 'what can the operator do', where reasonCode answers 'what went wrong'.",
+      "enum": ["quota_exhausted", "folder_trust", "login_required", "model_invalid", "update_prompt", "timeout"]
+    },
+    "detail": { "type": "string", "description": "the human-readable rendering of the halt (message plus any wrapped cause)" },
+    "role": { "type": ["string", "null"], "enum": ["author_remediator", "reviewer", "cross_check", "verifier", null] },
+    "phase": { "type": "string" },
+    "adapter": { "type": "string" },
+    "requestedModel": { "type": "string" },
+    "actualModel": { "type": ["string", "null"] },
+    "attempts": { "type": "integer", "minimum": 1 },
+    "evidenceArtifact": { "type": "string", "description": "e.g. containment/mutation-diff.patch for M5" },
+    "occurredAt": { "type": "string", "format": "date-time" }
+  }
+}

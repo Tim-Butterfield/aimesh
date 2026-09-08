@@ -1,0 +1,391 @@
+{
+  "presentation": {
+    "order": [
+      "canon-0",
+      "canon-1"
+    ],
+    "seed": "493c4ad931c5dbb2aa42d847fb0983643a6b3f0d3d173d8e5633d9d110da1340",
+    "ruleVersion": "host-confirmation-rule@v1"
+  },
+  "challenges": null,
+  "resolutions": null,
+  "revision": {
+    "clusters": [
+      {
+        "canonicalId": "canon-0",
+        "name": "Postgres",
+        "members": [
+          {
+            "canonicalId": "canon-0",
+            "rawNomination": "Postgres",
+            "sourceExplorer": {
+              "adapter": "fake",
+              "model": "fake-a",
+              "effort": "high"
+            },
+            "envelopeRef": "envelope#0",
+            "singleSource": false
+          },
+          {
+            "canonicalId": "canon-0",
+            "rawNomination": "Postgres",
+            "sourceExplorer": {
+              "adapter": "fake",
+              "model": "fake-b",
+              "effort": "medium"
+            },
+            "envelopeRef": "envelope#1",
+            "singleSource": false
+          },
+          {
+            "canonicalId": "canon-0",
+            "rawNomination": "Postgres",
+            "sourceExplorer": {
+              "adapter": "fake",
+              "model": "fake-c",
+              "effort": "low"
+            },
+            "envelopeRef": "envelope#2",
+            "singleSource": false
+          }
+        ],
+        "singleSource": false
+      },
+      {
+        "canonicalId": "canon-1",
+        "name": "SQLite",
+        "members": [
+          {
+            "canonicalId": "canon-1",
+            "rawNomination": "SQLite",
+            "sourceExplorer": {
+              "adapter": "fake",
+              "model": "fake-a",
+              "effort": "high"
+            },
+            "envelopeRef": "envelope#0",
+            "singleSource": false
+          },
+          {
+            "canonicalId": "canon-1",
+            "rawNomination": "SQLite",
+            "sourceExplorer": {
+              "adapter": "fake",
+              "model": "fake-b",
+              "effort": "medium"
+            },
+            "envelopeRef": "envelope#1",
+            "singleSource": false
+          },
+          {
+            "canonicalId": "canon-1",
+            "rawNomination": "SQLite",
+            "sourceExplorer": {
+              "adapter": "fake",
+              "model": "fake-c",
+              "effort": "low"
+            },
+            "envelopeRef": "envelope#2",
+            "singleSource": false
+          }
+        ],
+        "singleSource": false
+      }
+    ],
+    "proposedDimensions": [
+      "maturity",
+      "operational-complexity"
+    ],
+    "coverageNotes": "canonicalizer A: fake canonicalizer: clustered nominations by exact name match.\ncanonicalizer B: fake canonicalizer: clustered nominations by exact name match.",
+    "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+    "ledger": {
+      "rows": [
+        {
+          "rawNomination": "Postgres",
+          "canonicalId": "canon-0",
+          "sourceExplorer": {
+            "adapter": "fake",
+            "model": "fake-a",
+            "effort": "high"
+          },
+          "envelopeRef": "envelope#0",
+          "decidedByCall": "host:host-confirmation-rule@v1",
+          "decidedByIdentity": {
+            "adapter": "",
+            "model": ""
+          },
+          "agreedBy": [
+            {
+              "call": "canonicalizer-a:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-collator",
+                "effort": "high"
+              }
+            },
+            {
+              "call": "canonicalizer-b:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              }
+            }
+          ],
+          "revision": 2
+        },
+        {
+          "rawNomination": "Postgres",
+          "canonicalId": "canon-0",
+          "sourceExplorer": {
+            "adapter": "fake",
+            "model": "fake-b",
+            "effort": "medium"
+          },
+          "envelopeRef": "envelope#1",
+          "decidedByCall": "host:host-confirmation-rule@v1",
+          "decidedByIdentity": {
+            "adapter": "",
+            "model": ""
+          },
+          "agreedBy": [
+            {
+              "call": "canonicalizer-a:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-collator",
+                "effort": "high"
+              }
+            },
+            {
+              "call": "canonicalizer-b:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              }
+            }
+          ],
+          "revision": 2
+        },
+        {
+          "rawNomination": "Postgres",
+          "canonicalId": "canon-0",
+          "sourceExplorer": {
+            "adapter": "fake",
+            "model": "fake-c",
+            "effort": "low"
+          },
+          "envelopeRef": "envelope#2",
+          "decidedByCall": "host:host-confirmation-rule@v1",
+          "decidedByIdentity": {
+            "adapter": "",
+            "model": ""
+          },
+          "agreedBy": [
+            {
+              "call": "canonicalizer-a:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-collator",
+                "effort": "high"
+              }
+            },
+            {
+              "call": "canonicalizer-b:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              }
+            }
+          ],
+          "revision": 2
+        },
+        {
+          "rawNomination": "SQLite",
+          "canonicalId": "canon-1",
+          "sourceExplorer": {
+            "adapter": "fake",
+            "model": "fake-a",
+            "effort": "high"
+          },
+          "envelopeRef": "envelope#0",
+          "decidedByCall": "host:host-confirmation-rule@v1",
+          "decidedByIdentity": {
+            "adapter": "",
+            "model": ""
+          },
+          "agreedBy": [
+            {
+              "call": "canonicalizer-a:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-collator",
+                "effort": "high"
+              }
+            },
+            {
+              "call": "canonicalizer-b:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              }
+            }
+          ],
+          "revision": 2
+        },
+        {
+          "rawNomination": "SQLite",
+          "canonicalId": "canon-1",
+          "sourceExplorer": {
+            "adapter": "fake",
+            "model": "fake-b",
+            "effort": "medium"
+          },
+          "envelopeRef": "envelope#1",
+          "decidedByCall": "host:host-confirmation-rule@v1",
+          "decidedByIdentity": {
+            "adapter": "",
+            "model": ""
+          },
+          "agreedBy": [
+            {
+              "call": "canonicalizer-a:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-collator",
+                "effort": "high"
+              }
+            },
+            {
+              "call": "canonicalizer-b:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              }
+            }
+          ],
+          "revision": 2
+        },
+        {
+          "rawNomination": "SQLite",
+          "canonicalId": "canon-1",
+          "sourceExplorer": {
+            "adapter": "fake",
+            "model": "fake-c",
+            "effort": "low"
+          },
+          "envelopeRef": "envelope#2",
+          "decidedByCall": "host:host-confirmation-rule@v1",
+          "decidedByIdentity": {
+            "adapter": "",
+            "model": ""
+          },
+          "agreedBy": [
+            {
+              "call": "canonicalizer-a:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-collator",
+                "effort": "high"
+              }
+            },
+            {
+              "call": "canonicalizer-b:canonicalize",
+              "identity": {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              }
+            }
+          ],
+          "revision": 2
+        }
+      ],
+      "revisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+      "revision": 2,
+      "priorRevisionHash": "1ebda2ad33766c229a76d2474dc612c645ef60fe65cc22f40387f365e2e08f12"
+    },
+    "canonicalizers": [
+      {
+        "call": "canonicalizer-a:canonicalize",
+        "identity": {
+          "adapter": "fake",
+          "model": "fake-collator",
+          "effort": "high"
+        }
+      },
+      {
+        "call": "canonicalizer-b:canonicalize",
+        "identity": {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        }
+      }
+    ],
+    "agreementRuleVersion": "host-confirmation-rule@v1",
+    "nominations": [
+      {
+        "raw": "Postgres",
+        "sourceExplorer": {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        },
+        "envelopeRef": "envelope#0"
+      },
+      {
+        "raw": "SQLite",
+        "sourceExplorer": {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        },
+        "envelopeRef": "envelope#0"
+      },
+      {
+        "raw": "Postgres",
+        "sourceExplorer": {
+          "adapter": "fake",
+          "model": "fake-b",
+          "effort": "medium"
+        },
+        "envelopeRef": "envelope#1"
+      },
+      {
+        "raw": "SQLite",
+        "sourceExplorer": {
+          "adapter": "fake",
+          "model": "fake-b",
+          "effort": "medium"
+        },
+        "envelopeRef": "envelope#1"
+      },
+      {
+        "raw": "Postgres",
+        "sourceExplorer": {
+          "adapter": "fake",
+          "model": "fake-c",
+          "effort": "low"
+        },
+        "envelopeRef": "envelope#2"
+      },
+      {
+        "raw": "SQLite",
+        "sourceExplorer": {
+          "adapter": "fake",
+          "model": "fake-c",
+          "effort": "low"
+        },
+        "envelopeRef": "envelope#2"
+      }
+    ]
+  },
+  "priorRevisionHash": "1ebda2ad33766c229a76d2474dc612c645ef60fe65cc22f40387f365e2e08f12",
+  "contested": null,
+  "ruleVersion": "host-confirmation-rule@v1"
+}

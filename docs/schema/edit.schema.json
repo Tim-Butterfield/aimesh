@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/edit.schema.json",
+  "title": "Edits",
+  "description": "Structured, appliable changes (search/replace blocks). The RemediationEngine returns these; WorkspaceAccess applies them; patch mode exports them as a unified diff.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/edit" },
+  "$defs": {
+    "edit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "anchor", "replacement"],
+      "properties": {
+        "file": { "type": "string", "description": "workspace-relative path" },
+        "anchor": { "type": "string", "description": "exact pre-image text to locate (the whole prior file for a full replacement)" },
+        "replacement": { "type": "string" },
+        "occurrence": { "type": "integer", "minimum": 0, "default": 0, "description": "1-based; 0 = unique/all" }
+      }
+    }
+  }
+}

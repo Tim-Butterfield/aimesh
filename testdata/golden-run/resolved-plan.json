@@ -1,0 +1,22 @@
+{
+  "Mode": "report",
+  "Surface": "cli",
+  "Lanes": {
+    "author_remediator": {
+      "Role": "author_remediator",
+      "Execution": "host",
+      "Adapter": "fake",
+      "Model": "fake-model",
+      "ModelArg": "fake-1",
+      "Effort": ""
+    },
+    "reviewer": {
+      "Role": "reviewer",
+      "Execution": "adapter",
+      "Adapter": "fake",
+      "Model": "fake-model",
+      "ModelArg": "fake-1",
+      "Effort": ""
+    }
+  }
+}

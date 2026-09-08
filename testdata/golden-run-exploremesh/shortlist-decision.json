@@ -1,0 +1,175 @@
+{
+  "frozen": {
+    "inputs": {
+      "rulesVersion": "exploremesh-governance-rules@v1",
+      "method": "host-positional-ballot@v1",
+      "universeRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+      "presentation": {
+        "order": [
+          "canon-1",
+          "canon-0"
+        ],
+        "seed": "4db0b29b456ab564716019ce194a06fc0592ee22fd86257bfb7d4e5bd2dc9033",
+        "ruleVersion": "host-confirmation-rule@v1"
+      },
+      "criteria": [
+        {
+          "name": "cost",
+          "origin": "user",
+          "aggregationMethod": "ballot"
+        },
+        {
+          "name": "latency",
+          "origin": "user",
+          "aggregationMethod": "ballot"
+        },
+        {
+          "name": "operability",
+          "origin": "user",
+          "aggregationMethod": "ballot"
+        }
+      ],
+      "shortlistSize": 1,
+      "quorum": 2,
+      "tieRule": "withhold_no_winner",
+      "missingResponse": "exclude_from_respondents",
+      "policyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf"
+    },
+    "inputsHash": "33dc2cf5b7ec9c16b787772ed6dfb3199875bb33536e1077ce486caa8df0b8c0"
+  },
+  "ballots": [
+    {
+      "by": {
+        "adapter": "fake",
+        "model": "fake-a",
+        "effort": "high"
+      },
+      "envelopeRef": "r2:envelope#0",
+      "ranking": [
+        "canon-1",
+        "canon-0"
+      ],
+      "approved": [
+        "canon-1"
+      ]
+    },
+    {
+      "by": {
+        "adapter": "fake",
+        "model": "fake-b",
+        "effort": "medium"
+      },
+      "envelopeRef": "r2:envelope#1",
+      "ranking": [
+        "canon-1",
+        "canon-0"
+      ],
+      "approved": [
+        "canon-1"
+      ]
+    },
+    {
+      "by": {
+        "adapter": "fake",
+        "model": "fake-c",
+        "effort": "low"
+      },
+      "envelopeRef": "r2:envelope#2",
+      "ranking": [
+        "canon-1",
+        "canon-0"
+      ],
+      "approved": [
+        "canon-1"
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "rank": 1,
+      "canonicalId": "canon-1",
+      "name": "SQLite",
+      "score": 6,
+      "approvals": 3,
+      "support": 3,
+      "voters": [
+        {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        },
+        {
+          "adapter": "fake",
+          "model": "fake-b",
+          "effort": "medium"
+        },
+        {
+          "adapter": "fake",
+          "model": "fake-c",
+          "effort": "low"
+        }
+      ],
+      "tied": false,
+      "shortlisted": true,
+      "claim": {
+        "query": "ballot-over-confirmed-universe@v1",
+        "subject": "canon-1",
+        "subjectLabel": "SQLite",
+        "value": 3,
+        "kOfPanel": {
+          "k": 3,
+          "m": 3,
+          "basis": "panel"
+        },
+        "kOfRespondents": {
+          "k": 3,
+          "m": 3,
+          "basis": "respondents"
+        },
+        "formulationHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+        "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+        "rulesVersion": "exploremesh-governance-rules@v1",
+        "policyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf",
+        "baselineRoundId": "round-2",
+        "contributingSourceIds": [
+          "r2:envelope#0",
+          "r2:envelope#1",
+          "r2:envelope#2"
+        ],
+        "label": "ranked"
+      }
+    },
+    {
+      "rank": 2,
+      "canonicalId": "canon-0",
+      "name": "Postgres",
+      "score": 3,
+      "approvals": 0,
+      "support": 3,
+      "voters": [
+        {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        },
+        {
+          "adapter": "fake",
+          "model": "fake-b",
+          "effort": "medium"
+        },
+        {
+          "adapter": "fake",
+          "model": "fake-c",
+          "effort": "low"
+        }
+      ],
+      "tied": false,
+      "shortlisted": false,
+      "reason": "ranked 2 (score 3, placed by 3 ballot(s), 0 approval(s)) — below the frozen shortlist cut at rank 1"
+    }
+  ],
+  "cast": 3,
+  "quorumMet": true,
+  "ruleVersion": "host-ballot-tally@v1",
+  "rendering": "3 ballot(s) cast by 3 panel member(s) (3 respondents) over 2 confirmed candidate(s) at partition ba09510bfaa1, under decision inputs frozen as 33dc2cf5b7ec [host-ballot-tally@v1]. This is an INFORMED PREFERENCE UNDER SHARED FRAMING tallied by the host — it is NOT consensus, and it is NOT `emergent` (which is host-counted blind round-1 salience: how many members independently NAMED a candidate, not how good it is)."
+}

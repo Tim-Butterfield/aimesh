@@ -1,0 +1,19 @@
+{
+  "completedAt": "<TS>",
+  "outputMode": "report",
+  "roles": {
+    "author_remediator": {
+      "adapter": "fake",
+      "requestedModel": "fake-1"
+    },
+    "reviewer": {
+      "adapter": "fake",
+      "requestedModel": "fake-1"
+    }
+  },
+  "runId": "<RUNID>",
+  "schemaVersion": 1,
+  "startedAt": "<TS>",
+  "status": "stable",
+  "surface": "cli"
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/panel-roster.schema.json",
+  "title": "reviewmesh panel roster",
+  "description": "`panel/roster.json` — the EXECUTED ROSTER of a run's blind primary reviewer panel. It carries one entry per REQUESTED seat, in requested order, including seats that halted or never started: N seats requested is N seats accounted for, or a clear failure. It is the audit-record twin of the `panel[]` block in the run projection and the ACP `_meta.reviewmesh` echo, and it is written on a halt too, so a failed run still records what the panel was.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runId", "seats"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "runId": { "type": "string" },
+    "seats": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The panel, in AUTHORED order. There is no privileged size: a one-seat panel (the historical single reviewer) and a sixteen-seat panel are the same shape.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["seatId", "index", "adapter", "model", "status", "rounds", "findings"],
+        "properties": {
+          "seatId": { "type": "string", "description": "reviewer | reviewer-2 | reviewer-3 | … — seat 1 keeps the bare role name, so a panel of one records exactly what a pre-panel build recorded" },
+          "index": { "type": "integer", "minimum": 1, "description": "1-based position in the requested panel" },
+          "adapter": { "type": "string" },
+          "model": { "type": "string", "description": "model-catalog key" },
+          "effort": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["completed", "budget_capped", "halted", "not_started"],
+            "description": "completed = ran and produced a schema-valid result; budget_capped = completed, but the run-level round budget stopped further stabilization rounds (its findings are kept); halted = this seat's failure halted the RUN — there is no partial-panel success; not_started = the run halted on an earlier-indexed seat first"
+          },
+          "rounds": { "type": "integer", "minimum": 0, "description": "stabilization rounds this seat actually ran" },
+          "findings": { "type": "integer", "minimum": 0, "description": "raw findings this seat reported across its rounds, BEFORE host dedup" },
+          "identityTier": {
+            "type": "string",
+            "enum": ["verified", "self_reported", "unknown", ""],
+            "description": "the WEAKEST identity classification observed across this seat's calls (fail closed). A finding supported only by weak-tier seats is reported but never applied."
+          },
+          "reasonCode": { "type": "string", "description": "stable machine code when the seat did not complete normally (e.g. model_identity_mismatch, adapter_exited_nonzero, reviewer_result_unparseable, panel_round_budget_exhausted)" },
+          "signal": { "type": "string", "enum": ["quota_exhausted", "folder_trust", "login_required", "model_invalid", "update_prompt", "timeout"], "description": "THIS SEAT'S own actionable classification. A panel dispatches every seat concurrently, so a halted run has usually paid for several failures with DIFFERENT causes, while the run-level halt record can name only the first by index. This is where the others are recorded." },
+          "detail": { "type": "string", "description": "this seat's own one-line cause, in the same words the run-level halt uses when they are the same failure" }
+        }
+      }
+    }
+  }
+}

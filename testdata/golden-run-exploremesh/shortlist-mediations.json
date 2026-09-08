@@ -1,0 +1,96 @@
+[
+  {
+    "roundIndex": 2,
+    "artifact": {
+      "discriminant": {
+        "mode": "shortlist",
+        "roundIndex": 1,
+        "kind": "canonical_uniques"
+      },
+      "schemaVersion": 1,
+      "producerRoundId": "round-1",
+      "contentHash": "5a95cd020ccd0db6e2fe9cab38898c684e77102e3b107ce4b201ee3640bdda5f",
+      "sourceEnvelopeRefs": [
+        "envelope#0",
+        "envelope#1",
+        "envelope#2"
+      ],
+      "trust": "host_derived",
+      "payload": {
+        "items": [
+          {
+            "ref": "canon-1",
+            "text": "SQLite (nominated as: SQLite)",
+            "attribution": [
+              {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              },
+              {
+                "adapter": "fake",
+                "model": "fake-b",
+                "effort": "medium"
+              },
+              {
+                "adapter": "fake",
+                "model": "fake-c",
+                "effort": "low"
+              }
+            ]
+          },
+          {
+            "ref": "canon-0",
+            "text": "Postgres (nominated as: Postgres)",
+            "attribution": [
+              {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              },
+              {
+                "adapter": "fake",
+                "model": "fake-b",
+                "effort": "medium"
+              },
+              {
+                "adapter": "fake",
+                "model": "fake-c",
+                "effort": "low"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "shownTo": [
+      {
+        "explorer": {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        },
+        "roundIndex": 2,
+        "contentHash": "5a95cd020ccd0db6e2fe9cab38898c684e77102e3b107ce4b201ee3640bdda5f"
+      },
+      {
+        "explorer": {
+          "adapter": "fake",
+          "model": "fake-b",
+          "effort": "medium"
+        },
+        "roundIndex": 2,
+        "contentHash": "5a95cd020ccd0db6e2fe9cab38898c684e77102e3b107ce4b201ee3640bdda5f"
+      },
+      {
+        "explorer": {
+          "adapter": "fake",
+          "model": "fake-c",
+          "effort": "low"
+        },
+        "roundIndex": 2,
+        "contentHash": "5a95cd020ccd0db6e2fe9cab38898c684e77102e3b107ce4b201ee3640bdda5f"
+      }
+    ]
+  }
+]

@@ -1,0 +1,33 @@
+Exploration complete.
+  explorers: 3 in panel, 0 dropped
+
+Shortlist: shortlist: 1 of 2 candidate(s) ranked by a host tally of 3 ballot(s) (3 panel / 3 respondents) — 1 definitive, 0 WITHHELD; informed preference under shared framing, not consensus [inputs 33dc2cf5b7ec]
+
+3 ballot(s) cast by 3 panel member(s) (3 respondents) over 2 confirmed candidate(s) at partition ba09510bfaa1, under decision inputs frozen as 33dc2cf5b7ec [host-ballot-tally@v1]. This is an INFORMED PREFERENCE UNDER SHARED FRAMING tallied by the host — it is NOT consensus, and it is NOT `emergent` (which is host-counted blind round-1 salience: how many members independently NAMED a candidate, not how good it is).
+  method: host-positional-ballot@v1; decision inputs frozen as 33dc2cf5b7ec9c16b787772ed6dfb3199875bb33536e1077ce486caa8df0b8c0 (hashed BEFORE the ballot was solicited)
+  partition revision: ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b (surjectivity holds; 6 ledger row(s))
+  governance: 3 claim(s) over 3 panel member(s) (3 respondents) — 2 corroborated, 0 single-source, 1 ranked, 0 withheld [rules exploremesh-governance-rules@v1]
+  frozen counting policy: 120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf
+
+Frozen criteria (origin / aggregation method):
+  - cost [user / ballot]
+  - latency [user / ballot]
+  - operability [user / ballot]
+
+Ranked (host tally over the confirmed candidate universe):
+  1. SQLite — ranked (score 6, 3 approval(s))
+      placed by 3 of 3 panel / 3 of 3 respondents
+      emergent salience (blind round 1, a DIFFERENT measurement): 3 of 3 panel — corroborated
+      · nominated as "SQLite" by (fake, fake-a, high)
+      · nominated as "SQLite" by (fake, fake-b, medium)
+      · nominated as "SQLite" by (fake, fake-c, low)
+
+Not shortlisted (carried with the host's reason — a nominated candidate is never dropped):
+  2. Postgres — ranked 2 (score 3, placed by 3 ballot(s), 0 approval(s)) — below the frozen shortlist cut at rank 1
+
+Collator narrative (MODEL PROSE — carries no governance value):
+  - [canonicalize] (fake, fake-collator, high): canonicalizer A: fake canonicalizer: clustered nominations by exact name match.
+canonicalizer B: fake canonicalizer: clustered nominations by exact name match.
+  - [ballot] (fake, fake-a, high): preference of voter A under the frozen criteria
+  - [ballot] (fake, fake-b, medium): preference of voter A under the frozen criteria
+  - [ballot] (fake, fake-c, low): preference of voter A under the frozen criteria

@@ -1,0 +1,158 @@
+{
+  "panel": {
+    "members": [
+      {
+        "adapter": "fake",
+        "model": "fake-a",
+        "effort": "high"
+      },
+      {
+        "adapter": "fake",
+        "model": "fake-b",
+        "effort": "medium"
+      },
+      {
+        "adapter": "fake",
+        "model": "fake-c",
+        "effort": "low"
+      }
+    ],
+    "selected": 3,
+    "policy": {
+      "rulesVersion": "exploremesh-governance-rules@v1",
+      "quorum": 2,
+      "tieRule": "withhold_no_winner",
+      "missingResponse": "exclude_from_respondents"
+    },
+    "policyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf",
+    "outcome": {
+      "dispatched": 3,
+      "eligible": 3,
+      "technicalAbsence": 0,
+      "deliberateAbstention": 0
+    }
+  },
+  "rulesVersion": "exploremesh-governance-rules@v1",
+  "claims": [
+    {
+      "query": "corroboration-over-blind-round-1@v1",
+      "subject": "canon-0",
+      "subjectLabel": "Postgres",
+      "value": 3,
+      "kOfPanel": {
+        "k": 3,
+        "m": 3,
+        "basis": "panel"
+      },
+      "kOfRespondents": {
+        "k": 3,
+        "m": 3,
+        "basis": "respondents"
+      },
+      "formulationHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+      "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+      "rulesVersion": "exploremesh-governance-rules@v1",
+      "policyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf",
+      "baselineRoundId": "round-1",
+      "contributingSourceIds": [
+        "envelope#0",
+        "envelope#1",
+        "envelope#2"
+      ],
+      "label": "corroborated"
+    },
+    {
+      "query": "corroboration-over-blind-round-1@v1",
+      "subject": "canon-1",
+      "subjectLabel": "SQLite",
+      "value": 3,
+      "kOfPanel": {
+        "k": 3,
+        "m": 3,
+        "basis": "panel"
+      },
+      "kOfRespondents": {
+        "k": 3,
+        "m": 3,
+        "basis": "respondents"
+      },
+      "formulationHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+      "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+      "rulesVersion": "exploremesh-governance-rules@v1",
+      "policyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf",
+      "baselineRoundId": "round-1",
+      "contributingSourceIds": [
+        "envelope#0",
+        "envelope#1",
+        "envelope#2"
+      ],
+      "label": "corroborated"
+    },
+    {
+      "query": "ballot-over-confirmed-universe@v1",
+      "subject": "canon-1",
+      "subjectLabel": "SQLite",
+      "value": 3,
+      "kOfPanel": {
+        "k": 3,
+        "m": 3,
+        "basis": "panel"
+      },
+      "kOfRespondents": {
+        "k": 3,
+        "m": 3,
+        "basis": "respondents"
+      },
+      "formulationHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+      "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+      "rulesVersion": "exploremesh-governance-rules@v1",
+      "policyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf",
+      "baselineRoundId": "round-2",
+      "contributingSourceIds": [
+        "r2:envelope#0",
+        "r2:envelope#1",
+        "r2:envelope#2"
+      ],
+      "label": "ranked"
+    }
+  ],
+  "claimsHash": "ea14e420c5bf1b19bbef36c221aa01b02120ff94d831455fc23f65eb5bc8df89",
+  "collatorNarrative": [
+    {
+      "source": {
+        "adapter": "fake",
+        "model": "fake-collator",
+        "effort": "high"
+      },
+      "phase": "canonicalize",
+      "prose": "canonicalizer A: fake canonicalizer: clustered nominations by exact name match.\ncanonicalizer B: fake canonicalizer: clustered nominations by exact name match."
+    },
+    {
+      "source": {
+        "adapter": "fake",
+        "model": "fake-a",
+        "effort": "high"
+      },
+      "phase": "ballot",
+      "prose": "preference of voter A under the frozen criteria"
+    },
+    {
+      "source": {
+        "adapter": "fake",
+        "model": "fake-b",
+        "effort": "medium"
+      },
+      "phase": "ballot",
+      "prose": "preference of voter A under the frozen criteria"
+    },
+    {
+      "source": {
+        "adapter": "fake",
+        "model": "fake-c",
+        "effort": "low"
+      },
+      "phase": "ballot",
+      "prose": "preference of voter A under the frozen criteria"
+    }
+  ]
+}

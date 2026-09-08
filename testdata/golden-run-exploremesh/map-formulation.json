@@ -1,0 +1,45 @@
+{
+  "source": "formulation-free (map)",
+  "collatorAttempted": false,
+  "payload": {
+    "finalPrompt": "Explore the following task and respond with a SINGLE JSON object. Output ONLY the JSON object — no prose before or after it, and no markdown code fences.\n\nPurpose:\nchoose a datastore for the ingest service\n\nCriteria the response must satisfy:\n- cost\n- latency\n- operability\n\nThe JSON object MUST contain EXACTLY these fields — put your FULL answer into them:\n- \"claims\": array of strings (required)\n- \"evidence\": string (required)\n- \"confidence\": number (required)\n- \"sources\": array of strings (required)\n- \"assumptions\": array of strings (required)\n- \"uncertainties\": array of strings (required)\nWhere: \"claims\" is your list of key assertions/findings (the substance of your answer, as many as needed); \"evidence\" is the supporting reasoning; \"confidence\" is a number 0..1; \"sources\" lists the fields/frameworks/literature you drew on; \"assumptions\" are assumptions you made; \"uncertainties\" are open questions or weak points.\n",
+    "expandedSchema": {
+      "fields": [
+        {
+          "name": "claims",
+          "type": "string",
+          "required": true,
+          "repeated": true
+        },
+        {
+          "name": "evidence",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "confidence",
+          "type": "number",
+          "required": true
+        },
+        {
+          "name": "sources",
+          "type": "string",
+          "required": true,
+          "repeated": true
+        },
+        {
+          "name": "assumptions",
+          "type": "string",
+          "required": true,
+          "repeated": true
+        },
+        {
+          "name": "uncertainties",
+          "type": "string",
+          "required": true,
+          "repeated": true
+        }
+      ]
+    }
+  }
+}

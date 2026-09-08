@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/patch-summary.schema.json",
+  "title": "PatchSummary",
+  "description": "Summary of the patch/apply output for a run; pairs with patches/changes.patch.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mode", "files"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "mode": { "type": "string", "enum": ["patch", "apply"] },
+    "patchArtifact": { "type": "string", "description": "e.g. patches/changes.patch" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "editCount"],
+        "properties": {
+          "file": { "type": "string" },
+          "editCount": { "type": "integer", "minimum": 1 },
+          "applied": { "type": "boolean", "description": "true in apply mode after Commit; false in patch mode" }
+        }
+      }
+    }
+  }
+}

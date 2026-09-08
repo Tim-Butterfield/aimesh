@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "role": "reviewer",
+  "phase": "semantic_iterate",
+  "summary": "Two issues: an unchecked error and a missing bounds check.",
+  "verdict": "request_changes",
+  "findings": [
+    {
+      "id": "F-001",
+      "kind": "fail",
+      "severity": "high",
+      "title": "Unchecked error from os.Open",
+      "detail": "The returned error is ignored; a missing file would nil-panic later.",
+      "suggestion": "Return or handle the error from os.Open before using the file.",
+      "file": "main.go",
+      "location": "42-45",
+      "source": "reviewer",
+      "primitive": "P1"
+    },
+    {
+      "id": "F-002",
+      "kind": "risk",
+      "severity": "medium",
+      "title": "Slice index not bounds-checked",
+      "detail": "args[1] is read without verifying len(args) > 1.",
+      "suggestion": "Guard with a length check and print usage on failure.",
+      "file": "main.go",
+      "location": "12",
+      "source": "reviewer",
+      "primitive": "P1"
+    }
+  ]
+}

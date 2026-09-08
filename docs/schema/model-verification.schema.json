@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/model-verification.schema.json",
+  "title": "ModelVerification",
+  "description": "Written to calls/<call-id>/model-verification.json for every spawned call.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "role", "adapter", "requestedModel", "actualModel", "identityEvidence", "verificationStatus", "success", "rawIdentityText", "verifiedAt"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "role": { "type": "string", "enum": ["author_remediator", "reviewer", "cross_check", "verifier"] },
+    "adapter": { "type": "string" },
+    "requestedModel": { "type": "string" },
+    "actualModel": { "type": "string", "description": "the model the adapter reported actually answered ('' if none)" },
+    "identityEvidence": { "type": "string", "enum": ["envelope", "trace", "cli_status", "invocation_tag", "self_report", "none"] },
+    "verificationStatus": { "type": "string", "enum": ["verified", "self_reported", "unknown", "mismatch", "unverified"], "description": "verified (strong evidence matches), self_reported (weak self-report matches — never promoted to verified), unknown (no/weak evidence or a self-report that doesn't clearly match), mismatch (a different model under STRONG evidence). All four are RECORDED and none of them halts a run or suppresses the response — identity is provenance metadata for the reader, not a gate. unverified is the fifth value and is set by a non-identity halt: containment/cancel/invocation." },
+    "success": { "type": "boolean", "description": "true ONLY when verificationStatus is verified (strong identity verification). A weak self_reported identity is accepted but is success=false (never conflated with verified); unknown/mismatch/unverified are also false. verificationStatus carries the precise disposition." },
+    "rawIdentityText": { "type": "string", "description": "sanitized identity text (model string only; never secrets)" },
+    "verifiedAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "role": "reviewer",
+  "phase": "semantic_iterate",
+  "summary": "Same underlying issue reported twice (different titles, same kind+file+location).",
+  "verdict": "request_changes",
+  "findings": [
+    {
+      "id": "F-001",
+      "kind": "fail",
+      "severity": "medium",
+      "title": "Unchecked error",
+      "detail": "os.Open error ignored.",
+      "file": "main.go",
+      "location": "42-45",
+      "source": "reviewer"
+    },
+    {
+      "id": "F-002",
+      "kind": "fail",
+      "severity": "high",
+      "title": "Error from file open is dropped",
+      "detail": "Same location; should dedupe to one finding, keeping the higher severity.",
+      "file": "main.go",
+      "location": "42-45",
+      "source": "reviewer"
+    }
+  ]
+}

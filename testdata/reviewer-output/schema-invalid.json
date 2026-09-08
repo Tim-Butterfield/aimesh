@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "role": "reviewer",
+  "phase": "semantic_iterate",
+  "summary": "Parses as JSON but violates the schema (bad kind enum; missing severity).",
+  "verdict": "request_changes",
+  "findings": [
+    {
+      "id": "F-001",
+      "kind": "bug",
+      "title": "Invalid 'kind' value and no 'severity'",
+      "file": "main.go",
+      "location": "42"
+    }
+  ]
+}

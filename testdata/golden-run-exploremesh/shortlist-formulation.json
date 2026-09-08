@@ -1,0 +1,22 @@
+{
+  "source": "formulation-free (map)",
+  "collatorAttempted": false,
+  "payload": {
+    "finalPrompt": "Enumerate the CANDIDATE OPTIONS for the following decision — as many DISTINCT, plausible candidates as you can surface. This round is NOT the choice: do not rank, do not recommend, and do not pre-filter to the obvious few. You will be asked to choose in a later round, over the whole panel's combined candidate set. Respond with a SINGLE JSON object. Output ONLY the JSON object — no prose before or after it, and no markdown code fences.\n\nDecision to be made:\nchoose a datastore for the ingest service\n\nCriteria the chosen option must satisfy:\n- cost\n- latency\n- operability\n\nThe JSON object MUST contain EXACTLY these fields:\n- \"candidates\": array of strings (required)\n- \"notes\": string (optional)\nWhere: \"candidates\" is your list of distinct candidate options (each a short, self-contained label); \"notes\" is any brief context on your coverage.\n",
+    "expandedSchema": {
+      "fields": [
+        {
+          "name": "candidates",
+          "type": "string",
+          "required": true,
+          "repeated": true
+        },
+        {
+          "name": "notes",
+          "type": "string",
+          "required": false
+        }
+      ]
+    }
+  }
+}

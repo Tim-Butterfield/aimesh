@@ -1,0 +1,1 @@
+REAL capture (sanitized — no session/UUID/cost/account data). macOS. `--json` event stream carried only an agent_message item with text "GPT-5 Codex" (extracted here) — no structured model-identity field. `-m gpt-5.5` accepted; effort flag accepted. Self-reported name != requested slug → unverified.

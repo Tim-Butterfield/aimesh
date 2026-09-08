@@ -1,0 +1,19 @@
+{
+  "id": "env-bc204ef9b649b9dc",
+  "identity": {
+    "adapter": "fake",
+    "model": "fake-c",
+    "effort": "low"
+  },
+  "identityStatus": "verified",
+  "identityEvidence": "invocation_tag",
+  "order": 2,
+  "payloadHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+  "response": {
+    "candidates": [
+      "Postgres",
+      "SQLite"
+    ],
+    "notes": "coverage notes from explorer A"
+  }
+}

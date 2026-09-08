@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 7,
+  "runId": "<RUNID>",
+  "status": "complete",
+  "mode": "shortlist",
+  "envelopeIdAlgo": "v1",
+  "payloadHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+  "explorers": [
+    {
+      "adapter": "fake",
+      "model": "fake-a",
+      "effort": "high"
+    },
+    {
+      "adapter": "fake",
+      "model": "fake-b",
+      "effort": "medium"
+    },
+    {
+      "adapter": "fake",
+      "model": "fake-c",
+      "effort": "low"
+    }
+  ],
+  "collator": {
+    "adapter": "fake",
+    "model": "fake-collator",
+    "effort": "high"
+  },
+  "envelopes": [
+    {
+      "alias": "envelope#0",
+      "id": "env-21a84eab8b3075d9",
+      "order": 0,
+      "primaryEligible": true
+    },
+    {
+      "alias": "envelope#1",
+      "id": "env-4444d4e9af07f5a9",
+      "order": 1,
+      "primaryEligible": true
+    },
+    {
+      "alias": "envelope#2",
+      "id": "env-bc204ef9b649b9dc",
+      "order": 2,
+      "primaryEligible": true
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "task.json",
+      "bytes": 149,
+      "sha256": "1297f5e5eb6c8dd31c2b83abf847da55014997c64380c259d0132bf3a799a4f5"
+    },
+    {
+      "path": "formulation.json",
+      "bytes": 1283,
+      "sha256": "628a7fa53d39b2432ef3a0eb662879d7742a45a7e16e21f13ef02a40ba68f506"
+    },
+    {
+      "path": "synthesis.json",
+      "bytes": 6076,
+      "sha256": "8f1f7dc0b4ad095eaf0cb47a3b786469b08f9e723b0f7ffb6d60b1e75694e194"
+    },
+    {
+      "path": "canonicalizer-prompt.txt",
+      "bytes": 2121,
+      "sha256": "89d5744cc4c7e0823133b43c02089c4cb954ace3f5c2c3835645de1d76fdfab8"
+    },
+    {
+      "path": "raw-canonicalization.txt",
+      "bytes": 288,
+      "sha256": "dd771fc55e18e0ee15165fcd23e32ebfcd1dd815e6c94ab2573e39ed527469f9"
+    },
+    {
+      "path": "merge-ledger.jsonl",
+      "bytes": 2894,
+      "sha256": "99e54a9e881bfbabcd4fcec66342a9c9609545ba00714c0138730a1d347022c1"
+    },
+    {
+      "path": "merge-ledger-provisional.jsonl",
+      "bytes": 2834,
+      "sha256": "4c6d3cfd9323860ff4ac4f0017d8a82c8cb260e7c68acebe4317a935349fa0fc"
+    },
+    {
+      "path": "confirmation-prompt.txt",
+      "bytes": 2519,
+      "sha256": "a444fa5520e7299e34663fd4589561009da7a67a938f50b78a0e97e2726f012c"
+    },
+    {
+      "path": "confirmation.json",
+      "bytes": 10711,
+      "sha256": "f7b20c6ea4ca99682062b35d3a3e50790a75e4a6fdef33e943bcc68f597105ff"
+    },
+    {
+      "path": "preflight.json",
+      "bytes": 608,
+      "sha256": "bfadbcdc9ffb0b2beb9cab207c83b5cea0b4485cb9d5bc6b308e716826fcaccb"
+    },
+    {
+      "path": "rounds.json",
+      "bytes": 5414,
+      "sha256": "549e910b0eb40993e31ab285ed19eb4989977275d0620d267d0a72b4b20df001"
+    },
+    {
+      "path": "mediations.json",
+      "bytes": 2416,
+      "sha256": "c8e73bf0709c55e8c0e061ca6221b25bc29fa674b1c93b1ff9df2a8b298fdad2"
+    },
+    {
+      "path": "round-2-prompt.txt",
+      "bytes": 4006,
+      "sha256": "bb0f4b63e43e9b5dcfec6135fd6acdec86e54498ed796f3825806f70c5317ce1"
+    },
+    {
+      "path": "governance-claims.json",
+      "bytes": 4422,
+      "sha256": "a2d7026419190016e6ae78cbe36048f8589a993442dff7907c02aa6effd174cd"
+    },
+    {
+      "path": "decision.json",
+      "bytes": 4622,
+      "sha256": "e55b366ace54e055bd79139a73d827514de226fd3749e701631965c70ab33bd7"
+    },
+    {
+      "path": "calls/envelope-0/raw.txt",
+      "bytes": 77,
+      "sha256": "335e7c92c0db05e767b085b2e086dda7ed67643ed4d8bf012050a4efe43e63f2"
+    },
+    {
+      "path": "calls/envelope-0/envelope.json",
+      "bytes": 420,
+      "sha256": "4f818673968afc4b34d88e23f4a69f931085e2f3967419a274fb506021c1c49d"
+    },
+    {
+      "path": "calls/envelope-1/raw.txt",
+      "bytes": 77,
+      "sha256": "335e7c92c0db05e767b085b2e086dda7ed67643ed4d8bf012050a4efe43e63f2"
+    },
+    {
+      "path": "calls/envelope-1/envelope.json",
+      "bytes": 422,
+      "sha256": "7d26652be8c182c534b0e40d7bd78d218e6c7800df9a7bad0009a74799135058"
+    },
+    {
+      "path": "calls/envelope-2/raw.txt",
+      "bytes": 77,
+      "sha256": "335e7c92c0db05e767b085b2e086dda7ed67643ed4d8bf012050a4efe43e63f2"
+    },
+    {
+      "path": "calls/envelope-2/envelope.json",
+      "bytes": 419,
+      "sha256": "4d7f4a75bd7ea3797fd4772ac18eb7c1775aa42c619c2f1ad85b151ba9690217"
+    }
+  ],
+  "partitionRevisionHash": "ba09510bfaa19ebcf636f278574dcccd6eb479e3bc5613c3e221b5464f11614b",
+  "surjectivity": "holds",
+  "ledgerRows": 6,
+  "canonicalizers": [
+    {
+      "adapter": "fake",
+      "model": "fake-collator",
+      "effort": "high"
+    },
+    {
+      "adapter": "fake",
+      "model": "fake-a",
+      "effort": "high"
+    }
+  ],
+  "canonicalizerProvenance": "derived",
+  "canonicalizerIndependence": "distinct_models",
+  "rounds": 2,
+  "ledgerRevision": 2,
+  "priorRevisionHash": "1ebda2ad33766c229a76d2474dc612c645ef60fe65cc22f40387f365e2e08f12",
+  "confirmationRule": "host-confirmation-rule@v1",
+  "agreementRuleVersion": "host-confirmation-rule@v1",
+  "countingPolicyHash": "120f1f9ca213913f2521802317185cf559c92276640b8e7896285e1177d3f8cf",
+  "governanceClaimsHash": "ea14e420c5bf1b19bbef36c221aa01b02120ff94d831455fc23f65eb5bc8df89",
+  "governanceClaims": 3,
+  "decisionRule": "host-ballot-tally@v1",
+  "decisionInputsHash": "33dc2cf5b7ec9c16b787772ed6dfb3199875bb33536e1077ce486caa8df0b8c0",
+  "ballotsCast": 3,
+  "ranked": 1
+}

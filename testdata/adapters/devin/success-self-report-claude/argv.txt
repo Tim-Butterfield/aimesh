@@ -1,0 +1,1 @@
+devin --model claude-opus-4-8-medium -p Output only your model identifier/name

@@ -1,0 +1,2 @@
+exit=0
+panel: 3 of 3 explorer(s) from profile "golden" (default)

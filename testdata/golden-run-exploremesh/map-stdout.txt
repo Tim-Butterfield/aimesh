@@ -1,0 +1,17 @@
+Exploration complete.
+  explorers: 3 in panel, 0 dropped
+
+Synthesis:
+  Synthesis of the explorer panel (fake collator).
+
+Findings:
+  - A well-evidenced conclusion (confidence 0.80)
+      sources: envelope#0/claims/0, envelope#1, envelope#2
+  - A conclusion the collator did not source (confidence 0.50)
+      UNCITED — no citation resolved to a response in this panel
+      UNVERIFIED reference(s): s1
+        Named outside this panel. exploremesh reads no filesystem, so nothing here
+        checked that they exist or say what the finding says they say.
+
+Disagreements:
+  - primary approach: surfaced to the human (pure-judgment dispute) (residual risk: approach choice unresolved)

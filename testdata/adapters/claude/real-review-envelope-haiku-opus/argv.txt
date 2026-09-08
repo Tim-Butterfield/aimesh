@@ -1,0 +1,1 @@
+claude -p "<reviewer prompt>" --permission-mode plan --disallowedTools "Edit Write NotebookEdit" --output-format json

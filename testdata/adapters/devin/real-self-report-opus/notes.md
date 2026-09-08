@@ -1,0 +1,1 @@
+REAL capture (sanitized — no session/UUID/cost/account data). macOS, Devin Pro. `--model opus` self-reports "Claude Opus 4.8" — so Devin gateway `opus` = Claude Opus 4.8. The invocation slug (opus) != the self-reported display name, so a self-report alone cannot VERIFY the slug → unverified. Devin emits no structured identity envelope here.

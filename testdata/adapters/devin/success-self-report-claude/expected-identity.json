@@ -1,0 +1,7 @@
+{
+  "requestedModel": "claude-opus-4-8-medium",
+  "evidence": "self_report",
+  "expectedActual": "claude-opus-4-8-medium",
+  "expectedStatus": "self_reported",
+  "fixtureKind": "synthetic"
+}

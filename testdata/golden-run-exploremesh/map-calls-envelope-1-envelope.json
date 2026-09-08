@@ -1,0 +1,31 @@
+{
+  "id": "env-719be15071a13114",
+  "identity": {
+    "adapter": "fake",
+    "model": "fake-b",
+    "effort": "medium"
+  },
+  "identityStatus": "verified",
+  "identityEvidence": "invocation_tag",
+  "order": 1,
+  "payloadHash": "bbf898a75e1c974b5fe5adb96c34d0d37f465904d3cac07fadefed2cf0ea8344",
+  "response": {
+    "assumptions": [
+      "assumption-A"
+    ],
+    "claims": [
+      "claim from A"
+    ],
+    "confidence": 0.75,
+    "evidence": "evidence from explorer A",
+    "sources": [
+      "source-A"
+    ],
+    "tradeoffs": [
+      "tradeoff-A"
+    ],
+    "uncertainties": [
+      "open question from A"
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+@startuml
+' reviewmesh — CUC-2 "Verify environment readiness (doctor)" activity diagram. Render: plantuml -tsvg docs/diagrams/activity-doctor.puml
+title Verify environment readiness — doctor / preflight (CUC-2)
+skinparam shadowing false
+
+start
+:Detect available adapters\n(probe each detect command);
+:Resolve roles -> adapters -> models\n(defaults + overrides);
+:Check adapter binaries present/resolvable (per selected lane)\n(auth-state check = target/future);
+:Validate model profiles (catalog resolves);
+:Check surface capabilities (read/write, diff, artifact dir);
+if (--probe?) then (yes)
+  :Safe <binary> --version check (no model call)\n(live model-identity verification = target/future);
+else (no)
+endif
+if (all checks pass?) then (yes)
+  :Announce resolved role -> adapter -> model mapping;
+  :Proceed (or report ready);
+  stop
+else (no)
+  :Report the specific failure\n(e.g. "re-run <cli> login") & halt;
+  stop
+endif
+@enduml

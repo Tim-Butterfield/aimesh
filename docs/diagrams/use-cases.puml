@@ -1,0 +1,24 @@
+@startuml
+' reviewmesh — use-case diagram. Render: plantuml -tsvg docs/diagrams/use-cases.puml
+left to right direction
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam usecase {
+  BackgroundColor #F1F1F1
+  BorderColor #181818
+}
+actor "Developer" as Dev
+actor "CI job" as CI
+
+rectangle reviewmesh {
+  usecase "Review & remediate\nan artifact" as UC1 <<core>>
+  usecase "Verify environment\nreadiness (doctor)" as UC2
+  usecase "Configure / repair\n(interactive wizard)" as UC3
+}
+
+Dev --> UC1
+Dev --> UC2
+Dev --> UC3
+CI  --> UC1
+CI  --> UC2
+@enduml

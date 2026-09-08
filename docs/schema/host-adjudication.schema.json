@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/host-adjudication.schema.json",
+  "title": "HostAdjudicationResult",
+  "description": "The host's adjudication output (author_remediator, semantic_adjudicate): a wrapper object carrying one adjudication per judged finding.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "role", "phase", "adjudications"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "role": { "const": "author_remediator" },
+    "phase": { "const": "semantic_adjudicate" },
+    "adjudications": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/hostAdjudication" }
+    }
+  },
+  "$defs": {
+    "hostAdjudication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["findingId", "validity", "decisionState", "reasoning"],
+      "properties": {
+        "findingId": { "type": "string" },
+        "validity": { "type": "string", "enum": ["valid", "invalid"] },
+        "decisionState": {
+          "type": "string",
+          "enum": ["applied", "invalid", "skipped", "already_addressed", "upstream_conflict_deferred", "withheld_class_e", "reported_valid", "reported_invalid"]
+        },
+        "severityAdjusted": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+        "reasoning": { "type": "string" }
+      }
+    }
+  }
+}

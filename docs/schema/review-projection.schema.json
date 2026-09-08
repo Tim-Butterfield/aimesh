@@ -1,0 +1,461 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/review-projection.schema.json",
+  "title": "ReviewProjection",
+  "description": "The machine-readable projection of one review run — what `aimesh review run --json` writes to stdout, and the shape a tool-calling surface returns for the same run. It is built from the SAME adjudication result that run-state.json and review-summary.md are written from, so a machine consumer and a human reader are never told different things about one run. It is emitted for HALTED runs too (with haltRecord populated); the process exit code is unaffected by the rendering.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "status", "mode", "findings", "identityCaveats", "withheld", "authority", "panel", "counts"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "status": { "type": "string", "enum": ["running", "stable", "planned", "single_pass", "halted", "cancelled"], "description": "`planned` is a DRY RUN: the plan, panel and preflight resolved and the run stopped before its first model call, answering with `shape` instead of a review. Its `findings` array is empty because it looked at nothing — never because the tree was clean, and a consumer that gates on findings must branch on this value." },
+    "mode": { "type": "string", "enum": ["report", "patch", "apply"], "description": "the EFFECTIVE output mode" },
+    "requestedMode": {
+      "type": "string",
+      "enum": ["report", "patch", "apply"],
+      "description": "Present ONLY when the effective mode differs from what was requested (a surface policy ceiling capped it). Its presence is the signal, so a degraded run cannot be mistaken for the requested one."
+    },
+    "runId": { "type": "string", "description": "opaque run identifier (also the run-directory name)" },
+    "runDir": { "type": "string" },
+    "outcome": {
+      "type": "string",
+      "enum": ["applied", "partial_refusal", "nothing_applied"],
+      "description": "What the write actually did. Present ONLY on a run whose effective mode is patch or apply — on a report run there is nothing for it to mean. `partial_refusal` = the write completed, some findings were applied, and at least one was refused for a protected path; `nothing_applied` = the write completed and applied nothing (read `counts.refused` to tell \"nothing to do\" from \"everything refused\"). A consumer that ignores this field is less informed but never WRONG: the not-clean signal is `counts.refused > 0`, and each surface repeats it in the channel a consumer reads without parsing (the CLI exit code, MCP `isError`, ACP `stopReason`)."
+    },
+    "refusals": {
+      "type": "array",
+      "description": "Findings the write path declined because their target is a PROTECTED PATH (the non-overridable write denylist). Present on a patch/apply run, empty when nothing was refused — \"nothing was refused\" is a checkable statement and an absent key is not. Nothing was written to any of these paths, and every other accepted finding was applied normally: one out-of-bounds target no longer discards the run. Re-running refuses them identically; this is not a retryable failure.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fingerprint", "file", "reason"],
+        "properties": {
+          "fingerprint": { "type": "string", "description": "the HOST-COMPUTED identity of the finding (file|normalized location). Deliberately not the finding's `id`: the id is model-authored and is renumbered after the write window, so it is neither stable nor safe as a selection key. `kind` is excluded for the same reason — measured, a seat reported one defect twice at a byte-identical location under two different kinds." },
+          "file": { "type": "string", "description": "workspace-relative" },
+          "reason": { "type": "string", "enum": ["protected_path"] }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "fingerprint", "severity", "kind", "summary", "disposition"],
+        "properties": {
+          "fingerprint": {
+            "type": "string",
+            "description": "The HOST-COMPUTED identity of this finding (file|normalized location), computed by the same function the dedup, the provenance ledger and the write path's refusals use. THIS is the selection key: `--select` matches it, and `id` deliberately does not — the id is model-authored and is renumbered after the write window, so it is neither stable nor safe to select by."
+          },
+          "id": { "type": "string" },
+          "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"], "description": "the host-adjusted severity when the host adjusted it, else the reported one" },
+          "kind": { "type": "string", "enum": ["pass", "fail", "ambiguity", "inconsistency", "gap", "risk"] },
+          "file": { "type": "string", "description": "workspace-relative" },
+          "location": { "type": "string" },
+          "summary": { "type": "string" },
+          "disposition": {
+            "type": "string",
+            "enum": ["applied", "invalid", "skipped", "already_addressed", "upstream_conflict_deferred", "withheld_class_e", "reported_valid", "reported_invalid", ""],
+            "description": "the HOST's decision state. A consumer must never infer that a finding was fixed from its presence — only from this field."
+          },
+          "sources": { "type": "array", "items": { "type": "string" }, "description": "what produced the finding (e.g. reviewer, evidence, author_self_review)" },
+          "applyable": {
+            "type": "boolean",
+            "const": false,
+            "description": "Present (and always false) ONLY when the WRITE-PATH RULE refused this finding: an applied hunk must trace to evidence in the workspace copy, so a finding supported only by authority/context text is reportable but never applyable. ABSENT means the write-path rule did not refuse it — NOT that anything was or will be written; that is `disposition`."
+          },
+          "applyRefusalReason": {
+            "type": "string",
+            "enum": ["authority_only", "no_workspace_evidence", "protected_path"],
+            "description": "the stable machine code for that refusal: `authority_only` = the finding names a declared authority document; `no_workspace_evidence` = authority was supplied and the finding names a file the workspace copy never showed; `protected_path` = the finding targets a path the non-overridable write denylist protects (.env, .git/, agent client config, .aimesh/) — nothing was written there, the rest of the remediation proceeded, and unlike the other three this one makes the run exit 7 rather than 0"
+          },
+          "supportingSeats": {
+            "type": "array",
+            "description": "HOST-RECORDED provenance: the blind panel seats that reported this finding. Absent for a finding that did not come from the panel (an evidence hook, the cross-check, the verifier). No model asserts any of it.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["seatId", "adapter", "model", "identityTier"],
+              "properties": {
+                "seatId": { "type": "string", "description": "reviewer | reviewer-2 | reviewer-3 | …" },
+                "adapter": { "type": "string" },
+                "model": { "type": "string" },
+                "identityTier": { "type": "string", "enum": ["verified", "self_reported", "unknown"] }
+              }
+            }
+          },
+          "agreementCount": {
+            "type": "integer",
+            "description": "HOST-COMPUTED number of blind seats that independently reported this finding (= the length of supportingSeats, carried explicitly so a consumer never recounts and reaches a different number). Never model-asserted."
+          },
+          "dissentingSeats": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "seats that COMPLETED and did not report this finding. A seat that halted or never started appears in neither list — its silence is unknowable, and recording it as dissent would manufacture disagreement out of a failure."
+          },
+          "distinctModels": {
+            "type": "integer",
+            "description": "how many different MODELS the supporting seats ran. NOT an adjusted agreement figure: `agreementCount` is unchanged and means what it always meant. This is a count of a different thing, computed the same way — \"3 seats, 2 distinct models\" states the situation without anyone interpreting a weighting."
+          },
+          "agreementIndependence": {
+            "type": "string",
+            "enum": ["distinct_models", "shared_model"],
+            "description": "what those seats were WORTH. `shared_model` = at least two ran the same model, so their errors correlate and the extra agreement is worth less than the count suggests — it does NOT make the finding wrong. Only the model STRING is asserted; vendor, base family and weight lineage are not observable here and are deliberately not claimed."
+          },
+          "consensus": {
+            "type": "string",
+            "enum": ["unanimous", "majority", "contested"],
+            "description": "what the seats that RAN did with this finding. `contested` = a minority reported it, or the seats split evenly. A SILENT SEAT IS NOT A SEAT THAT DISAGREED: seats are blind and each reports what IT found, so a seat missing from supportingSeats may have disagreed, may never have reached that file, or may have stopped when its own set stabilized — indistinguishable here, and not guessed at. So `contested` is not evidence against the finding and nothing was dropped, downgraded, reordered or gated on it. Absent when no panel stood behind the finding, and absent when fewer than two seats completed (one seat cannot be unanimous with itself)."
+          },
+          "grounding": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status"],
+            "description": "the HOST's non-executing check of this finding's CITATION: does the cited file exist in the reviewed tree, is the cited line within it, does the cited symbol appear. It checks the POINTER, never the claim — a `grounded` finding may still be wrong, and an unresolved one may still name a real defect a line away. Nothing was dropped or downgraded by it.",
+            "properties": {
+              "status": { "type": "string", "enum": ["grounded", "no_citation", "file_missing", "line_out_of_range", "symbol_absent", "location_unchecked", "unreadable"], "description": "`location_unchecked` = the location is prose rather than a line or symbol, so there was nothing mechanical to check — deliberately not reported as an absent symbol." },
+              "file": { "type": "string", "description": "workspace-relative, as cited" },
+              "location": { "type": "string", "description": "the citation's location string, as the finding gave it" },
+              "detail": { "type": "string", "description": "says what was checked and what happened — never a verdict on the finding" },
+              "lineCount": { "type": "integer", "description": "the cited file's length when it was read, so a line-range failure is checkable rather than asserted" }
+            }
+          }
+        }
+      }
+    },
+    "panel": {
+      "type": "array",
+      "description": "The blind primary panel's EXECUTED ROSTER: one entry per REQUESTED seat, in requested order, including a seat that halted or never started. Always present (empty only for a run that never resolved a panel) — the number of independent vantages behind a finding set is a governance fact, and since the count is variable there is no default a reader could assume.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["seatId", "index", "adapter", "model", "status", "rounds", "findings"],
+        "properties": {
+          "seatId": { "type": "string" },
+          "index": { "type": "integer", "description": "1-based position in the requested panel" },
+          "adapter": { "type": "string" },
+          "model": { "type": "string", "description": "model-catalog key" },
+          "effort": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["completed", "budget_capped", "halted", "not_started"],
+            "description": "completed = ran and produced a schema-valid result; budget_capped = completed, but the run-level round budget stopped further stabilization rounds; halted = this seat's failure halted the RUN (there is no partial-panel success); not_started = the run halted on an earlier-indexed seat first"
+          },
+          "rounds": { "type": "integer", "description": "stabilization rounds this seat actually ran" },
+          "findings": { "type": "integer", "description": "raw findings this seat reported, before host dedup" },
+          "identityTier": { "type": "string", "enum": ["verified", "self_reported", "unknown", ""] },
+          "reasonCode": { "type": "string", "description": "stable machine code when the seat did not complete normally" },
+          "signal": { "type": "string", "enum": ["quota_exhausted", "folder_trust", "login_required", "model_invalid", "update_prompt", "timeout"], "description": "THIS SEAT'S own actionable classification. The top-level haltRecord names only the first-by-index seat, but a panel dispatches every seat concurrently — so on a halted run the other seats were also dispatched, also paid for, and may have failed for entirely different and separately fixable reasons. Read this per seat rather than assuming the halt record describes them all." },
+          "detail": { "type": "string", "description": "this seat's own one-line cause" }
+        }
+      }
+    },
+    "identityCaveats": {
+      "type": "array",
+      "description": "Lanes that ran and returned schema-valid output but whose model identity was not strongly verified. Always present when they exist — governance facts are never dropped from the projection.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "adapter", "requestedModel", "status"],
+        "properties": {
+          "role": { "type": "string" },
+          "adapter": { "type": "string" },
+          "requestedModel": { "type": "string" },
+          "reportedModel": { "type": "string" },
+          "evidence": { "type": "string", "enum": ["envelope", "trace", "cli_status", "invocation_tag", "self_report", "none", ""] },
+          "status": { "type": "string", "enum": ["unknown", "self_reported"] }
+        }
+      }
+    },
+    "withheld": {
+      "type": "array",
+      "description": "Files a CONTAINMENT rule kept out of the reviewed set (today: hardlinked regular files, which are withheld rather than halting the run). ALWAYS present — an empty array states \"nothing was withheld\". A consumer must treat an entry as a gap in coverage: a reviewer cannot object to a file it was never shown, so a withheld file's absence from `findings` means nothing.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "reason"],
+        "properties": {
+          "path": { "type": "string", "description": "workspace-relative, slash-normalized" },
+          "reason": { "type": "string", "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$", "description": "meshcore's stable machine code, e.g. workspace_hardlink_denied" },
+          "rule": { "type": "string", "description": "the human sentence naming what refused" },
+          "detail": { "type": "string" },
+          "stage": { "type": "string", "enum": ["copy", "snippets"], "description": "copy = never placed in the isolated copy (so also never visible to an agentic reviewer CLI working in it); snippets = in the copy, never rendered into a prompt" }
+        }
+      }
+    },
+    "authority": {
+      "type": "array",
+      "description": "The INCLUSION MANIFEST of the authority/context documents this run was judged against (see authority-manifest.schema.json for the entry shape). ALWAYS present — an empty array states \"judged against no declared intent\", so a consumer never has to infer it from a missing key.",
+      "items": { "$ref": "authority-manifest.schema.json#/$defs/inclusion" }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "matched", "unmatched"],
+      "description": "Present when the caller narrowed a write to specific findings by FINGERPRINT. `unmatched` names selectors that reached nothing — reported rather than ignored, so a mistyped selector is visible instead of silently writing less than the caller believed.",
+      "properties": {
+        "requested": { "type": "array", "items": { "type": "string" }, "description": "the caller's list, trimmed and deduped, in the order given" },
+        "matched": { "type": "array", "items": { "type": "string" } },
+        "unmatched": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "grounding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "checked", "grounded", "unresolved", "noCitation", "note"],
+      "description": "The RUN-LEVEL tally of the non-executing citation check. It reads files this run already read and executes nothing. It checks the POINTER, never the claim — carry `note` whenever you surface the ratio, because \"2 of 14 unresolved\" invites \"so those two findings are wrong\", and that does not follow.",
+      "properties": {
+        "root": { "type": "string", "description": "the tree the citations were checked against" },
+        "checked": { "type": "integer", "minimum": 0, "description": "findings carrying a citation this pass examined; grounded + unresolved equals it" },
+        "grounded": { "type": "integer", "minimum": 0 },
+        "unresolved": { "type": "integer", "minimum": 0 },
+        "noCitation": { "type": "integer", "minimum": 0, "description": "findings naming no file at all. Deliberately NOT part of `checked`: a finding about the change as a whole has nothing to resolve, and folding it into either column would make the ratio a statement about something else." },
+        "byStatus": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 }, "description": "the full breakdown, keyed by the same status codes the per-finding `grounding.status` uses" },
+        "note": { "type": "string", "description": "the fixed sentence stating what grounding does NOT establish" }
+      }
+    },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seats", "distinctModels", "independence", "note"],
+      "description": "What the blind panel WAS: each seat as the operator configured it, and how many distinct models they ran between them. It qualifies every `agreementCount` in this projection WITHOUT changing any of them. Absent for a run with no blind panel.",
+      "properties": {
+        "seats": {
+          "type": "array",
+          "description": "the panel in REQUESTED order — the panel that was convened, not the one that responded (per-finding `agreementIndependence` describes the seats that actually agreed on each thing)",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["seatId", "index", "adapter", "model"],
+            "properties": {
+              "seatId": { "type": "string" },
+              "index": { "type": "integer", "description": "1-based position in the requested panel" },
+              "adapter": { "type": "string" },
+              "model": { "type": "string" },
+              "effort": { "type": "string" },
+              "modelSource": { "type": "string", "enum": ["catalog", "passthrough"], "description": "where this seat's model string came from. `passthrough` = the caller COMPOSED a seat naming something the configuration does not define, and the string went to the adapter verbatim. The adapter was validated fail-closed either way, and nothing about the seat's findings, agreement or applyability differs — but `list` cannot describe that model, no catalog entry pins its effort or argument, and whether it exists at all was decided by the provider." },
+              "passThroughHint": { "type": "string", "description": "the configured key this model most plausibly meant (a catalog key that is this string plus an effort suffix). Present only on a pass-through seat, and only when something is close enough to name." }
+            }
+          }
+        },
+        "distinctModels": { "type": "integer", "minimum": 0 },
+        "independence": { "type": "string", "enum": ["distinct_models", "shared_model"], "description": "`shared_model` = at least two seats run the same model. Agreement between them is real but correlated." },
+        "note": { "type": "string", "description": "the fixed sentence stating the limit in BOTH directions — shared_model invites discarding a real agreement, distinct_models invites treating one as proof, and neither follows" }
+      }
+    },
+    "dissent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["panelled", "unanimous", "majority", "contested", "note"],
+      "description": "How much of this result the blind panel AGREED ON: the tally of the per-finding `consensus` labels. It qualifies nothing away — a contested finding is reported, adjudicated, applyable and counted exactly as a unanimous one is. Absent when no finding had a describable panel behind it, because a record of zeroes would read as a panel that agreed on nothing rather than no panel at all.",
+      "properties": {
+        "panelled": { "type": "integer", "minimum": 0, "description": "findings with a describable panel behind them — the denominator. unanimous + majority + contested equals it." },
+        "unanimous": { "type": "integer", "minimum": 0 },
+        "majority": { "type": "integer", "minimum": 0 },
+        "contested": { "type": "integer", "minimum": 0, "description": "a minority reported it, or the seats split evenly. NOT a count of doubtful findings." },
+        "note": { "type": "string", "description": "the fixed sentence stating what a silent seat does and does not mean. Carry it whenever you surface `contested`." }
+      }
+    },
+    "partialPanel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured", "answered", "lost", "note"],
+      "description": "Present ONLY when a CAPACITY failure — a provider out of quota, a wall clock reached — cost this run a seat and the run continued rather than discarding the seats that had already answered. Its PRESENCE is the signal: a consumer never has to compare two counts to notice that the panel configured is not the panel that answered. Read every `agreementCount` against `answered`. A capacity failure is a fact about a billing relationship or a clock, never about whether the surviving findings are sound.",
+      "properties": {
+        "configured": { "type": "integer", "minimum": 0 },
+        "answered": { "type": "integer", "minimum": 0 },
+        "lost": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["seatId", "adapter", "model", "signal"],
+            "properties": {
+              "seatId": { "type": "string" },
+              "adapter": { "type": "string" },
+              "model": { "type": "string" },
+              "signal": { "type": "string", "enum": ["quota_exhausted", "timeout"], "description": "only these two degrade a panel. Every other signal HALTS: an unrecognized cause is never assumed to be a capacity problem." },
+              "detail": { "type": "string" }
+            }
+          }
+        },
+        "note": { "type": "string" }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected", "available", "files", "note"],
+      "description": "Present ONLY when this run was NARROWED to part of the tree (explicit paths, a modification window, or a version-control baseline). Its PRESENCE is the signal, and it changes what the whole result means: THE REVIEW IS SILENT ABOUT EVERYTHING IT WAS NOT SHOWN, so the absence of a finding elsewhere means nobody looked — not that there is nothing there.",
+      "properties": {
+        "selected": { "type": "integer", "minimum": 0, "description": "files the selectors chose" },
+        "available": { "type": "integer", "minimum": 0, "description": "files the run would otherwise have reviewed" },
+        "paths": { "type": "array", "items": { "type": "string" }, "description": "the `--path` selectors as given (a directory takes its subtree)" },
+        "changedSince": { "type": "string", "description": "the `--changed-since` window as given. Coarser than a diff — a touched-but-unchanged file is selected — and coarse in the SAFE direction." },
+        "vcsRef": { "type": "string", "description": "the `--changed-vs` baseline. Repository-only: in a plain folder it is REFUSED rather than ignored, because ignoring it would review the whole tree, the opposite of what was asked." },
+        "files": { "type": "array", "items": { "type": "string" }, "description": "the selected set, workspace-relative" },
+        "note": { "type": "string" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "commands", "delta", "note"],
+      "description": "What the PROJECT'S OWN build/test commands did, on the containment copy — never on the live tree, and never anything a model wrote. IT IS A RECORD, NOT A GATE: no result here invalidated a finding, dropped one, downgraded one, or blocked a commit. A pass does not mean the change is correct; a failure does not mean any finding was wrong. Present only when the operator supplied commands.",
+      "properties": {
+        "root": { "type": "string", "description": "the containment copy the commands ran in" },
+        "commands": { "type": "array", "items": { "type": "string" }, "description": "the operator's list, echoed as given" },
+        "before": { "type": "array", "items": { "$ref": "#/$defs/verificationResult" }, "description": "the baseline pass, taken on the copy before any edit reached it" },
+        "after": { "type": "array", "items": { "$ref": "#/$defs/verificationResult" }, "description": "the second pass, after every edit and BEFORE the commit. Empty on a report run, which writes nothing — that case is delta `baseline_only`." },
+        "delta": { "type": "string", "enum": ["unchanged_pass", "unchanged_fail", "fixed", "broken", "baseline_only", "not_comparable"], "description": "the HOST's comparison. `unchanged_fail` is an ORDINARY outcome: the suite was already red and the change did not make it worse." },
+        "note": { "type": "string", "description": "the fixed sentence stating both limits. The two misreadings run in opposite directions — green invites \"the change is fine\", red invites \"the findings were wrong\" — and neither follows." }
+      }
+    },
+    "shape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "surface", "seats", "lanes", "maxParallel", "outerCycles", "panelRounds", "minModelCalls", "maxModelCalls", "readinessProbes", "writes", "deterministicHost", "payload"],
+      "description": "What the run WOULD do, disclosed before anything is spent. Present ONLY on a dry run (`status: \"planned\"`) and absent on every real run, whose shape has stopped being a prediction. THE CALL COUNTS ARE A RANGE ON PURPOSE: the floor is what the run cannot avoid, the ceiling is every configured cap multiplied out, and a single number would have to understate the iterating run, overstate the ordinary one, or guess at model behaviour. Both bounds count LOGICAL calls — neither includes a bounded retry after a schema-invalid response. It is the same object written to `run-shape.json` in the run record.",
+      "properties": {
+        "egress": {
+          "type": "array",
+          "description": "WHERE THIS RUN'S CONTENT WOULD GO: one entry per distinct destination, computed from the RESOLVED panel rather than from a static table, so an ad-hoc panel and a seat added by --reviewer are both accounted for. Grouped by destination on purpose — four seats behind one provider is one disclosure, not four. A lane executing in-process sends nothing and is absent. Absent entirely when no lane invokes a model.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["known", "via"],
+            "properties": {
+              "destination": { "type": "string", "description": "the party that receives the reviewed files and any authority documents, in full" },
+              "local": { "type": "boolean", "description": "nothing leaves the machine. BRANCH ON THIS, never on the destination string, when deciding whether a run is offline." },
+              "known": { "type": "boolean", "description": "false for an adapter this tool does not own — a user-defined ACP instance points at a binary the operator chose, so its destination is theirs to know. Reported rather than omitted: a missing row would read as 'nothing goes there'. Treat unknown as LEAVING the machine; the other reading is the unsafe one." },
+              "note": { "type": "string", "description": "qualification for a destination that routes onward (a gateway) or that the operator selected" },
+              "via": { "type": "array", "items": { "type": "string" }, "description": "the seat ids and role names that reach this destination, in run order" }
+            }
+          }
+        },
+        "mode": { "type": "string", "enum": ["report", "patch", "apply"], "description": "the mode that was PRICED — a dry run of an apply run prices an apply run and still writes nothing" },
+        "surface": { "type": "string" },
+        "seats": {
+          "type": "array",
+          "description": "the blind primary panel in REQUESTED ORDER. Every seat runs; maxParallel bounds only how many at once, so shortening this list is the only thing that removes a call.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["seatId", "adapter", "model"],
+            "properties": {
+              "seatId": { "type": "string" },
+              "adapter": { "type": "string" },
+              "model": { "type": "string" },
+              "effort": { "type": "string" }
+            }
+          }
+        },
+        "lanes": {
+          "type": ["array", "null"],
+          "description": "every OTHER resolved role, sorted by role. A role ABSENT here is a call this run will not make.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "execution", "adapter", "model"],
+            "properties": {
+              "role": { "type": "string" },
+              "execution": { "type": "string", "enum": ["host", "adapter"], "description": "`host` runs in-process and costs no model call" },
+              "adapter": { "type": "string" },
+              "model": { "type": "string" },
+              "effort": { "type": "string" }
+            }
+          }
+        },
+        "maxParallel": { "type": "integer", "minimum": 0, "description": "0 runs every seat at once. It moves the wall clock, never the cost." },
+        "outerCycles": { "type": "integer", "minimum": 1, "description": "how many times the whole cycle can repeat. Always 1 for report and patch — neither commits anything, so there is nothing to converge." },
+        "panelRounds": { "type": "integer", "minimum": 1, "description": "the budget for ONE cycle's panel: total blind rounds all seats SHARE, never a per-seat figure" },
+        "minModelCalls": { "type": "integer", "minimum": 0 },
+        "maxModelCalls": { "type": "integer", "minimum": 0 },
+        "readinessProbes": { "type": "integer", "minimum": 0, "description": "One-token readiness invocations this run would make before dispatching anything — one per DISTINCT adapter/model/effort, 0 unless the caller asked for them. Counted in BOTH bounds, because unlike everything else in the ceiling they are not contingent: a run that enables them cannot make fewer. They exist so a panel does not pay for its first seat's full prompt and then halt on a second seat whose CLI was blocked on login all along. They cannot establish quota — a window can empty between the probe and the call." },
+        "writes": { "type": "boolean", "description": "whether the priced mode can modify the workspace. The dry run that produced this wrote nothing regardless." },
+        "deterministicHost": { "type": "boolean", "description": "adjudication needs no model at all (no author_remediator lane, or it resolves to `fake`), so every adjudication this run performs is in-process and free" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["files", "bytes", "paths"],
+          "description": "WHAT THOSE CALLS WOULD CARRY: the workspace content each reviewer would be shown. It is disclosed separately from the call count because it varies independently of it — the same panel over a monorepo and over one package costs the same number of calls and shows the reviewers entirely different things. IT IS THE WHOLE WORKSPACE MINUS CONTAINMENT: every file listed is sent in full, nothing is clipped, and the walk never stops early, so `files` and `bytes` are a measurement and not a budget. It is computed by walking the live tree under the SAME collector rules the run itself uses, without making the containment copy, so it is what the run would carry and not an estimate of it — but a workspace edited between the dry run and the real one is a different workspace.",
+          "properties": {
+            "files": { "type": "integer", "minimum": 0, "description": "files that survived containment and would reach a reviewer prompt" },
+            "bytes": { "type": "integer", "minimum": 0, "description": "their total size, all of which is sent. This is the figure to read before convening a large panel: it goes out once per seat, per round." },
+            "paths": {
+              "type": "array",
+              "description": "every file that would be shown, sorted. A count answers \"how much\"; only the list answers \"is the file I care about in there\" — which is the question that decides whether the run is worth paying for.",
+              "items": { "type": "string", "description": "workspace-relative, slash-separated" }
+            },
+            "withheld": {
+              "type": "array",
+              "description": "what CONTAINMENT kept out, rendered with its reason (today: a hardlinked regular file, whose innocuous in-root name may be a second name for something outside the workspace). Absent on an ordinary workspace. It is disclosed for the reason the real run records it: an omission nobody is told about is indistinguishable from a file that never existed.",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "haltRecord": {
+      "type": "object",
+      "description": "Present only when the run halted. Mirrors halt-record.json's machine fields; captured adapter stdout/stderr is deliberately EXCLUDED because this payload is written to stdout and may be logged.",
+      "additionalProperties": false,
+      "required": ["reasonCode", "exitCode", "message"],
+      "properties": {
+        "haltClass": { "type": "string", "enum": ["A", "B", "C", "D", "E", "F", "G", "M1", "M2", "M3", "M4", "M5", "M6"] },
+        "reasonCode": { "type": "string", "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$" },
+        "exitCode": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "signal": { "type": "string", "enum": ["quota_exhausted", "folder_trust", "login_required", "model_invalid", "update_prompt", "timeout"] },
+        "message": { "type": "string", "description": "the human rendering" },
+        "failure": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "identification of the failing lane (no captured output)",
+          "properties": {
+            "role": { "type": "string" },
+            "adapter": { "type": "string" },
+            "model": { "type": "string" },
+            "exitCode": { "type": "integer" },
+            "haltClass": { "type": "string" },
+            "reasonCode": { "type": "string" },
+            "signal": { "type": "string" }
+          }
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "description": "HOST-computed totals. A consumer must not recount the arrays and risk reporting a different number.",
+      "additionalProperties": false,
+      "required": ["findings", "bySeverity", "byDisposition", "identityCaveats", "withheld", "panelSeats", "panelSeatsCompleted", "applied", "refused"],
+      "properties": {
+        "findings": { "type": "integer", "minimum": 0 },
+        "bySeverity": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "byDisposition": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "identityCaveats": { "type": "integer", "minimum": 0 },
+        "withheld": { "type": "integer", "minimum": 0, "description": "files a containment rule kept out of the reviewed set" },
+        "panelSeats": { "type": "integer", "minimum": 0, "description": "blind panel seats REQUESTED" },
+        "panelSeatsCompleted": { "type": "integer", "minimum": 0, "description": "seats that produced a valid result. Kept separate from panelSeats on purpose: \"5 requested, 4 completed\" must be visible rather than folded into one number." },
+        "applied": { "type": "integer", "minimum": 0, "description": "findings this run WROTE — to the live tree in apply mode, to the produced diff in patch mode. Always 0 on a report run." },
+        "refused": { "type": "integer", "minimum": 0, "description": "findings the write path REFUSED because their target is a protected path. Greater than zero means the run did NOT apply everything it was asked to, and its process exit code is 7 rather than 0 — see `outcome` and `refusals`. It is emitted beside `applied` on purpose: a refusal count with no applied count beside it invites the reading \"nothing worked\"." }
+      }
+    }
+  },
+  "$defs": {
+    "verificationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "ok", "exitCode", "durationMs"],
+      "description": "One command's outcome in one pass.",
+      "properties": {
+        "command": { "type": "string" },
+        "ok": { "type": "boolean" },
+        "exitCode": { "type": "integer" },
+        "timedOut": { "type": "boolean", "description": "the command hit its per-command budget. SEPARATE from a non-zero exit because it is a statement about the budget rather than about the code: a timeout makes the two passes not comparable, and folding it into \"failed\" would blame a change for a wall clock." },
+        "unstartable": { "type": "string", "description": "the command could not be launched at all (no shell, a bad directory) — a fact about this host, not about the project" },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "output": { "type": "string", "description": "the TAIL of the combined streams, bounded. The tail is kept because a build tool prints its banner first and its error last." }
+      }
+    }
+  }
+}

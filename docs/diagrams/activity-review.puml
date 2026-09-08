@@ -1,0 +1,35 @@
+@startuml
+' reviewmesh — CUC-1 "Review & remediate" activity diagram. Render: plantuml -tsvg docs/diagrams/activity-review.puml
+title Review & remediate an artifact (CUC-1)
+skinparam shadowing false
+
+|Host|
+start
+:Scope artifact(s) & mode;
+:Preflight (doctor):\ndetect adapters, auth, models, surface caps;
+if (ready?) then (no)
+  :Report halt (e.g. re-auth, missing model);
+  stop
+else (yes)
+endif
+repeat
+  |Reviewer(s)|
+  repeat
+    :Primary reviewer pass\n(fresh isolated copy, discarded after;\nprior dispositions fed forward);
+  repeat while (stabilized? approve / set-stable / all-invalid) is (no, < inner cap) not (yes)
+  :Cross-check pass (once, fresh isolated copy);
+  :Verify pass (fresh isolated copy);
+  |Host|
+  :Adjudicate findings\n(host call via ModelAccess; validity, severity, dedup);
+  switch (mode?)
+  case (report)
+    :Record findings only;
+  case (patch)
+    :Emit diff artifact;
+  case (apply)
+    :Write accepted changes to live workspace;
+  endswitch
+  :Persist audit (JSON + Markdown);
+repeat while (edits applied? & < outer cap) is (yes) not (no)
+stop
+@enduml

@@ -1,0 +1,9 @@
+{
+  "purpose": "choose a datastore for the ingest service",
+  "criteria": [
+    "cost",
+    "latency",
+    "operability"
+  ],
+  "mode": "map"
+}

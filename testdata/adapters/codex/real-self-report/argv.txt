@@ -1,0 +1,1 @@
+codex exec --skip-git-repo-check -s read-only -m gpt-5.5 --json -c model_reasoning_effort=medium "Output only your model identifier/name"

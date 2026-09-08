@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "callId": "c-0001-i2",
+  "runId": "<RUNID>",
+  "role": "reviewer",
+  "phase": "semantic_iterate",
+  "adapter": "fake",
+  "requestedModel": "fake-1",
+  "actualModel": "fake-1",
+  "exitCode": 0,
+  "verificationStatus": "verified",
+  "identityEvidence": "invocation_tag",
+  "haltClass": null,
+  "attempts": 1,
+  "completedAt": "<TS>",
+  "summary": "One issue found.",
+  "verdict": "request_changes",
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Example finding",
+      "detail": "A deterministic finding from the fake adapter.",
+      "suggestion": "Address it.",
+      "kind": "fail",
+      "severity": "high",
+      "file": "sample.go",
+      "location": "1",
+      "source": "reviewer",
+      "primitive": "P1"
+    }
+  ]
+}

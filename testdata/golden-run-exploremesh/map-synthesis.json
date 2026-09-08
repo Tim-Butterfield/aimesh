@@ -1,0 +1,51 @@
+{
+  "synthesisSummary": "Synthesis of the explorer panel (fake collator).",
+  "findings": [
+    {
+      "statement": "A well-evidenced conclusion",
+      "evidence": "cross-explorer support",
+      "confidence": 0.8,
+      "sources": [
+        "envelope#0/claims/0",
+        "envelope#1",
+        "envelope#2"
+      ]
+    },
+    {
+      "statement": "A conclusion the collator did not source",
+      "evidence": "asserted without attribution",
+      "confidence": 0.5,
+      "uncited": true,
+      "unverifiedReferences": [
+        "s1"
+      ]
+    }
+  ],
+  "disagreementRegister": [
+    {
+      "subject": "primary approach",
+      "positions": [
+        {
+          "explorer": {
+            "adapter": "claude-code",
+            "model": "opus",
+            "effort": "high"
+          },
+          "stance": "approach A",
+          "evidence": "e-A"
+        },
+        {
+          "explorer": {
+            "adapter": "codex-cli",
+            "model": "gpt-5-codex",
+            "effort": "medium"
+          },
+          "stance": "approach B",
+          "evidence": "e-B"
+        }
+      ],
+      "resolution": "surfaced to the human (pure-judgment dispute)",
+      "residualRisk": "approach choice unresolved"
+    }
+  ]
+}

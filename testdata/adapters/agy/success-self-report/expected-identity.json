@@ -1,0 +1,7 @@
+{
+  "requestedModel": "Gemini 3.1 Pro (High)",
+  "evidence": "self_report",
+  "expectedActual": "Gemini 3.1 Pro (High)",
+  "expectedStatus": "self_reported",
+  "fixtureKind": "synthetic"
+}

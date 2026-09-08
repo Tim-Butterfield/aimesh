@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/reviewer-result.schema.json",
+  "title": "ReviewerResult",
+  "description": "The JSON object a reviewer/cross_check/verifier/author_remediator (report-only self-review) call must return.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "role", "phase", "verdict", "findings"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "role": { "type": "string", "enum": ["reviewer", "cross_check", "verifier", "author_remediator"] },
+    "phase": { "type": "string", "enum": ["semantic_iterate", "semantic_cross_check", "semantic_verify", "semantic_author_review"] },
+    "summary": { "type": "string" },
+    "verdict": { "type": "string", "enum": ["approve", "approve_with_suggestions", "request_changes", "block"] },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "severity", "title"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string", "enum": ["pass", "fail", "ambiguity", "inconsistency", "gap", "risk"] },
+        "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+        "title": { "type": "string", "maxLength": 200 },
+        "detail": { "type": "string" },
+        "suggestion": { "type": "string" },
+        "file": { "type": "string" },
+        "location": { "type": "string" },
+        "source": { "type": "string", "enum": ["reviewer", "evidence", "author_self_review"] },
+        "primitive": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "callId": "c-0001",
+  "runId": "20260101T000000-0001",
+  "role": "reviewer",
+  "phase": "semantic_iterate",
+  "adapter": "ollama",
+  "requestedModel": "local-gemma3-27b",
+  "actualModel": "gemma3:27b",
+  "nativeThinking": "unsupported",
+  "exitCode": 0,
+  "verificationStatus": "verified",
+  "resultArtifact": "calls/c-0001/reviewer-result.json",
+  "stderrArtifact": "calls/c-0001/stderr.txt",
+  "haltClass": null,
+  "reasonCode": "",
+  "completedAt": "2026-01-01T00:00:12Z",
+  "summary": "Two issues found.",
+  "verdict": "request_changes",
+  "findings": []
+}

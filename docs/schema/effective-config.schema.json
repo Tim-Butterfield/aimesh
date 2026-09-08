@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/effective-config.schema.json",
+  "title": "EffectiveConfig",
+  "description": "`config-effective.json`, written into every run directory: the MERGED configuration the run actually used, after the layer precedence (shipped seed ← user ← project ← --config) and the shared adapters.yaml path overlay have been applied. It is a plain serialization of the same Config shape a layer uses, so it validates against config.schema.json — and it is a COMPLETE one rather than a partial layer, which is the only difference this file declares: the top-level sections are all present. It contains no secrets (authentication stays with each adapter's own CLI). This schema earlier described a `_meta` resolution-provenance block (resolvedAt / reviewmeshVersion / layerOrder / selectedProfile / profileSource) and marked it `required`; nothing ever wrote one, so the shipped artifact failed its own schema. The block was removed rather than manufactured: the resolution provenance a reader actually needs is already recorded elsewhere in the run — `resolved-plan.json` names the selected profile and the resolved lanes, and `logs/events.jsonl` timestamps the run — so a second, differently-derived copy of it here would be a second answer. A test validates a real run's artifact against this file.",
+  "$ref": "config.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "defaultProfile", "profiles", "modelCatalog", "adapters", "defaults", "surfaces", "review"]
+}

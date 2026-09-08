@@ -1,0 +1,2 @@
+exit=0
+review complete: mode=report, findings=1, status=stable

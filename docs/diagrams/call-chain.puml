@@ -1,0 +1,47 @@
+@startuml
+' reviewmesh — core use-case call chain (IDesign sequence-diagram grammar).
+' Render: plantuml -tsvg docs/diagrams/call-chain.puml
+title Call chain — core use case (review & remediate)
+
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam ParticipantBorderColor #181818
+skinparam ParticipantFontColor #111111
+skinparam sequenceArrowColor #181818
+skinparam sequenceLifeLineBorderColor #181818
+skinparam noteBackgroundColor #FFF8DC
+skinparam noteBorderColor #C9B458
+
+participant "Client\n(surface)" as C #5CB85C
+participant "ReviewManager" as RM #F5D33A
+participant "AdjudicationEngine" as ADJ #E8961E
+participant "RemediationEngine" as REM #E8961E
+participant "ModelAccess" as MA #CFCFCF
+participant "WorkspaceAccess" as WA #CFCFCF
+participant "AuditAccess" as AA #CFCFCF
+participant "model CLIs /\ngateways" as MODELS #3BB8B0
+participant "workspace" as WS #3BB8B0
+participant "run\ndirectory" as RUN #3BB8B0
+
+C  ->  RM : initiate review (one Manager entry)
+RM ->  WA : provide isolated copy
+WA --> RM : copy ready
+RM ->  MA : invoke reviewer / cross-check
+MA ->  MODELS : run model
+MODELS --> MA : findings
+MA --> RM : findings (identity classified)
+note over MA: identity is a confidence dimension\n(strong-evidence mismatch = Class E;\nunknown/weak self-report = caveat)
+RM ->  ADJ : judge findings
+ADJ --> RM : decisions
+RM ->  REM : propose edit (accepted findings)
+REM --> RM : edit
+RM ->  WA : apply | patch | report
+WA ->  WS : write (apply mode)
+WS --> WA : ok
+WA --> RM : applied / patch
+RM ->  AA : write audit
+AA ->  RUN : persist
+RUN --> AA : ok
+AA --> RM : ok
+RM --> C : review complete
+@enduml

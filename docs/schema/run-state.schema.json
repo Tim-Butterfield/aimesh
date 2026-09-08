@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/run-state.schema.json",
+  "title": "RunState",
+  "description": "Written to run-state.json; the top-level state of a review run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runId", "outputMode", "status", "startedAt"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "runId": { "type": "string" },
+    "outputMode": { "type": "string", "enum": ["report", "patch", "apply"] },
+    "surface": { "type": "string" },
+    "status": { "type": "string", "enum": ["running", "stable", "planned", "single_pass", "halted", "cancelled"], "description": "`planned` is a DRY RUN: the plan, panel and preflight resolved and the run stopped before its first model call. Such a run has no findings because it looked at nothing — never because the tree was clean." },
+    "roles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "adapter": { "type": "string" },
+          "requestedModel": { "type": "string" },
+          "actualModel": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "iteration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outerCycle": { "type": "integer" },
+        "innerIteration": { "type": "integer" },
+        "maxOuterCycles": { "type": "integer" },
+        "maxInnerIterations": { "type": "integer" }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "authority": {
+      "type": "array",
+      "description": "The INCLUSION MANIFEST of the authority/context documents this run was judged against — the same entries written to authority/inclusion-manifest.json (see authority-manifest.schema.json). ABSENT when the run declared no authority, so a run that uses none is byte-identical to one written before the feature existed.",
+      "items": { "$ref": "authority-manifest.schema.json#/$defs/inclusion" }
+    },
+    "withheld": {
+      "type": "array",
+      "description": "Files a CONTAINMENT rule kept out of the reviewed set (today: hardlinked regular files, which are withheld rather than halting the run). ABSENT when nothing was withheld, so a run that withheld nothing is byte-identical to one written before the feature existed. An entry is a gap in coverage: a reviewer cannot object to a file it was never shown.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "reasonCode"],
+        "properties": {
+          "path": { "type": "string", "description": "workspace-relative, slash-normalized" },
+          "reasonCode": { "type": "string", "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$" },
+          "rule": { "type": "string" },
+          "detail": { "type": "string" },
+          "stage": { "type": "string", "enum": ["copy", "snippets"] }
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "description": "The caller's W3C trace context, CARRIED VERBATIM from the request that started this run (MCP `2026-07-28` `_meta`: the unprefixed `traceparent`/`tracestate`/`baggage` keys). It is carried, never interpreted, and never validated — the spec's W3C-format MUST binds the sender, and of every reserved `_meta` key it says implementations MUST NOT make assumptions about the values, so a malformed value is recorded as it arrived. ABSENT when the caller sent none — every CLI run and every legacy-era request — so a run without one is byte-identical to a run written before this field existed. WHAT IT DOES NOT GIVE YOU: token counts or cost. No run in this repo records either; `measures` states that inside the record so a reader cannot mistake a correlated run for a metered one.",
+      "additionalProperties": false,
+      "required": ["measures"],
+      "properties": {
+        "traceparent": { "type": "string" },
+        "tracestate": { "type": "string" },
+        "baggage": { "type": "string" },
+        "measures": {
+          "type": "string",
+          "const": "correlation_only",
+          "description": "What this block accounts for. `correlation_only` means an externally-correlatable identity and NO token or cost accounting. It is a const today on purpose: the day a run records spend, this value changes and a consumer can tell the two eras of the record apart instead of inferring it from which fields happen to be present."
+        }
+      }
+    },
+    "halt": {
+      "type": "object",
+      "description": "A machine-readable halt SUMMARY. The full record (with call id, exit code, timestamps and the human detail) is halt-record.json — this is the pointer-free summary a reader of run-state can act on. Previously this $ref'd halt-record.schema.json, which the written artifact never satisfied (it carries only the summary fields).",
+      "additionalProperties": false,
+      "required": ["haltClass"],
+      "properties": {
+        "haltClass": { "type": "string", "enum": ["A", "B", "C", "D", "E", "F", "G", "M1", "M2", "M3", "M4", "M5", "M6"] },
+        "reasonCode": { "type": "string", "description": "the stable machine reason code (see halt-record.schema.json)", "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$" },
+        "signal": { "type": "string", "enum": ["quota_exhausted", "folder_trust", "login_required", "model_invalid", "update_prompt", "timeout"] }
+      }
+    },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

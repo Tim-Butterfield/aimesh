@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/call-status.schema.json",
+  "title": "CallStatus",
+  "description": "The normalized status reviewmesh records for every model call (after the adapter maps any helper wire format).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "callId", "runId", "role", "phase", "adapter", "requestedModel", "exitCode", "verificationStatus", "completedAt"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "callId": { "type": "string" },
+    "runId": { "type": "string" },
+    "role": { "type": "string", "enum": ["author_remediator", "reviewer", "cross_check", "verifier"] },
+    "phase": { "type": "string", "enum": ["preflight", "semantic_author_review", "semantic_iterate", "semantic_cross_check", "semantic_verify", "semantic_adjudicate", "validate_adjudicate"] },
+    "adapter": { "type": "string" },
+    "requestedModel": { "type": "string" },
+    "actualModel": { "type": ["string", "null"] },
+    "nativeThinking": { "type": "string" },
+    "exitCode": { "type": "integer" },
+    "verificationStatus": { "type": "string", "enum": ["verified", "self_reported", "unknown", "mismatch", "unverified"] },
+    "identityEvidence": { "type": "string", "enum": ["envelope", "trace", "cli_status", "invocation_tag", "self_report", "none"] },
+    "resultArtifact": { "type": "string" },
+    "stderrArtifact": { "type": "string" },
+    "haltClass": { "type": ["string", "null"], "enum": ["A", "B", "C", "D", "E", "F", "G", "M1", "M2", "M3", "M4", "M5", "M6", null] },
+    "reasonCode": {
+      "type": "string",
+      "description": "STABLE MACHINE code for this call's outcome — lower_snake, never a sentence (e.g. adapter_exited_nonzero, model_identity_mismatch, model_identity_unknown, reviewer_result_unparseable, containment_mutation_detected, cancelled). Absent on a clean call.",
+      "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$"
+    },
+    "signal": {
+      "type": "string",
+      "description": "Classified actionability hint for a FAILED call (meshcore/clihint). Absent when the call succeeded or nothing classified.",
+      "enum": ["quota_exhausted", "folder_trust", "login_required", "model_invalid", "update_prompt", "timeout"]
+    },
+    "attempts": { "type": "integer", "description": "adapter attempts made (>1 ⇒ a schema-failure retry occurred)" },
+    "outputNormalized": { "type": "boolean", "description": "a fenced/surrounded JSON object was extracted before parsing" },
+    "completedAt": { "type": "string", "format": "date-time" },
+    "summary": { "type": "string" },
+    "verdict": { "type": "string", "enum": ["approve", "approve_with_suggestions", "request_changes", "block"] },
+    "findings": { "type": "array", "items": { "$ref": "reviewer-result.schema.json#/$defs/finding" } },
+    "hostAdjudications": { "type": "array", "items": { "$ref": "host-adjudication.schema.json#/$defs/hostAdjudication" } }
+  }
+}

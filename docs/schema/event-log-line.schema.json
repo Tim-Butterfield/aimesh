@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/event-log-line.schema.json",
+  "title": "EventLogLine",
+  "description": "One line of logs/events.jsonl (JSON Lines: one object per line).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "timestamp", "level", "eventType", "runId", "message"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+    "eventType": {
+      "type": "string",
+      "enum": [
+        "run_started", "resolved_plan", "doctor_started", "doctor_completed",
+        "adapter_call_started", "adapter_call_completed",
+        "model_verification_started", "model_verification_completed",
+        "containment_copy_created", "containment_discarded", "containment_mutation_detected",
+        "reviewer_result_parsed", "host_adjudication_completed",
+        "remediation_started", "remediation_completed",
+        "patch_written", "apply_committed", "audit_written",
+        "run_completed", "run_halted", "cancellation_requested",
+        "setup_started", "setup_completed", "repair_started", "repair_completed"
+      ]
+    },
+    "runId": { "type": "string" },
+    "callId": { "type": "string" },
+    "role": { "type": "string" },
+    "phase": { "type": "string" },
+    "adapter": { "type": "string" },
+    "model": { "type": "string" },
+    "message": { "type": "string" },
+    "data": { "type": "object", "description": "event-specific payload; may evolve but stays JSON" },
+    "haltClass": { "type": "string" },
+    "reasonCode": { "type": "string" },
+    "durationMs": { "type": "integer", "minimum": 0 }
+  }
+}

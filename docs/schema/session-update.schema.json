@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/session-update.schema.json",
+  "title": "SessionNotification",
+  "description": "Params of an ACP v1 `session/update` notification (JSON-RPC notification; no response). ACP v1 SessionNotification shape: `{sessionId, update}`, where `update` is a SessionUpdate discriminated-union object. reviewmesh emits progress as the `agent_message_chunk` variant (a text content block) and preserves its sanitized audit-event detail (no secrets, no raw provider metadata) under the sanctioned `update._meta.reviewmesh` extension. Emitted by the ACP surface during session/prompt; the ReviewManager is unaware of ACP.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "update"],
+  "properties": {
+    "sessionId": { "type": "string", "description": "The ACP session this progress belongs to." },
+    "update": {
+      "type": "object",
+      "description": "An ACP v1 SessionUpdate, keyed by the `sessionUpdate` discriminator. reviewmesh always emits a `content` text block for its `agent_message_chunk` progress.",
+      "required": ["sessionUpdate", "content"],
+      "properties": {
+        "sessionUpdate": {
+          "type": "string",
+          "description": "The SessionUpdate variant discriminator. reviewmesh progress uses `agent_message_chunk` (the least-misleading official variant for textual progress).",
+          "const": "agent_message_chunk"
+        },
+        "content": {
+          "type": "object",
+          "description": "An ACP ContentBlock; reviewmesh uses a text block carrying the progress message.",
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "type": "string", "const": "text" },
+            "text": { "type": "string", "description": "The progress message for display. Carries a trailing newline so a host that concatenates streamed chunks renders each line separately; the clean (newline-free) message is under _meta.reviewmesh.message." }
+          }
+        },
+        "_meta": {
+          "type": "object",
+          "description": "ACP-reserved extension point. reviewmesh audit-event detail lives under `reviewmesh`.",
+          "properties": {
+            "reviewmesh": {
+              "type": "object",
+              "required": ["eventType", "level", "message"],
+              "properties": {
+                "eventType": { "type": "string", "description": "The audit event type (e.g. run_started, adapter_call_started, run_completed)." },
+                "level": { "type": "string", "enum": ["info", "warn", "error"] },
+                "message": { "type": "string" },
+                "timestamp": { "type": "string", "description": "RFC3339 event time (may be empty for synchronous surface events such as mode_degraded)." }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

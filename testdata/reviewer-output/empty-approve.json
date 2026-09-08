@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "role": "reviewer",
+  "phase": "semantic_iterate",
+  "summary": "No actionable issues found.",
+  "verdict": "approve",
+  "findings": []
+}

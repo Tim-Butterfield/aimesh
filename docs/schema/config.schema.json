@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/config.schema.json",
+  "title": "Config",
+  "description": "A reviewmesh configuration LAYER (any of: shipped defaults, user/global, project, invocation override) — i.e. ~/.aimesh/review/config.yaml or ./.aimesh/review/config.yaml. It does NOT describe the SHARED ~/.aimesh/adapters.yaml (adapter binary paths + user-defined 'acpAdapters' ACP instances, owned by meshcore/config/adapterlocations) nor exploremesh's ~/.aimesh/explore/profiles.yaml — neither key is valid here. WHAT THIS SCHEMA PROMISES: it accepts exactly what reviewmesh's typed strict decoder accepts, no more and no less, and a test round-trips the shipped seed and a set of real layers through both. Concretely that means (a) NOTHING is required — every layer is partial by design and the shipped seed supplies the rest; (b) unknown keys are refused wherever the decoder refuses them (additionalProperties:false on every struct-shaped object) while free map keys — profile, adapter, model-catalog and lane names — stay open; (c) 'null' is a permitted spelling of every value, because the decoder accepts it and the merge treats it as omission (there is no override-to-null mechanism); (d) where the decoder does not constrain a string's VALUE, neither does this schema, and the recognized vocabulary is stated in the description instead of pinned in an enum nothing would enforce.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "type": ["integer", "null"], "description": "Currently 1. A layer that omits it inherits the seed's value." },
+    "defaultProfile": { "type": ["string", "null"], "description": "The profile used when nothing selects one. Only when it is empty do defaults.adapterPreference / defaults.profileForAdapter come into play." },
+    "profiles": {
+      "type": ["object", "null"],
+      "description": "Named bundles of the ordered blind reviewer PANEL plus the single-slot role lanes. The shipped seed carries exactly two: 'default' (delivered UNCONFIGURED — its required lanes exist but name no adapter, so a fresh install is honestly Doctor-flagged) and 'fake-smoke' (shipped but HIDDEN from the normal profile list; the deterministic fake-adapter profile used by tests, the golden-run baseline, and the ACP-validation smoke). Every other profile is user-created or copied.",
+      "additionalProperties": {
+        "type": ["object", "null"],
+        "additionalProperties": false,
+        "properties": {
+          "description": { "type": ["string", "null"] },
+          "adapterPreference": { "type": ["array", "null"], "items": { "type": ["string", "null"] }, "description": "Ordered adapter fallback used when a lane names no adapter." },
+          "reviewers": {
+            "type": ["array", "null"],
+            "minItems": 1,
+            "maxItems": 16,
+            "description": "The ORDERED blind primary panel: each seat an independent (adapter, model) vantage that reviews in parallel, seeing only its own earlier rounds. The count is variable by construction — any size in 1..16 is ordinary, and the bound is enforced by the resolver, not merely declared here. A CONFIGURED seat carries no per-seat effort: its effort comes from the model-catalog entry it names. MIGRATION: 'lanes.reviewer' is accepted as sugar for a one-seat panel and normalized on read; a layer naming BOTH spellings for the same profile is a configuration error. Duplicate seat identities are refused (an identical seat adds no independent vantage and would double-count as agreement).",
+            "items": { "$ref": "#/$defs/lane" }
+          },
+          "lanes": {
+            "type": ["object", "null"],
+            "description": "The SINGLE-SLOT roles: author_remediator (the host, and the only writer), cross_check (informed — it sees the adjudicated set; its findings are applyable), verifier (report-only), and the legacy one-seat 'reviewer' spelling. These never become a list however large the panel grows: informed-vs-blind and applyable-vs-report-only are different information topologies, not different counts. A lane's PRESENCE is what decides whether its phase runs; there is no 'optional' flag (one used to parse here and was read by nothing, so it was removed rather than left inert).",
+            "additionalProperties": { "$ref": "#/$defs/lane" }
+          }
+        }
+      }
+    },
+    "modelCatalog": {
+      "type": ["object", "null"],
+      "description": "Canonical model profiles, keyed by catalog key. A lane names a key here; the entry says which argument each adapter needs for it.",
+      "additionalProperties": {
+        "type": ["object", "null"],
+        "additionalProperties": false,
+        "properties": {
+          "provider": { "type": ["string", "null"] },
+          "runtime": { "type": ["string", "null"], "description": "Free-form; the decoder constrains nothing. Only the literal 'local' is READ — it is what marks an entry as on-machine for the Privacy view. 'cloud' is the conventional spelling for everything else and is inert." },
+          "canonicalModel": { "type": ["string", "null"] },
+          "effort": { "type": ["string", "null"], "description": "The entry's reasoning-effort label. This is where a CONFIGURED seat's effort comes from; there is no per-seat effort in a profile." },
+          "displayName": { "type": ["string", "null"] },
+          "authoritative": { "type": ["boolean", "null"], "description": "Despite the name it does NOT gate the host role: nothing in resolution consults it. It is read only by the setup housekeeping flows, where — with adapterDefault — it marks an entry as shipped or hand-authored and therefore protected from saved-model overwrite and generated-key cleanup." },
+          "adapterDefault": { "type": ["boolean", "null"], "description": "Marks this entry as the adapter's default/fallback (projected under 'Adapter default' in the lane editor, not as a saved-model preset). Does not affect resolution." },
+          "adapters": {
+            "type": ["object", "null"],
+            "description": "Per-adapter invocation detail for this catalog entry, keyed by adapter name.",
+            "additionalProperties": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "properties": {
+                "modelArg": { "type": ["string", "null"], "description": "The argument this adapter needs to select the model. An empty value parses (the seeded 'ollama-local' ships one) and fails resolution with guidance rather than silently selecting something else." },
+                "effort": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "adapters": {
+      "type": ["object", "null"],
+      "description": "Per-adapter capability metadata, keyed by adapter name. Deliberately small: the runnable half of an adapter (probe binary, argv, identity extraction, effort handling) is CODE-owned.",
+      "additionalProperties": {
+        "type": ["object", "null"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": ["string", "null"], "description": "Legacy: still parses, but is CLEARED at load. Adapter binary paths come only from the shared ~/.aimesh/adapters.yaml overlay (user then root-anchored project scope), which is the single source of truth. Setting it here has no effect." },
+          "modelIdentity": { "type": ["string", "null"], "description": "The adapter's intended identity-evidence ceiling. Free-form to the decoder; the tiers meshcore defines are envelope, trace, cli_status, self_report and ambient_unverifiable." },
+          "enabled": { "type": ["boolean", "null"], "description": "Absent means enabled." }
+        }
+      }
+    },
+    "defaults": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Zero-config resolution, consulted ONLY when defaultProfile is empty. There are no inert siblings here: an 'autoDetect' key used to parse and merge while being read by nothing, and it is now refused like any other unknown field.",
+      "properties": {
+        "adapterPreference": { "type": ["array", "null"], "items": { "type": ["string", "null"] }, "description": "Adapter walk order." },
+        "profileForAdapter": { "type": ["object", "null"], "additionalProperties": { "type": ["string", "null"] }, "description": "adapter name (or '*') → the profile that adapter family defaults to." }
+      }
+    },
+    "surfaces": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Per-surface write-authority POLICY. A surface is where a run was driven from: cli, ci, acp, mcp.",
+      "properties": {
+        "defaultModeBySurface": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": ["string", "null"] },
+          "description": "surface → its write-authority CEILING (report | patch | apply). A request may resolve narrower, never wider. Shipped: cli apply, ci report, acp report, mcp report. A surface with NO entry keeps the historical fall-through of apply, which is why a surface that must fail closed ships with an explicit 'report' entry rather than relying on the absence of one."
+        },
+        "capabilitiesBySurface": {
+          "type": ["object", "null"],
+          "additionalProperties": { "type": ["array", "null"], "items": { "type": ["string", "null"] } },
+          "description": "surface → granted policy capabilities. The only capability today is 'allowRemediate', which RAISES that surface's ceiling to apply. It lives in the config store rather than being an out-of-band launch exception precisely so that granting it raises the ceiling instead of stepping around it. A higher layer REPLACES a surface's list rather than unioning it, so a capability can be revoked."
+        },
+        "degradeWhenModeUnavailable": { "type": ["boolean", "null"], "description": "Default true: a request above the effective ceiling is degraded and said so (mode_degraded + requestedMode/modeReason). False refuses it outright, before anything is spent." }
+      }
+    },
+    "review": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "Iteration/convergence caps, all enforced by the review loop. There are no reserved-but-inert siblings: keys nothing reads are rejected, not ignored.",
+      "properties": {
+        "maxInnerIterations": { "type": ["integer", "null"], "description": "stabilization rounds per reviewer SEAT per outer cycle (default 4)" },
+        "maxOuterCycles": { "type": ["integer", "null"], "description": "full review → adjudicate → remediate cycles (default 3)" },
+        "maxPanelRounds": { "type": ["integer", "null"], "description": "RUN-LEVEL ceiling on the TOTAL blind-primary rounds one outer cycle may spend across ALL panel seats — what stops N seats from multiplying maxInnerIterations without bound. Unset = maxInnerIterations per seat, capped in code (so a panel of one gets exactly maxInnerIterations). A value below the seat count is a configuration error: every requested seat must be able to run at least one round." }
+      }
+    }
+  },
+  "$defs": {
+    "lane": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "One role's (or one panel seat's) assignment. The same shape serves both, which is why a seat and a lane are interchangeable to the decoder.",
+      "properties": {
+        "execution": { "type": ["string", "null"], "description": "'host' for the author_remediator (the only writer), 'adapter' for everything else. Free-form to the decoder." },
+        "adapter": { "type": ["string", "null"], "description": "Adapter name; empty falls back to the profile's adapterPreference." },
+        "model": { "type": ["string", "null"], "description": "A modelCatalog key — never a raw provider model string." }
+      }
+    }
+  }
+}

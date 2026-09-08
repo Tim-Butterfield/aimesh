@@ -1,0 +1,7 @@
+{
+  "requestedModel": "claude-opus-4-8[1m]",
+  "evidence": "envelope",
+  "expectedActual": "claude-opus-4-8[1m]",
+  "expectedStatus": "verified",
+  "fixtureKind": "real"
+}

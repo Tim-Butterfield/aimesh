@@ -1,0 +1,203 @@
+[
+  {
+    "index": 1,
+    "id": "round-1",
+    "blind": true,
+    "payloadHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+    "envelopes": [
+      {
+        "id": "env-21a84eab8b3075d9",
+        "identity": {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        },
+        "identityStatus": "verified",
+        "identityEvidence": "invocation_tag",
+        "order": 0,
+        "payloadHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+        "response": {
+          "candidates": [
+            "Postgres",
+            "SQLite"
+          ],
+          "notes": "coverage notes from explorer A"
+        }
+      },
+      {
+        "id": "env-4444d4e9af07f5a9",
+        "identity": {
+          "adapter": "fake",
+          "model": "fake-b",
+          "effort": "medium"
+        },
+        "identityStatus": "verified",
+        "identityEvidence": "invocation_tag",
+        "order": 1,
+        "payloadHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+        "response": {
+          "candidates": [
+            "Postgres",
+            "SQLite"
+          ],
+          "notes": "coverage notes from explorer A"
+        }
+      },
+      {
+        "id": "env-bc204ef9b649b9dc",
+        "identity": {
+          "adapter": "fake",
+          "model": "fake-c",
+          "effort": "low"
+        },
+        "identityStatus": "verified",
+        "identityEvidence": "invocation_tag",
+        "order": 2,
+        "payloadHash": "8ef95b65047f56f6d888d72be1d1486290fff4af99db7999b242fe073a9e4faf",
+        "response": {
+          "candidates": [
+            "Postgres",
+            "SQLite"
+          ],
+          "notes": "coverage notes from explorer A"
+        }
+      }
+    ]
+  },
+  {
+    "index": 2,
+    "id": "round-2",
+    "blind": false,
+    "payloadHash": "4973bd374c2eff5ea882256837c42701fc2f85bda8a36adac5075aefb9a236bb",
+    "envelopes": [
+      {
+        "id": "env-697a60125536738d",
+        "identity": {
+          "adapter": "fake",
+          "model": "fake-a",
+          "effort": "high"
+        },
+        "identityStatus": "verified",
+        "identityEvidence": "invocation_tag",
+        "order": 0,
+        "payloadHash": "4973bd374c2eff5ea882256837c42701fc2f85bda8a36adac5075aefb9a236bb",
+        "response": {
+          "approved": [
+            "canon-1"
+          ],
+          "ranking": [
+            "canon-1",
+            "canon-0"
+          ],
+          "rationale": "preference of voter A under the frozen criteria"
+        }
+      },
+      {
+        "id": "env-58948fab89ddb55e",
+        "identity": {
+          "adapter": "fake",
+          "model": "fake-b",
+          "effort": "medium"
+        },
+        "identityStatus": "verified",
+        "identityEvidence": "invocation_tag",
+        "order": 1,
+        "payloadHash": "4973bd374c2eff5ea882256837c42701fc2f85bda8a36adac5075aefb9a236bb",
+        "response": {
+          "approved": [
+            "canon-1"
+          ],
+          "ranking": [
+            "canon-1",
+            "canon-0"
+          ],
+          "rationale": "preference of voter A under the frozen criteria"
+        }
+      },
+      {
+        "id": "env-44dbc9cfb54dfca7",
+        "identity": {
+          "adapter": "fake",
+          "model": "fake-c",
+          "effort": "low"
+        },
+        "identityStatus": "verified",
+        "identityEvidence": "invocation_tag",
+        "order": 2,
+        "payloadHash": "4973bd374c2eff5ea882256837c42701fc2f85bda8a36adac5075aefb9a236bb",
+        "response": {
+          "approved": [
+            "canon-1"
+          ],
+          "ranking": [
+            "canon-1",
+            "canon-0"
+          ],
+          "rationale": "preference of voter A under the frozen criteria"
+        }
+      }
+    ],
+    "carried": {
+      "discriminant": {
+        "mode": "shortlist",
+        "roundIndex": 1,
+        "kind": "canonical_uniques"
+      },
+      "schemaVersion": 1,
+      "producerRoundId": "round-1",
+      "contentHash": "5a95cd020ccd0db6e2fe9cab38898c684e77102e3b107ce4b201ee3640bdda5f",
+      "sourceEnvelopeRefs": [
+        "envelope#0",
+        "envelope#1",
+        "envelope#2"
+      ],
+      "trust": "host_derived",
+      "payload": {
+        "items": [
+          {
+            "ref": "canon-1",
+            "text": "SQLite (nominated as: SQLite)",
+            "attribution": [
+              {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              },
+              {
+                "adapter": "fake",
+                "model": "fake-b",
+                "effort": "medium"
+              },
+              {
+                "adapter": "fake",
+                "model": "fake-c",
+                "effort": "low"
+              }
+            ]
+          },
+          {
+            "ref": "canon-0",
+            "text": "Postgres (nominated as: Postgres)",
+            "attribution": [
+              {
+                "adapter": "fake",
+                "model": "fake-a",
+                "effort": "high"
+              },
+              {
+                "adapter": "fake",
+                "model": "fake-b",
+                "effort": "medium"
+              },
+              {
+                "adapter": "fake",
+                "model": "fake-c",
+                "effort": "low"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+]

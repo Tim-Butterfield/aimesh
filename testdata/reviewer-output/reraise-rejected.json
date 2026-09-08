@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "role": "cross_check",
+  "phase": "semantic_cross_check",
+  "summary": "Re-raises a finding the host already marked invalid, without disagreeing with the reason.",
+  "verdict": "request_changes",
+  "findings": [
+    {
+      "id": "F-010",
+      "kind": "gap",
+      "severity": "low",
+      "title": "Missing license header",
+      "detail": "No new justification; the host previously rejected this as out-of-scope for the review targets.",
+      "file": "main.go",
+      "location": "1",
+      "source": "reviewer"
+    }
+  ]
+}

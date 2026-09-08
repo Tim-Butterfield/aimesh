@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reviewmesh.dev/schema/doctor-issue.schema.json",
+  "title": "DoctorIssue",
+  "description": "One problem found by doctor/preflight; consumed by the repair wizard (doctor --fix).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["halt", "detail"],
+  "properties": {
+    "role": { "type": ["string", "null"], "enum": ["author_remediator", "reviewer", "cross_check", "verifier", null] },
+    "adapter": { "type": "string" },
+    "halt": { "type": "string", "enum": ["A", "B", "C", "D", "E", "F", "G", "M1", "M2", "M3", "M4", "M5"] },
+    "detail": { "type": "string" },
+    "remediationHint": { "type": "string", "description": "human-readable next step (also shown on non-interactive surfaces)" }
+  }
+}

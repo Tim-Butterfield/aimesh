@@ -1,0 +1,1 @@
+agy --model Gemini 3.1 Pro (High) -p Output only your model identifier/name

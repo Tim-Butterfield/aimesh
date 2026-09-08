@@ -1,0 +1,58 @@
+@startuml
+' reviewmesh — CUC-3 "Configure or repair (interactive wizard)" activity diagram. Render: plantuml -tsvg docs/diagrams/activity-setup.puml
+title Configure or repair the environment — wizard (CUC-3)
+skinparam shadowing false
+
+start
+if (interactive surface?) then (no)
+  :Print actionable guidance & exit non-zero (RB-17);
+  stop
+else (yes)
+endif
+if (entry?) then (setup)
+  :Detect adapters (present, path, auth);
+  :SetupEngine.SuggestLanes(detected, roles);
+  repeat :for each requested role;
+    :Choose adapter (default = suggestion);
+    if (binary on PATH?) then (no)
+      repeat :Ask for binary path;
+        :SetupEngine.ValidatePath (exists, exec, probes as adapter);
+      repeat while (valid?) is (no, retry) not (yes / cancel)
+    else (yes)
+    endif
+    :Select / enter model + thinking level;
+  repeat while (more roles?) is (yes) not (no)
+  :SetupEngine.PlanConfig -> ConfigPatch; show summary;
+  if (confirm?) then (yes)
+    :ConfigAccess.Write(scope, patch);
+  else (no)
+    :Cancel (nothing written);
+    stop
+  endif
+else (repair)
+  repeat :for each doctor issue;
+    :SetupEngine.RepairActions(issue) by halt class;
+    :Explain issue; choose an action;
+    if (action) then (reauthenticate / Class A)
+      :Run or show the adapter login (no config write);
+    else (path / model / swap / edit)
+      :Ask value; validate/probe; ConfigAccess.Write(scope, patch);
+    endif
+  repeat while (more issues?) is (yes) not (no)
+endif
+:Run doctor to confirm;
+if (all pass?) then (yes)
+  :Report ready;
+  stop
+else (no)
+  :Offer repair for remaining issues / report;
+  stop
+endif
+legend bottom
+This is the TARGET CUC-3 algorithm. Current build (bounded):
+* interactive setup wizard (setup, interactive mode) = profile-to-configure choice (defaultProfile never repointed) + validated adapter binary-path capture + per-role lane model selection from the catalog (when a lane's adapter has >=2 entries) + summary + confirm + post-write doctor;
+* interactive guided repair (doctor fix, interactive mode) = adapter binary-path repair only (non-adapter issues stay guidance-only);
+* user->project promotion (selected keys only).
+Target/future: SuggestLanes (pre-filter), pre-write live identity probe, reauthenticate/model/swap repairs.
+endlegend
+@enduml
