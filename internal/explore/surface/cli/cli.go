@@ -1036,7 +1036,7 @@ func canonicalizerCheck(plan roster.Plan, defaultMode string) mdoctor.Check {
 // probe per ADAPTER — the question ("does this CLI work in a throwaway directory?") is a property of
 // the CLI, and probing five seats of one adapter would spend five times to learn one fact.
 func planDeepSeats(plan roster.Plan) []mdoctor.DeepSeat {
-	seats := make([]mdoctor.DeepSeat, 0, len(plan.Explorers)+1)
+	seats := make([]mdoctor.DeepSeat, 0, len(plan.Explorers))
 	for _, e := range plan.Explorers {
 		seats = append(seats, mdoctor.DeepSeat{Adapter: e.Adapter, ModelArg: e.Model, Effort: e.Effort})
 	}

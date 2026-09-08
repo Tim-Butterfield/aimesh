@@ -245,7 +245,7 @@ func WithSurfaceCapability(c Config, surface, capability string) Config {
 	if c.Surfaces.HasCapability(surface, capability) {
 		return c
 	}
-	next := make(map[string][]string, len(c.Surfaces.CapabilitiesBySurface)+1)
+	next := make(map[string][]string, len(c.Surfaces.CapabilitiesBySurface))
 	for k, v := range c.Surfaces.CapabilitiesBySurface {
 		next[k] = append([]string(nil), v...)
 	}

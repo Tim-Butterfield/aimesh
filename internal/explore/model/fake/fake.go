@@ -534,7 +534,7 @@ func compareScore(tag string, optionIdx, criterionIdx int) float64 {
 func (a *Adapter) exploreCompare(prompt, model string) []byte {
 	tag := a.fixedSpaceTag(model)
 	options, criteria := compareDeclaration(prompt)
-	evaluations := make([]any, 0, len(options)*len(criteria))
+	evaluations := make([]any, 0)
 	evaluated := make([]any, 0, len(options))
 	missing := make([]any, 0)
 	for oi, opt := range options {
