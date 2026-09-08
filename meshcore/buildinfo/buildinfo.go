@@ -19,10 +19,10 @@ import (
 
 // Facts is what the toolchain recorded about the build, in the shape a version package reports.
 type Facts struct {
-	// Version is the human form: the tag exactly at a tag ("v0.1.0"), the nearest tag plus the
-	// commit after one ("v0.1.0+3d6b10e"), "dev+3d6b10e" when no tag precedes the commit, and a
-	// ".dirty" suffix when the tree was modified. It is semver build metadata, so it sorts as the
-	// tag it names and never claims a version that does not exist.
+	// Version is the human form: the nearest tag at or before the commit ("v0.1.0"), and "dev"
+	// when no tag precedes it. Deliberately nothing else — no commit, no dirty marker — so the
+	// line reads as a plain version number; Commit and Dirty carry those facts for the
+	// machine-readable form. A build after a tag therefore shows the tag it descends from.
 	Version string
 	// ModuleVersion is the toolchain's own string, untouched: the tag, or a pseudo-version such as
 	// "v0.1.1-0.20260908022103-3d6b10e9b8fa" — which names the NEXT patch and encodes the commit
@@ -42,33 +42,25 @@ type Facts struct {
 // Group 1 is everything before the timestamp; group 3 is the 12-hex-digit commit prefix.
 var pseudoVersion = regexp.MustCompile(`^(.*?)[-.](\d{14})-([0-9a-f]{12})$`)
 
-// displayVersion turns the toolchain's module version into the human form described on Facts.
-func displayVersion(module string, dirty bool) string {
-	if strings.HasSuffix(module, "+dirty") {
-		dirty = true
-		module = strings.TrimSuffix(module, "+dirty")
+// displayVersion turns the toolchain's module version into the human form described on Facts:
+// the nearest preceding tag, or "dev" when there is none.
+func displayVersion(module string) string {
+	module = strings.TrimSuffix(module, "+dirty")
+	m := pseudoVersion.FindStringSubmatch(module)
+	if m == nil {
+		return module // exactly at a tag
 	}
-	v := module
-	if m := pseudoVersion.FindStringSubmatch(module); m != nil {
-		base, hash := m[1], m[3][:7]
-		switch {
-		case base == "v0.0.0":
-			v = "dev+" + hash
-		case strings.HasSuffix(base, "-0"):
-			v = decrementPatch(strings.TrimSuffix(base, "-0")) + "+" + hash
-		case strings.HasSuffix(base, ".0"):
-			v = strings.TrimSuffix(base, ".0") + "+" + hash
-		default:
-			v = base + "+" + hash
-		}
+	base := m[1]
+	switch {
+	case base == "v0.0.0":
+		return "dev"
+	case strings.HasSuffix(base, "-0"):
+		return decrementPatch(strings.TrimSuffix(base, "-0"))
+	case strings.HasSuffix(base, ".0"):
+		return strings.TrimSuffix(base, ".0")
+	default:
+		return base
 	}
-	if dirty {
-		if strings.Contains(v, "+") {
-			return v + ".dirty"
-		}
-		return v + "+dirty"
-	}
-	return v
 }
 
 // decrementPatch maps the "vX.Y.Z" a pseudo-version points AT back to the "vX.Y.(Z-1)" tag it
@@ -113,6 +105,6 @@ func fromBuildInfo(bi *debug.BuildInfo, present bool) (Facts, bool) {
 		}
 	}
 	f.Dirty = f.Dirty || strings.HasSuffix(v, "+dirty")
-	f.Version = displayVersion(v, f.Dirty)
+	f.Version = displayVersion(v)
 	return f, true
 }
