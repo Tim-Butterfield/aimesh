@@ -44,6 +44,12 @@ func spawnedEnv(t *testing.T, rec Recipe) map[string]string {
 // that declares one gets it, a recipe that declares none does not, and the universal hardened base
 // (NO_UPDATE_NOTIFIER) applies to BOTH — a per-recipe override must not replace the base.
 func TestRecipeEnv_AppliedPerRecipe(t *testing.T) {
+	// The child inherits the parent's environment by design (TestRecipeEnv_PreservesInheritedAuthVars
+	// is the invariant), so an ambient CI — every hosted CI runner exports one — would reach the
+	// "no recipe env" child for a reason that has nothing to do with recipes. Clear it for this test.
+	t.Setenv("CI", "")
+	os.Unsetenv("CI")
+
 	with := spawnedEnv(t, Recipe{Name: "with-env", Env: map[string]string{"CI": "1", "AIMESH_TEST_ENV": "yes"}})
 	if with["CI"] != "1" {
 		t.Errorf("recipe env CI = %q, want 1 (the recipe's env must reach the spawned CLI)", with["CI"])

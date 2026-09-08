@@ -943,6 +943,43 @@ func TestCommit_RefusesConcurrentlyReplacedDestination(t *testing.T) {
 	}
 }
 
+// TestCommit_RefusesConcurrentlyRewrittenDestination is the case identity cannot see at all: the
+// file is rewritten IN PLACE, so device+inode are unchanged. It is also what a delete-and-recreate
+// looks like on a filesystem that recycles inode numbers (ext4 does, immediately), which is why the
+// replaced-destination test above passes on APFS and failed on a Linux CI runner until the commit
+// path started comparing the destination's bytes with its backup. This test reproduces that
+// failure on every filesystem.
+func TestCommit_RefusesConcurrentlyRewrittenDestination(t *testing.T) {
+	live := t.TempDir()
+	writeFile(t, filepath.Join(live, "a.txt"), "ORIGINAL\n")
+	copyDir := t.TempDir()
+	writeFile(t, filepath.Join(copyDir, "a.txt"), "REMEDIATED\n")
+
+	testHookBeforeDestinationVerify = func(rel string) {
+		if rel != "a.txt" {
+			return
+		}
+		testHookBeforeDestinationVerify = nil
+		writeFile(t, filepath.Join(live, "a.txt"), "SOMEONE ELSE'S EDIT\n") // same inode, new bytes
+	}
+	t.Cleanup(func() { testHookBeforeDestinationVerify = nil })
+
+	ws := New(t.TempDir())
+	committed, err := ws.Commit(&Handle{Root: copyDir, Live: live})
+	if err == nil {
+		t.Fatal("a destination rewritten in place inside the check→write window must be refused")
+	}
+	if got := ReasonOf(err); got != ReasonDestinationChanged {
+		t.Errorf("reason = %q, want %q (err: %v)", got, ReasonDestinationChanged, err)
+	}
+	if len(committed) != 0 {
+		t.Errorf("committed = %v, want nothing", committed)
+	}
+	if got, _ := os.ReadFile(filepath.Join(live, "a.txt")); string(got) != "SOMEONE ELSE'S EDIT\n" {
+		t.Errorf("the concurrent edit was clobbered or reverted to stale bytes: %q", got)
+	}
+}
+
 // TestCommit_RollsBackCreatedParentDirs pins that a rolled-back commit leaves no DIRECTORY
 // it invented either. The old rollback restored/removed files only, so a failed commit left
 // a fresh directory tree behind — visible, committable, and not what the caller was told.
