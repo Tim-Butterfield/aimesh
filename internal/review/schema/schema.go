@@ -331,9 +331,15 @@ func NormalizeLocation(loc string) string {
 //
 // This makes Fingerprint identical to what StabilityKey already computed — which is itself
 // corroboration, since that key excluded kind years earlier for exactly this observed drift.
+//
+// SHA-1 is deliberate and is not a security choice: the input is a file path and a location, both
+// model-authored and both already visible in the finding, so there is nothing to keep secret and no
+// collision an attacker could profit from — the property the fingerprint provides is that the HOST
+// computed it, not that it is hard to forge. The `sha1:` prefix is part of the public `--select`
+// vocabulary, so the algorithm is pinned by compatibility as well.
 func Fingerprint(f review.Finding) string {
-	key := f.File + "|" + NormalizeLocation(f.Location)
-	sum := sha1.Sum([]byte(key))
+	identity := f.File + "|" + NormalizeLocation(f.Location)
+	sum := sha1.Sum([]byte(identity))
 	return fmt.Sprintf("sha1:%x", sum)
 }
 
