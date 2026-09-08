@@ -601,11 +601,18 @@ func (a *Access) Commit(h *Handle) ([]string, error) { return a.CommitExpecting(
 // mismatch is a REFUSAL that rolls the whole commit back.
 //
 // Identity and content answer different questions and both are needed. Identity
-// (verifyDestination, os.SameFile) catches a destination that was SWAPPED — replaced,
-// deleted and recreated, or redirected. It cannot catch the common case: an editor that
-// saves in place keeps the device+inode, so a concurrent human edit passes the identity
-// check while the staged bytes still derive from the pre-edit content. Pinning the content
-// is what turns that silent overwrite into a refusal.
+// (verifyDestination, os.SameFile) catches a destination that was SWAPPED — replaced or
+// redirected to a different object. It cannot catch the common case: an editor that saves
+// in place keeps the device+inode, so a concurrent human edit passes the identity check
+// while the staged bytes still derive from the pre-edit content. Pinning the content is
+// what turns that silent overwrite into a refusal.
+//
+// Independently of pins, every existing destination is RE-READ after the identity check and
+// compared byte-for-byte with the backup taken moments earlier. That is the check the
+// rollback actually depends on — a rollback restores those bytes, so they must still be what
+// the destination holds — and it is the only one that survives inode reuse: ext4 hands a
+// recreated file the inode it just freed, so "delete and recreate" is invisible to
+// os.SameFile there even though it is exactly the case the identity check was written for.
 //
 // A nil pin map means "no pins recorded" and skips the content check entirely (Commit's
 // historical contract). A non-nil map is EXHAUSTIVE: a destination with no pin is refused
@@ -739,6 +746,25 @@ func (a *Access) CommitExpecting(h *Handle, pins map[string]string) ([]string, e
 				testHookBeforeDestinationVerify(s.rel)
 			}
 			err = verifyDestination(liveRoot, "commit", s.rel, want)
+		}
+		// The backup must still be true. Identity says the name still resolves to the same
+		// object; only the bytes say the object still holds what the rollback would restore.
+		// Re-read and compare — a mismatch means a concurrent writer, and clobbering it or
+		// later "restoring" stale bytes over it are both worse than refusing. The re-read goes
+		// through readBackup, the same path the backup took: a hardlinked destination is
+		// backed up and then replaced by name with a fresh file, so the stricter readRegular
+		// (which refuses a multi-link file) would turn that supported case into a refusal.
+		if err == nil && u.existed {
+			switch cur, _, rerr := readBackup(liveRoot, "commit", s.rel); {
+			case rerr != nil:
+				err = &Refusal{Op: "commit", Path: s.rel, Reason: ReasonDestinationChanged,
+					Rule:   "the destination must still hold the bytes that were backed up",
+					Detail: "the destination could not be re-read before the write: " + rerr.Error()}
+			case !bytes.Equal(cur, u.data):
+				err = &Refusal{Op: "commit", Path: s.rel, Reason: ReasonDestinationChanged,
+					Rule:   "the destination must still hold the bytes that were backed up",
+					Detail: "the destination's content changed between the backup read and the write"}
+			}
 		}
 		// CONTENT, after identity and immediately before the replacement. u.data is what the
 		// backup read just took from this very destination, so the digest is of the bytes

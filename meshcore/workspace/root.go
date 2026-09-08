@@ -388,10 +388,15 @@ func removeCreatedDirs(r *os.Root, created []string) {
 // still the object the pre-write inspection approved: the same file (compared by identity,
 // not by name), or still absent when it was absent.
 //
-// It is what makes "fail rather than clobber" true for the two concurrent cases that would
-// otherwise go unnoticed: a destination CREATED after the pre-write Lstat would be recorded
-// as "did not exist" and then unlinked by the rollback, and a destination MODIFIED after the
-// backup read would be restored to stale bytes. Both are refusals.
+// It is what makes "fail rather than clobber" true for a destination CREATED after the
+// pre-write Lstat, which would otherwise be recorded as "did not exist" and then unlinked by
+// the rollback, and for one redirected to a different object.
+//
+// What identity alone does NOT prove: that the bytes are unchanged. An in-place save keeps
+// the inode, and on filesystems that recycle inode numbers (ext4 does, immediately) even a
+// delete-and-recreate comes back with the same identity. CommitExpecting therefore also
+// re-reads every existing destination and compares it with the backup; this function is the
+// cheap first gate, not the whole check.
 //
 // want == nil means "the destination did not exist at check time".
 func verifyDestination(r *os.Root, op, rel string, want fs.FileInfo) error {
