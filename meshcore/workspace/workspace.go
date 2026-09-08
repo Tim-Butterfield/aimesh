@@ -43,7 +43,7 @@ package workspace
 
 import (
 	"bytes"
-	"crypto/sha1"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"io/fs"
@@ -917,6 +917,12 @@ func copyRegular(srcRoot, dstRoot *os.Root, op, rel string) error {
 // caller that treats the resulting set as complete would commit a subset of the reviewed
 // files while reporting success (and would see no mutation in a read-only copy whose
 // mutated subtree merely became unreadable).
+//
+// The digest is SHA-256 because the snapshot is a SECURITY control, not a change detector
+// of convenience: Discard compares it to catch a model that wrote into its read-only copy
+// (M5), and a hash with a practical collision attack would let a mutation hide behind an
+// unchanged digest. The digests live only in memory on the Handle — never written, never
+// reported — so the algorithm carries no compatibility weight and can be the strong one.
 func hashTree(root string) (map[string]string, error) {
 	out := map[string]string{}
 	r, err := openRootDir(root)
@@ -951,7 +957,7 @@ func hashTree(root string) (map[string]string, error) {
 			out[rel] = "unreadable:" + fi.Mode().String()
 			return nil
 		}
-		h := sha1.New()
+		h := sha256.New()
 		_, _ = io.Copy(h, f)
 		f.Close()
 		out[rel] = fmt.Sprintf("%x", h.Sum(nil))
