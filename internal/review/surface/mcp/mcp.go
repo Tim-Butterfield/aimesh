@@ -12,20 +12,20 @@
 //
 // Everything that follows from that is deliberate:
 //
-//  1. TRUSTED ROOTS ARE MANDATORY. Unlike exploremesh (which reads no files at all), this server
-//     takes paths. The roots are established at LAUNCH by a human — `--root`, or the validated
-//     launch cwd — exactly as on the ACP surface, and the same resolver judges every request path.
-//     A request may narrow the roots; nothing in a request can widen them. No roots is not
-//     "unrestricted", it is "every path refused".
-//  2. WRITING IS DOUBLY GATED, and the gates are different in kind. `review_remediate` is not even
-//     LISTED unless the config store grants this surface the `allowRemediate` capability (which
-//     `--allow-remediate` sets) — an operator-level decision. And every individual call must pass
-//     `allowWrite: true` — a per-call confirmation the calling model has to state. Neither gate is
-//     an exception above the policy ceiling: the ceiling is computed FROM the config, so granting
-//     the capability RAISES it (see config.SurfaceCeiling) rather than stepping around it.
-//  3. THE HONEST LIMIT, STATED. The double opt-in and the tool annotations are HINTS that
+//  1. THE SERVER READS NO CONFIGURATION. Its adapters, write grant and optional root ceiling come
+//     from its launch arguments, so it works on a fresh install, and every call composes its own
+//     panel from the adapters named at launch.
+//  2. SCOPE IS DECLARED PER CALL. Unlike exploremesh (which reads no files at all), this server takes
+//     paths. Each call names its absolute workspace (and any extra `roots`); that call is judged
+//     against exactly those paths, inside the operator's `--root` ceiling when one was set. Nothing
+//     is inferred from where the process started, and no call's scope is another call's.
+//  3. WRITING IS DOUBLY GATED, and the gates are different in kind. `output: "apply"` is refused
+//     unless the operator launched the server with `--allow-writes`; `output: "patch"` supplies the
+//     diff on every server. And every apply must pass `allowWrite: true` — a per-call confirmation the
+//     calling model has to state.
+//  4. THE HONEST LIMIT, STATED. The double opt-in and the tool annotations are HINTS that
 //     coordinate with the host's permission layer; they are not an authorization boundary against a
-//     confused or hostile client. What holds regardless is root confinement, the non-overridable
+//     confused or hostile client. What holds regardless is scope confinement, the non-overridable
 //     write denylist, the write-path rule (an applied hunk must trace to workspace evidence), and
 //     `fromRun`'s requirement that the decision set already exist as an inspectable artifact.
 package mcp
@@ -40,16 +40,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 	"github.com/Tim-Butterfield/aimesh/internal/review"
-	"github.com/Tim-Butterfield/aimesh/internal/review/access/config"
 	"github.com/Tim-Butterfield/aimesh/internal/review/engine/authority"
 	"github.com/Tim-Butterfield/aimesh/internal/review/engine/runview"
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
@@ -58,9 +56,8 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
-	// The trusted-root resolver is the ACP surface's and is reused unchanged: a peer-process caller is
-	// a peer-process caller whatever protocol it speaks, and two root models in one binary would be
-	// two confinement guarantees to keep in agreement. Only its types are imported here.
+	// The per-call scope builder is the ACP surface's and is reused unchanged: two scope models in one
+	// binary would be two confinement guarantees to keep in agreement.
 	"github.com/Tim-Butterfield/aimesh/internal/agentguide"
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/acp"
 	"github.com/Tim-Butterfield/aimesh/internal/review/version"
@@ -78,10 +75,6 @@ const (
 	toolRunStatus = "review_run_status"
 	toolRunResult = "review_run_result"
 )
-
-// capabilityName is the config capability that permits `review_remediate` (re-exported so `review_list`
-// can NAME the thing an operator would have to grant).
-const capabilityName = config.CapabilityAllowRemediate
 
 // maxArgumentBytes bounds one tool call's arguments before anything is decoded — the request-shape
 // half of the admission governor.
@@ -105,17 +98,10 @@ const defaultTurnTimeout = 10 * time.Minute
 // pipeline; only the transport differs, and a test can substitute a fake.
 type Reviewer interface {
 	RunContext(ctx context.Context, r run.Request) (review.RunOutcome, error)
-	// ReadDecisionSet resolves a run handle to the decision set that run recorded, VERIFYING the
-	// handle against the agent's own artifact directory rather than trusting it as a path. It
-	// returns the set and the canonical run directory. Declared exactly as the ACP surface declares
-	// it (surface/acp/acp.go), because it is the same reader answering the same question — the two
-	// surfaces differ in how a handle is SPELLED, not in what makes one trustworthy.
-	// See run.ReadDecisionSet.
-	ReadDecisionSet(handle string) (*run.StoredDecisionSet, string, error)
-	// RunHandle spells a run id as the handle ReadDecisionSet resolves. This surface hands a client
-	// an OPAQUE run id and never a host path, so it cannot form one itself and must not invent a
-	// second opinion about where this agent's runs live. See run.RunHandle.
-	RunHandle(runID string) string
+	// ReadDecisionSetByID resolves a run id for a run over workspace to the decision set that run
+	// recorded, VERIFYING the handle against that workspace's run-record locations rather than trusting
+	// it as a path. It returns the set and the canonical run directory. See run.ReadDecisionSetByID.
+	ReadDecisionSetByID(workspace, runID string) (*run.StoredDecisionSet, string, error)
 	Remediate(ctx context.Context, r run.RemediateRequest) (run.RemediateOutcome, error)
 }
 
@@ -126,47 +112,20 @@ type Server struct {
 	Manager Reviewer
 	Config  Config
 
-	// Adapters is the STARTUP-BOUND adapter set an ad-hoc panel may compose from. Empty means
-	// ad-hoc composition is refused — fail-closed, because "no configured set" must not read as
-	// "anything goes".
-	Adapters []string
+	// Adapters are the adapters this server was launched with (`--adapter`). A call's seats may name
+	// only these; empty means every run is refused until the operator names one.
+	Adapters launchflags.Set
 
-	// Roots are the MANDATORY trusted workspace roots of this server — the directories a HUMAN
-	// authorized before any request arrived (`aimesh review mcp --root <dir>`, or the validated launch
-	// cwd; see surface/acp/roots.go, whose model this reuses unchanged). Empty = every request path
-	// is refused.
-	Roots []string
-	// ClientRoots, when non-empty, are the roots an MCP client declared. The effective set is the
-	// INTERSECTION with Roots, never the union: a client may narrow what this server may read and
-	// can never widen it.
-	//
-	// It is the STARTING value only. Once the session is live the transport issues `roots/list` (and
-	// re-issues it on `notifications/roots/list_changed`), and the answer replaces this through
-	// applyClientRoots — which is why every read of the resolver goes through trusted() rather than
-	// through a field captured at build time.
+	// Ceiling is the operator's optional `--root` set: every path a call declares must lie inside it.
+	// Empty means no ceiling.
+	Ceiling []string
+	// ClientRoots, when non-empty, are the roots a legacy MCP client declared through `roots/list`. They
+	// only narrow: every path a call declares must also lie inside them.
 	ClientRoots []string
 
-	// RootSource is the PROVENANCE of Roots as ResolveTrustedRoots reported it: a human typed them
-	// (`--root`), or this process inferred them from its launch directory. Under the modern protocol
-	// era the difference decides whether there is a trusted root at all — see trustFor.
-	RootSource acp.RootSource
-	// AllowInferredRoot is the operator's `--allow-inferred-root` opt-in (D6): accept an INFERRED
-	// launch cwd as a trusted root even on the era that removed the client's ability to narrow this
-	// server. Default false, which is the fail-closed answer.
-	//
-	// It loosens nothing else. The degenerate-root rule already refused `/`, a home directory,
-	// home's parent and the system trees before this field is ever read, so the waiver can only admit
-	// a plausible project directory; scope.Resolver, the read denylist and every write-layer rule are
-	// untouched by it.
-	AllowInferredRoot bool
-
-	// PolicyCeiling is the config write-authority ceiling for the `mcp` surface
-	// (`surfaces.defaultModeBySurface.mcp`; the shipped seed is `report`). AllowRemediate is the
-	// `allowRemediate` capability read from the SAME config. Both are supplied by the launching
-	// command from one config snapshot, so the tool list, the per-call refusal and the Manager's
-	// own resolution all read the same policy.
-	PolicyCeiling  review.Mode
-	AllowRemediate bool
+	// AllowWrites is the operator's `--allow-writes` grant. Without it aimesh never changes project
+	// content: review_remediate still supplies the diff (`output: "patch"`) and the agent applies it.
+	AllowWrites bool
 	// VerifyCommands / VerifyTimeout / VerifyBaseline carry BOUNDED EXECUTION: the project's own
 	// build/test commands, run on the containment copy and recorded. Empty means nothing is executed.
 	//
@@ -201,7 +160,7 @@ type Server struct {
 	// means dual). It is reported by `review_doctor` and not only announced on stderr, because a host
 	// launches its servers from a config file and MAY discard stderr entirely.
 	//
-	// SUNSET-PATH (MCP26-SUNSET; migration design §16.2): removed with the legacy era.
+	// SUNSET-PATH (MCP26-SUNSET): removed with the legacy era.
 	Protocol proto.ProtocolMode
 	// Diagnostics is the server's own log sink. It must never be the protocol stream.
 	Diagnostics io.Writer
@@ -220,125 +179,21 @@ type Server struct {
 	// are actually fetched from.
 	artifacts proto.RunStore
 
-	// trustMu guards trust, which is REPLACED whenever the client's declared roots arrive or change.
-	// Every read goes through trusted(): a resolver captured once at build time would keep enforcing a
-	// root set the client has since narrowed.
-	trustMu sync.RWMutex
-	trust   *scope.Resolver
+	// clientMu guards ClientRoots, which a legacy client's `roots/list` answer replaces mid-session.
+	clientMu sync.RWMutex
 }
 
-// trusted is THE resolver in force right now. It never returns nil: a root set that cannot be
-// canonicalized, or an intersection that came out empty, yields the zero resolver — which refuses every
-// path, rather than degrading to "unrestricted".
-//
-// IT IS NOT REACHABLE FROM A HANDLER. Every handler resolves through `c.Env().Trust` instead — the
-// resolver captured for THAT request (see trustFor). This function has exactly two callers left: the
-// per-request capture itself, and the diagnostics line in applyClientRoots. That is the point: after
-// the per-request envelope there is no code path from a tool handler to a process-global resolver, so
-// per-call narrowing is expressible and confinement is mechanical rather than a convention.
-func (s *Server) trusted() *scope.Resolver {
-	s.trustMu.RLock()
-	defer s.trustMu.RUnlock()
-	if s.trust == nil {
-		return &scope.Resolver{}
-	}
-	return s.trust
+// clientRoots returns the roots a legacy client declared, or nil when it declared none.
+func (s *Server) clientRoots() []string {
+	s.clientMu.RLock()
+	defer s.clientMu.RUnlock()
+	return append([]string(nil), s.ClientRoots...)
 }
 
-// trustFor captures the confinement for ONE request: the effective roots as the resolver canonicalized
-// them, their provenance, whether anything narrowed the operator's startup set, and the resolver
-// itself. The transport calls it once per dispatched request and carries the answer on the Call.
-//
-// Reading the resolver and the client-roots flag in ONE critical section matters: a `roots/list_changed`
-// arriving between two separate reads could otherwise pair a resolver with a `narrowed` flag describing
-// a different root set.
-// THE MODERN ERA FAILS CLOSED ON AN INFERRED ROOT, and that is this function's second job.
-//
-// Under 2025-06-18 a host narrows this server through `roots/list`. 2026-07-28 deletes that method,
-// so ClientRoots is permanently empty there and `len(ClientRoots) == 0 ⇒ the server's own roots
-// stand` always wins — meaning the SAME launch configuration grants strictly MORE filesystem
-// authority to a client that happens to speak the newer revision. A host that used to narrow us from
-// an inferred repo root down to its one open folder simply stops narrowing us, silently, because of
-// a version string.
-//
-// The fix is not a diagnostic (a diagnostic does not obtain anybody's consent). Under the modern era
-// authority must have been TYPED BY A HUMAN: an inferred launch cwd is not a trusted root unless the
-// operator waived it with `--allow-inferred-root`. Refused means the zero resolver — every
-// filesystem path denied with scope.ReasonNoRoots — which is a refusal the operator fixes with one
-// flag, not a widening nobody noticed. It is not a brick either: `inlineWorkspace` consumes no
-// trusted root, so a modern client with zero roots can still perform a complete inline review.
-//
-// SUNSET-PATH (MCP26-SUNSET; migration design §16.2): at legacy removal the era parameter and
-// this branch collapse into the modern rule.
-func (s *Server) trustFor(era proto.Era) proto.TrustContext {
-	s.trustMu.RLock()
-	r, narrowed := s.trust, len(s.ClientRoots) > 0
-	s.trustMu.RUnlock()
-	if r == nil {
-		r = &scope.Resolver{}
-	}
-	// The era-conditional refusal that used to live here is gone, replaced by an evidence test at
-	// the point of inference (acp.resolveTrustedRoots: the cwd is adopted only when it carries a
-	// PROJECT MARKER). It was keyed on the wrong variable. The stated risk was that the newest
-	// revision removes the client's ability to narrow the server — but a legacy client that simply
-	// declines the roots capability does not narrow it either, and that case was granted the
-	// unnarrowed cwd silently, so the rule missed the very exposure it named while firing on a
-	// default launch that a new user had no way to diagnose. Asking "is there any reason to believe
-	// this directory is the work" answers both, identically on both eras.
-	return proto.TrustContext{Roots: r.Roots(), Source: rootSourceOf(s.RootSource), Narrowed: narrowed, Resolver: r}
-}
-
-// rootSourceOf maps the resolver's provenance onto the transport's. Two enums exist because the
-// transport is domain-free and the root resolver is reviewmesh's: neither should have to import the
-// other to name the same three facts.
-func rootSourceOf(src acp.RootSource) proto.RootSource {
-	switch src {
-	case acp.RootsExplicit:
-		return proto.RootsExplicit
-	case acp.RootsInferredCwd:
-		return proto.RootsInferredCwd
-	case acp.RootsNone:
-		return proto.RootsNone
-	default:
-		// A server constructed without provenance (every in-repo test that sets Roots directly) says
-		// so rather than claiming a human typed them. The env still resolves an empty set to
-		// RootsNone, which is the answer that fails closed.
-		return proto.RootsUnknown
-	}
-}
-
-// rebuildTrust recomputes the resolver from the effective (startup ∩ client) roots.
-func (s *Server) rebuildTrust() {
-	s.trustMu.Lock()
-	defer s.trustMu.Unlock()
-	s.rebuildTrustLocked()
-}
-
-// rebuildTrustLocked is the same, for a caller that is already replacing ClientRoots under the lock.
-// The read of ClientRoots and the swap of the resolver have to be ONE critical section: two overlapping
-// root refreshes (the one after initialize and one from a `list_changed` that arrived immediately after)
-// would otherwise be able to interleave a set with a resolver built from the other.
-func (s *Server) rebuildTrustLocked() {
-	r, err := scope.New(s.effectiveRoots()...)
-	if err != nil || r == nil {
-		r = &scope.Resolver{}
-	}
-	s.trust = r
-}
-
-// applyClientRoots is what the `roots/list` round trip feeds. It is the ONLY place the client can affect
-// what this server may read, and it can only ever narrow:
-//
-//   - The effective set is startup ∩ client, computed by intersectRoots, which for each pair keeps the
-//     DEEPER directory and keeps nothing at all when the two are disjoint. A client that offers a root
-//     the operator did not launch this server with contributes nothing; a client that offers a WIDER
-//     root than the server's leaves the server's own narrower one in force.
-//   - An empty intersection is fail-closed BY CONSTRUCTION: scope.New with no roots refuses every path.
-//   - A client that declares the capability but lists NO roots changes nothing. An empty list is the
-//     absence of a declaration ("I have no roots to tell you about"), not a declaration of nothing, and
-//     reading it as "restrict yourself to the empty set" would break a host that simply has no workspace
-//     open. The same rule the field already had: len(ClientRoots) == 0 ⇒ the server's own roots stand.
-//   - A root URI that is not a local `file://` path is IGNORED rather than guessed at.
+// applyClientRoots records what the legacy `roots/list` round trip answered. Those roots only ever
+// NARROW: every path a later call declares must also lie inside them (see callScope). A client that
+// declares the capability but lists no roots narrows nothing, and a root URI that is not a local
+// `file://` path is ignored rather than guessed at.
 func (s *Server) applyClientRoots(roots []proto.Root) {
 	var paths []string
 	skipped := 0
@@ -350,18 +205,11 @@ func (s *Server) applyClientRoots(roots []proto.Root) {
 		}
 		paths = append(paths, p)
 	}
-	s.trustMu.Lock()
+	s.clientMu.Lock()
 	s.ClientRoots = paths
-	s.rebuildTrustLocked()
-	eff := s.trust.Roots()
-	s.trustMu.Unlock()
-	// Stated on the DIAGNOSTICS sink (never the protocol stream), because an operator watching a
-	// server narrow itself mid-session should not have to infer it from a later refusal.
-	s.core.Diagnosticf("aimesh review mcp: client declared %d root(s) (%d not a local file:// path, ignored); effective trusted roots = startup ∩ client = %d",
-		len(roots), skipped, len(eff))
-	if len(paths) > 0 && len(eff) == 0 {
-		s.core.Diagnosticf("aimesh review mcp: the client's roots are DISJOINT from this server's — the intersection is empty, so every filesystem path is now refused (fail-closed). A client can narrow this server's roots; it can never widen them.")
-	}
+	s.clientMu.Unlock()
+	s.core.Diagnosticf("aimesh review mcp: client declared %d root(s) (%d not a local file:// path, ignored); every path a call declares must lie inside them",
+		len(roots), skipped)
 }
 
 // Serve builds the tool set and serves MCP over the given streams until EOF. On return every
@@ -385,9 +233,8 @@ func (s *Server) build() { s.buildInto(nil) }
 // `aimesh mcp` server uses — and returns the two providers the composer must fold in, because a
 // single proto.Server has one Resources field and one Tasks field and both domains need theirs.
 //
-// It also applies review's own core wiring (OnRoots, TrustFor) to that shared core. Those are
-// harmless to a co-hosted explore: explore consults no roots, so a client narrowing this server's
-// root set affects only the tools that read paths.
+// It also applies review's own core wiring (OnRoots) to that shared core. That is harmless to a
+// co-hosted explore: explore reads no paths, so a client's declared roots affect only review's calls.
 func (s *Server) Attach(core *proto.Server) (proto.ResourceProvider, proto.TaskProvider) {
 	s.buildInto(core)
 	return &s.artifacts, taskProvider{s}
@@ -407,7 +254,6 @@ func (s *Server) buildInto(core *proto.Server) {
 		// The shared core is the composer's, so only the fields that are REVIEW's semantics go on it
 		// here. Info/Instructions/Framing/Protocol belong to the composed server as a whole.
 		s.core.OnRoots = s.applyClientRoots
-		s.core.TrustFor = s.trustFor
 	} else {
 		s.core = &proto.Server{
 			Info:         proto.Implementation{Name: ServerName, Title: "reviewmesh", Version: version.Get().Version},
@@ -419,26 +265,15 @@ func (s *Server) buildInto(core *proto.Server) {
 			// The `roots/list` round trip. It fires only when the CLIENT declared the capability, and it
 			// can only narrow — see applyClientRoots.
 			OnRoots: s.applyClientRoots,
-			// PER-REQUEST CONFINEMENT. The transport captures this once per dispatched request and hands
-			// it to the handler on the Call, so every path a call names is judged against the roots in
-			// force when that call arrived — not against whatever a process-global resolver happens to
-			// hold when the handler gets round to asking.
-			TrustFor: s.trustFor,
 			// `resources/*`, so a governed write can actually be collected. The store is this server's
 			// own registration table; it publishes no host path.
 			Resources: &s.artifacts,
 			// The `io.modelcontextprotocol/tasks` extension, as a PROJECTION over the run registry —
 			// `taskId == runId`, no second execution model (see tasks.go). It is opt-in per client and
-			// modern-era only, so a client that declares nothing sees exactly the job shape it saw
-			// before this existed.
+			// modern-era only, so a client that declares nothing sees only the job shape.
 			Tasks: taskProvider{s},
 		}
 	}
-	// THE resolver for this server, built from the EFFECTIVE roots. One resolver governs every
-	// request-supplied path — the workspace and the authority documents — so confinement cannot
-	// diverge between two code paths that both take paths. A root set that cannot be canonicalized
-	// does NOT degrade to "unrestricted": it yields the zero resolver, which refuses everything.
-	s.rebuildTrust()
 	s.registerTools()
 }
 
@@ -456,29 +291,13 @@ func (s *Server) turnBudget() time.Duration {
 	return defaultTurnTimeout
 }
 
-// allowRemediate reports whether this server may write. It is the config capability and nothing
-// else: there is deliberately no second way to reach true.
-func (s *Server) allowRemediate() bool { return s.AllowRemediate }
-
-// remediationCeiling is how far this server may write. Without the capability it is the surface's
-// configured mode ceiling (the shipped `report`), which is why the tool is not listed at all.
-func (s *Server) remediationCeiling() review.Mode {
-	if !s.allowRemediate() {
-		if s.PolicyCeiling != "" {
-			return s.PolicyCeiling
-		}
-		return review.ModeReport
+// writesValue names who performs writes on this server: aimesh when the operator launched it with
+// --allow-writes, else the agent itself.
+func (s *Server) writesValue() string {
+	if s.AllowWrites {
+		return "aimesh"
 	}
-	return review.ModeApply
-}
-
-// effectiveRoots is the trusted-root set in force: the server's roots, INTERSECTED with any the
-// client declared.
-func (s *Server) effectiveRoots() []string {
-	if len(s.ClientRoots) == 0 {
-		return s.Roots
-	}
-	return intersectRoots(s.Roots, s.ClientRoots)
+	return "agent"
 }
 
 // traceOf lifts the caller's W3C trace context off a request's protocol context into the run
@@ -530,7 +349,7 @@ func (s *Server) registerTools() {
 		Title: "Review an artifact with a blind multi-model panel",
 		Description: "Runs the governed review cycle — a blind panel of independent reviewer seats, then HOST adjudication — and returns the adjudicated findings with their per-seat provenance. " +
 			"It makes NO CHANGES to the workspace: to apply the accepted fixes afterwards, call review_remediate with this run's runId. " +
-			"SPENDS MONEY: it launches the configured model CLIs. Paths must resolve inside this server's trusted roots. " +
+			"SPENDS MONEY: it launches the model CLIs the panel names. The workspace is an absolute path the call declares, and it is the call's root. " +
 			"Job-shaped: if the run outlives waitSeconds you get a runId to poll with review_run_status.",
 		InputSchema:  raw(reportInputSchema),
 		OutputSchema: raw(reportResultSchema),
@@ -542,39 +361,26 @@ func (s *Server) registerTools() {
 		Annotations: spendAnnotations("Review (reports findings; writes no workspace changes)", false),
 	}, s.reportHandler)
 
-	// DOUBLE OPT-IN, first gate: the write primitive is not merely refused without the capability —
-	// it is not ADVERTISED. A model cannot be talked into calling a tool it was never told exists,
-	// and a client that never sees it cannot present it to a user as available.
-	if s.allowRemediate() {
-		s.core.Register(proto.Tool{
-			Name:  toolRemediate,
-			Title: "Apply accepted review findings",
-			Description: "WRITES TO THE WORKSPACE. Applies the ALREADY-ADJUDICATED accepted findings of a prior review_report run (`fromRun`) — nothing is re-reviewed and nothing is re-judged. " +
-				"Use output=patch to produce a diff artifact and change nothing, or output=apply to write the live files. Every call must pass allowWrite: true. " +
-				"`fromRun` is the ONLY form on this surface: it lets a human read the accepted set BEFORE anything is written. " +
-				"NEITHER a retry NOR a restart can make it write twice, but they report differently: while this server is running, a retry returns the ORIGINAL receipt; after a restart the run is re-read from disk, the first write has already changed the files the decision set pins, and the second call HALTS (reasonCode stale_decision_set) having written nothing. " +
-				"If any targeted file has changed since the review, the call HALTS rather than applying a stale decision. To review without changing anything, use review_report.",
-			InputSchema:  raw(remediateInputSchema),
-			OutputSchema: raw(remediateResultSchema),
-			Annotations:  spendAnnotations("Remediate (writes files)", true),
-		}, s.remediateHandler)
-	} else {
-		// SAY WHICH GATE IS MISSING. The tool stays unadvertised — that is gate one and it is the
-		// stronger property — but a caller that names it anyway is told the truth about WHY, because
-		// the two refusals need opposite responses from a model: "the operator must relaunch this
-		// server" is a message to pass to a human, whereas "add allowWrite and retry" is something
-		// the model can fix itself. A bare "unknown tool" reads as the third thing, "you imagined
-		// this tool", and sends it hunting for a different one.
-		if s.core.WithheldTools == nil {
-			s.core.WithheldTools = map[string]string{}
-		}
-		s.core.WithheldTools[toolRemediate] = "this server was launched WITHOUT the write grant, so it cannot write to the workspace at all. This is an OPERATOR decision made before your request and you cannot change it from here — ask the human to relaunch with --allow-remediate (or to grant the " + capabilityName + " capability in config). Do not retry, and do not look for another tool that writes: there is none. review_report still works and reports findings without writing."
-	}
+	// review_remediate is listed on every server: its patch output changes no project content, so an
+	// agent can always ask for the diff and apply it itself. Its apply output is gated per call
+	// (allowWrite) and by the operator's --allow-writes launch grant — see remediationMode.
+	s.core.Register(proto.Tool{
+		Name:  toolRemediate,
+		Title: "Produce or apply accepted review findings",
+		Description: "Produces or applies the ALREADY-ADJUDICATED accepted findings of a prior review_report run (`fromRun`, with the `workspace` that run reviewed) — nothing is re-reviewed and nothing is re-judged. " +
+			"output=patch returns the complete diff and changes no project content; it works on every server, so you can apply the change with your own file tools. " +
+			"output=apply WRITES THE WORKSPACE, needs allowWrite: true, and works only when the operator launched this server with --allow-writes (review_doctor reports `writes`). " +
+			"NEITHER a retry NOR a restart can make it apply twice, but they report differently: while this server is running, a retry returns the ORIGINAL receipt; after a restart the run is re-read from its record, the first apply has already changed the files the decision set pins, and the second call HALTS (reasonCode stale_decision_set) having written nothing. " +
+			"If any targeted file has changed since the review, the call HALTS rather than acting on a stale decision.",
+		InputSchema:  raw(remediateInputSchema),
+		OutputSchema: raw(remediateResultSchema),
+		Annotations:  spendAnnotations("Remediate (patch, or apply with --allow-writes)", true),
+	}, s.remediateHandler)
 
 	s.core.Register(proto.Tool{
 		Name:         toolList,
-		Title:        "Report the configured adapters and profiles",
-		Description:  "Reports what this server can run: adapter IDENTIFIERS and their readiness, the configured profiles (their ordered blind panel and single-slot lanes), the review modes, whether remediation is permitted, and the admission limits in force. Read-only. Reports no binary paths, launch arguments, trusted-root paths or environment detail, and cannot change any configuration. Call this before composing a panel.",
+		Title:        "Report the launched adapters and write posture",
+		Description:  "Reports what this server can run: the adapters it was launched with and whether each can be started now, the review modes, who performs writes (writes: aimesh|agent, diffAvailable), how many --root ceiling directories bound calls, and the admission limits in force. Read-only. Reports no binary paths, launch arguments, root paths or environment detail, and cannot change any configuration. Call this before composing a panel.",
 		InputSchema:  raw(emptyInputSchema),
 		OutputSchema: raw(listOutputSchema),
 		Annotations:  readOnlyAnnotations("List configuration"),
@@ -662,7 +468,6 @@ type panelArg struct {
 type runArgs struct {
 	Workspace       string                `json:"workspace"`
 	InlineWorkspace map[string]string     `json:"inlineWorkspace"`
-	Profile         string                `json:"profile"`
 	Panel           *panelArg             `json:"panel"`
 	Authority       []review.AuthorityDoc `json:"authority"`
 	WaitSeconds     *int                  `json:"waitSeconds"`
@@ -690,75 +495,60 @@ type runArgs struct {
 	// dryRun prices these calls and performs none of them.
 	VerifyReadiness bool   `json:"verifyReadiness"`
 	IdempotencyKey  string `json:"idempotencyKey"`
-	// Roots is the NARROWING-ONLY per-call root argument: the effective set for this call is
-	// intersectRoots(env.Roots, Roots). See narrowRoots.
+	// Roots are EXTRA absolute directories this call reads beside its workspace — for example the
+	// project folder that holds authority documents while the workspace is a temporary directory.
+	// See callScope.
 	Roots []string `json:"roots"`
 }
 
-// narrowRoots applies a caller-supplied `roots` argument to one request's protocol context.
+// callScope builds the confinement for ONE call from the paths that call declares: its workspace (when
+// it names one) and its extra `roots`. Every path must be absolute, must not be the filesystem root, a
+// home directory, a system tree or a protected directory, and must lie inside the operator's --root
+// ceiling when one was set; a legacy client's declared roots narrow it further. The returned env carries
+// that resolver, so everything the call reads is judged against its own scope and never another call's.
 //
-// THE ENTIRE SAFETY ARGUMENT IS intersectRoots. It keeps the deeper directory of each overlapping
-// pair, keeps nothing when a pair is disjoint, and is NEVER a union. Therefore:
-//
-//   - the argument can only ever SHRINK the authority the call already had;
-//   - a path outside the startup roots is not granted by naming it — the intersection drops it;
-//   - an empty intersection is a refusal, not a fallback to "the roots you had";
-//   - a hostile or confused model can, at worst, refuse its own call. It cannot reach anything new.
-//
-// This is the migration the `client/roots` page itself names — "existing implementations SHOULD
-// migrate to passing directories or files via tool parameters, resource URIs, or server
-// configuration" — applied literally, and it reproduces what `roots/list` did with the same code.
-//
-// IT IS ERA-NEUTRAL. Under the legacy era the intersection is three-way (startup ∩ client ∩ call);
-// under modern the client leg is absent and it is two-way. One code path, testable before the modern
-// era is reachable at all, and it survives legacy removal unchanged — so this mechanism is not
-// scaffolding.
-//
-// The operator's `--root` set remains the CEILING in both eras. The model may lower it for one call
-// and may not raise it, which is why accepting this from a model is composition rather than
-// configuration: it touches no config store, it is transient, and it cannot grant authority.
-func narrowRoots(env *proto.RequestEnv, call []string) (*proto.RequestEnv, *proto.CallToolResult, error) {
-	if len(call) == 0 {
-		return env, nil, nil
+// A call that declares no path (an inline workspace with no extra roots) gets the zero resolver, which
+// refuses every filesystem path: inline content consumes no root.
+func (s *Server) callScope(env *proto.RequestEnv, workspace string, extra []string) (*proto.RequestEnv, *proto.CallToolResult, error) {
+	var paths []string
+	if ws := strings.TrimSpace(workspace); ws != "" {
+		paths = append(paths, ws)
 	}
-	cleaned := make([]string, 0, len(call))
-	for _, raw := range call {
-		p := strings.TrimSpace(raw)
-		if p == "" || !filepath.IsAbs(p) {
-			return nil, nil, proto.InvalidParams(
-				"invalid params: every entry of `roots` must be an ABSOLUTE directory path; got %q. `roots` NARROWS this call to a subset of the roots the operator established at launch — it cannot add one, and a relative path has no meaning to a server that does not share your working directory.", raw)
+	for _, r := range extra {
+		if strings.TrimSpace(r) == "" {
+			return nil, nil, proto.InvalidParams("invalid params: `roots` entries must be non-empty absolute directory paths")
 		}
-		cleaned = append(cleaned, filepath.Clean(p))
+		paths = append(paths, r)
 	}
-	// CANONICALIZE THE CALLER'S PATHS THE SAME WAY THE ENFORCER DOES, before comparing them. env.Roots
-	// are the resolver's canonical forms; a caller's spelling is not. Intersecting the two as typed
-	// would make `/tmp/x` and `/private/tmp/x` — the same directory through a symlinked prefix, which
-	// is the ordinary case on macOS — look DISJOINT, and a narrowing that silently became a refusal is
-	// a fail-closed bug rather than a safe one. scope.New is reused rather than a local normalizer for
-	// the same reason: two canonicalizations of one path is how they come to disagree.
-	asked, aerr := scope.New(cleaned...)
-	if aerr != nil || asked == nil {
-		return nil, nil, proto.InvalidParams(
-			"invalid params: `roots` cannot be resolved: %v", aerr)
+	scoped := *env
+	if len(paths) == 0 {
+		scoped.Roots, scoped.Trust, scoped.Narrowed = nil, &scope.Resolver{}, false
+		return &scoped, nil, nil
 	}
-	eff := intersectRoots(env.Roots, asked.Roots())
-	if len(eff) == 0 {
-		// FAIL-CLOSED, and stated as a refusal about the world rather than a malformed request: the
-		// call was well-formed and asks for a scope this server was not granted. The roots themselves
-		// are not named — their paths map the operator's machine and a caller does not need them in
-		// order to correct the call.
-		return nil, domainRefusal("", fault.New(fault.Containment, fmt.Sprintf(
-			"the `roots` argument names %d director(y/ies) that do not intersect this server's %d trusted root(s), so this call has no effective root and every path in it is refused. `roots` can only NARROW the operator's launch-time roots; it can never add one.",
-			len(cleaned), len(env.Roots))).
-			WithHalt("M6").WithReason(string(scope.ReasonNoRoots))), nil
+	r, err := acp.CallScope(paths, s.Ceiling, "")
+	if err != nil {
+		switch fault.ReasonOf(err) {
+		case acp.ReasonCallPathRelative, acp.ReasonCallNoPath:
+			return nil, nil, proto.InvalidParams("invalid params: %v", err)
+		}
+		return nil, domainRefusal("", err), nil
 	}
-	r, err := scope.New(eff...)
-	if err != nil || r == nil {
-		r = &scope.Resolver{}
+	client := s.clientRoots()
+	if len(client) > 0 {
+		narrow, nerr := scope.New(client...)
+		if nerr != nil || narrow == nil {
+			return nil, domainRefusal("", fault.New(fault.Containment, "the roots this client declared cannot be resolved, so no path is admitted").
+				WithHalt("M6").WithReason(string(scope.ReasonUnresolvable))), nil
+		}
+		for _, p := range r.Roots() {
+			if _, derr := narrow.ResolveRead(p); derr != nil {
+				return nil, domainRefusal("", fault.New(fault.Containment, fmt.Sprintf("%q is outside the roots this client declared; a client's roots narrow what a call may read", p)).
+					WithHalt("M6").WithReason(string(scope.ReasonOutsideRoot))), nil
+			}
+		}
 	}
-	narrowed := *env
-	narrowed.Roots, narrowed.Trust, narrowed.Narrowed = r.Roots(), r, true
-	return &narrowed, nil, nil
+	scoped.Roots, scoped.Trust, scoped.Narrowed = r.Roots(), r, len(client) > 0
+	return &scoped, nil, nil
 }
 
 // remediateArgs adds the write parameters. `fromRun` and the full-cycle parameters are mutually
@@ -769,13 +559,12 @@ type remediateArgs struct {
 	Output     string `json:"output"`
 	AllowWrite *bool  `json:"allowWrite"`
 	// Select is the SELECTIVE-APPLY filter: host-computed fingerprints from the source run's
-	// accepted findings, naming which of them to write (D8-A). Absent applies the whole accepted
+	// accepted findings, naming which of them to write. Absent applies the whole accepted
 	// set; present-and-empty is refused, never widened.
 	//
-	// A pointer to a slice, so that "absent" and "[]" are DIFFERENT requests. This decoder is
-	// strict (`DisallowUnknownFields`), so before this parameter existed a `select` was a -32602
-	// rather than a silently dropped narrowing — which is the failure a narrowing filter must never
-	// have, and the reason the ACP surface had to declare it explicitly to get the same property.
+	// A pointer to a slice, so that "absent" and "[]" are DIFFERENT requests. The decoder is strict
+	// (`DisallowUnknownFields`), so a misspelled narrowing filter is a -32602 rather than silently
+	// dropped — the failure a narrowing filter must never have.
 	Select *[]string `json:"select"`
 }
 
@@ -839,15 +628,17 @@ type prepared struct {
 // `env` is the request's protocol context: every path this function judges is judged against
 // `env.Trust`, the resolver captured when the call arrived, never against a process-global one.
 func (s *Server) prepare(env *proto.RequestEnv, args runArgs, mode review.Mode, tool string) (*prepared, *proto.CallToolResult, error) {
-	// The per-call narrowing is applied FIRST, so that every judgement below — the workspace, the
-	// authority documents, and the roots recorded on the run request — is made against the same,
-	// already-narrowed resolver. Applying it later would let one of them be judged against a scope
-	// the call had asked to give up.
-	env, nres, nerr := narrowRoots(env, args.Roots)
+	// The call's scope is built FIRST, so that every judgement below — the workspace, the authority
+	// documents, and the roots recorded on the run request — is made against the same resolver.
+	declared := args.Workspace
+	if len(args.InlineWorkspace) > 0 {
+		declared = ""
+	}
+	env, nres, nerr := s.callScope(env, declared, args.Roots)
 	if nerr != nil || nres != nil {
 		return nil, nres, nerr
 	}
-	pick, ov, ovm, err := s.resolveSelection(args.Profile, args.Panel)
+	pick, err := s.resolveSelection(args.Panel)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -879,8 +670,8 @@ func (s *Server) prepare(env *proto.RequestEnv, args runArgs, mode review.Mode, 
 		return nil, proto.ErrorResult(text, structured), nil
 	}
 	req := run.Request{
-		Workspace: ws, Mode: mode, Surface: "mcp", Profile: strings.TrimSpace(args.Profile),
-		AdapterOverride: ov, ModelOverride: ovm, ReviewerPanel: pick.reviewers,
+		Workspace: ws, Mode: mode, Surface: "mcp",
+		ReviewerPanel: pick.reviewers, ComposedRoles: pick.roles,
 		Authority: args.Authority, TrustedRoots: env.Roots, Trace: traceOf(env),
 		// Recorded on the run's DURABLE decision set, so the on-disk artifact says the same thing
 		// about this run that this server's in-memory registry does. This surface READS it back:
@@ -1003,7 +794,7 @@ func (s *Server) finishReport(rec *record, prep *prepared, out review.RunOutcome
 	// a different set than the one a human read.
 	set := &decisionSet{
 		Workspace: prep.request.Workspace, Inline: prep.inline,
-		Profile: prep.request.Profile, Panel: prep.request.ReviewerPanel,
+		Profile: prep.request.Profile, Panel: prep.request.ReviewerPanel, Overrides: prep.request.ComposedRoles,
 		Findings: out.Findings, Decisions: out.Decisions,
 		Shown: map[string]bool{},
 	}
@@ -1031,7 +822,7 @@ func (s *Server) finishReport(rec *record, prep *prepared, out review.RunOutcome
 // An inline workspace never can: the directory the content was materialized into belongs to this
 // process and is deleted when the run ends, so there is nothing real to write to.
 func (s *Server) remediable(prep *prepared) bool {
-	return s.allowRemediate() && !prep.inline
+	return !prep.inline
 }
 
 // acceptedFiles is the set of workspace-relative files the accepted findings target — exactly the
@@ -1167,63 +958,52 @@ func (s *Server) remediateHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 	if err := decode(c.Arguments, &args); err != nil {
 		return nil, err
 	}
-	// DOUBLE OPT-IN, second gate. It is checked FIRST, before anything else about the request is
-	// considered, so a call that never confirmed the write cannot spend a cent learning that its
-	// panel was also malformed.
-	if args.AllowWrite == nil || !*args.AllowWrite {
-		return nil, proto.InvalidParams(
-			"invalid params: `allowWrite` must be present and literally true — review_remediate WRITES to the workspace, and this server requires per-call confirmation in addition to the operator's launch-time opt-in. Corrected call: {\"fromRun\": \"<a review_report runId>\", \"output\": \"patch\", \"allowWrite\": true}")
-	}
 	mode, merr := s.remediationMode(args.Output)
 	if merr != nil {
 		return nil, merr
+	}
+	// An apply WRITES THE WORKSPACE, so it is confirmed per call on top of the operator's launch grant.
+	// It is checked before anything else about the request, so a call that never confirmed the write
+	// cannot spend anything learning that the rest of it was also malformed.
+	if mode == review.ModeApply && (args.AllowWrite == nil || !*args.AllowWrite) {
+		return nil, proto.InvalidParams(
+			"invalid params: `allowWrite` must be present and literally true for output=apply — an apply writes the workspace and is confirmed per call. Corrected call: {\"fromRun\": \"<a review_report runId>\", \"workspace\": \"<absolute workspace>\", \"output\": \"apply\", \"allowWrite\": true}")
 	}
 	if len(args.InlineWorkspace) > 0 {
 		return nil, proto.InvalidParams(
 			"invalid params: `inlineWorkspace` cannot be remediated — the content was supplied over the wire and materialized into a directory this server owns and then deletes, so there is nothing real to write to. Review inline content with review_report, and remediate a workspace path that resolves inside this server's trusted roots.")
 	}
 	fromRun := strings.TrimSpace(args.FromRun)
-	// D5: MCP WRITES GO THROUGH `fromRun`, AND ONLY THROUGH `fromRun`.
-	//
-	// The problem it answers is a protocol one. On 2026-07-28 stdio a cancelled request may receive no
-	// further message at all, so a write whose response is cancelled tells the caller nothing — and if
-	// that call was also the call that CREATED the run, the caller is left holding no handle to the
-	// run that may have written to its files. The full-cycle form is the only form with that shape.
-	//
-	// `fromRun` closes it with no new parameter and no new concept: it is not a key the caller invents,
-	// it is a value the caller ALREADY RECEIVED, in a completed response, before the write request was
-	// ever sent. Cancellation cannot retract a message already delivered, so at the instant the write
-	// window opens the caller provably holds a handle. It is also the spec's own prescribed pattern —
-	// basic/index: "State that needs to span multiple requests (e.g., long-running tasks,
-	// application-level handles) MUST be referenced by an explicit identifier the client passes on each
-	// request."
-	//
-	// The rule is ERA-NEUTRAL — applied on legacy MCP as well — because making it era-conditional would
-	// mean two write shapes on one surface, which is worse than the breaking change. It is a deliberate
-	// breaking change to this tool's input schema and docs/mcp.md says so.
-	//
-	// The CLI keeps its full cycle, and that asymmetry is the justified one: the CLI caller is a human
-	// at a terminal who is shown the run directory on stderr as the run starts, and there is no
-	// response to lose because the process is the answer.
+	// MCP WRITES GO THROUGH `fromRun`, AND ONLY THROUGH `fromRun`, on both protocol eras. On 2026-07-28
+	// stdio a cancelled request may receive no further message at all, so a write whose response is
+	// cancelled tells the caller nothing; `fromRun` is a value the caller ALREADY RECEIVED in a completed
+	// response, so at the instant the write window opens the caller provably holds a handle. basic/index:
+	// "State that needs to span multiple requests ... MUST be referenced by an explicit identifier the
+	// client passes on each request." The CLI keeps its one-call cycle: its caller is a human at a
+	// terminal who is shown the run directory as the run starts, with no response to lose.
 	if fromRun == "" {
+		confirm := ""
+		if mode == review.ModeApply {
+			confirm = ", \"allowWrite\": true"
+		}
 		return nil, proto.InvalidParams(
-			"invalid params: review_remediate on MCP writes only from an existing run's accepted findings — call review_report first, then review_remediate {\"fromRun\": \"<runId>\", \"output\": %q, \"allowWrite\": true}. "+
-				"The run id from review_report is your DURABLE HANDLE: it survives cancellation of the write call, which on 2026-07-28 stdio cannot be answered at all. "+
-				"The one-call form (review and write together) is not offered on this surface, because a caller whose response is cancelled would be left holding nothing while a write may have happened.",
-			string(mode))
+			"invalid params: review_remediate works only from an existing run's accepted findings — call review_report first, then review_remediate {\"fromRun\": \"<runId>\", \"workspace\": \"<absolute workspace>\", \"output\": %q%s}. "+
+				"The run id from review_report is your DURABLE HANDLE: it survives cancellation of this call.",
+			string(mode), confirm)
 	}
 	if err := refuseRunFormingArgs(args.runArgs, fromRun, mode); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(args.Workspace) != "" {
+	workspace := strings.TrimSpace(args.Workspace)
+	if workspace == "" {
 		return nil, proto.InvalidParams(
-			"invalid params: `workspace` cannot be set beside `fromRun` — the workspace is the SOURCE RUN's, captured when it was reviewed, and re-naming it here would let a write land somewhere the accepted set was never judged against. Corrected call: {\"fromRun\": %q, \"output\": %q, \"allowWrite\": true}", fromRun, string(mode))
+			"invalid params: `workspace` is required beside `fromRun` — name the ABSOLUTE workspace the source run reviewed. It locates that run's record, and it must be the same tree the run judged. Corrected call: {\"fromRun\": %q, \"workspace\": \"<absolute workspace>\", \"output\": %q}", fromRun, string(mode))
 	}
 	wait, werr := s.waitBudget(args.WaitSeconds)
 	if werr != nil {
 		return nil, werr
 	}
-	// THE SELECTIVE-APPLY FILTER, validated before any spend (D8-A). An EMPTY `select` is refused
+	// THE SELECTIVE-APPLY FILTER, validated before any spend. An EMPTY `select` is refused
 	// here rather than in the write path so the caller learns it from a -32602 that names the
 	// correction, and so no run is admitted for a call that can only write nothing.
 	var selection []string
@@ -1234,16 +1014,16 @@ func (s *Server) remediateHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 				"invalid params: `select` is present and empty. An empty narrowing filter names ZERO findings — it does not mean \"apply everything\", and accepting it would let a call read as a normal apply while writing nothing. Omit `select` to apply run %q's whole accepted set, or name the `fingerprint` values from that run's accepted findings.", fromRun)
 		}
 	}
-	// The per-call narrowing applies to the WRITE too, and it must be resolved before the write window
-	// opens: the roots this call carries are the roots the receipt records the write against.
-	env, nres, nerr := narrowRoots(c.Env(), args.Roots)
+	// The call's scope applies to the WRITE too, and it is resolved before the write window opens: the
+	// roots this call declares are the roots the receipt records the write against.
+	env, nres, nerr := s.callScope(c.Env(), workspace, args.Roots)
 	if nerr != nil {
 		return nil, nerr
 	}
 	if nres != nil {
 		return nres, nil
 	}
-	return s.remediateFromRun(ctx, c, env, fromRun, mode, wait, strings.TrimSpace(args.IdempotencyKey), selection)
+	return s.remediateFromRun(ctx, c, env, workspace, fromRun, mode, wait, strings.TrimSpace(args.IdempotencyKey), selection)
 }
 
 // trimmedNonEmpty is the caller's list with blanks removed — the same normalization the write path
@@ -1258,45 +1038,43 @@ func trimmedNonEmpty(ss []string) []string {
 	return out
 }
 
-// refuseRunFormingArgs rejects the run-forming parameters on the `fromRun` branch of
-// `review_remediate`. The schema already forbids `profile`/`panel`/`authority` there — but a schema
-// is advisory to a client, and the decoder embeds `runArgs` wholesale, so until now they parsed and
-// were dropped on the floor.
-//
-// Silently ignoring them is not a small thing on this tool. Each names a GOVERNANCE input: which
-// models judged, which panel composed the accepted set, which intent it was judged against. On a
-// `fromRun` call all three already exist — they came from the source run, captured once, and the
-// accepted set was adjudicated under them. A caller that passes different ones is asking for
-// something this call cannot do, and accepting the call would tell it the opposite. So it is
-// refused, by name, with the branch named too.
+// refuseRunFormingArgs rejects run-forming parameters on `review_remediate`. The schema forbids
+// `panel` and `authority` there, but a schema is advisory to a client and the decoder embeds `runArgs`
+// wholesale, so the server refuses them by name: each names a GOVERNANCE input — which panel produced
+// the accepted set, which intent it was judged against — that already came from the source run.
 func refuseRunFormingArgs(args runArgs, fromRun string, mode review.Mode) error {
 	var named []string
-	if strings.TrimSpace(args.Profile) != "" {
-		named = append(named, "`profile`")
-	}
 	if args.Panel != nil {
 		named = append(named, "`panel`")
 	}
 	if len(args.Authority) > 0 {
 		named = append(named, "`authority`")
 	}
+	if args.DryRun {
+		// A dry run prices a review and spends nothing; a remediation writes, so there is nothing for a
+		// dry run to price. Accepting the flag would read as "nothing will be written".
+		named = append(named, "`dryRun`")
+	}
+	if args.VerifyReadiness {
+		named = append(named, "`verifyReadiness`")
+	}
 	if len(named) == 0 {
 		return nil
 	}
 	return proto.InvalidParams(
-		"invalid params: %s cannot be set on the `fromRun` branch of review_remediate — that branch APPLIES an accepted set that a prior review_report run already produced, so the panel, the profile and the authority manifest are the source run's and are not re-decided here. Nothing would have been re-reviewed or re-judged, so the parameter is refused rather than ignored. Drop it and pass {\"fromRun\": %q, \"output\": %q, \"allowWrite\": true}, or use the `workspace` branch to run a fresh governed cycle with the panel and authority you want.",
+		"invalid params: %s cannot be set on review_remediate — it acts on an accepted set that a prior review_report run already produced, so the panel and the authority manifest are the source run's and are not re-decided here. The parameter is refused rather than ignored. Drop it and pass {\"fromRun\": %q, \"workspace\": \"<absolute workspace>\", \"output\": %q}, or run a fresh review_report with the panel and authority you want.",
 		strings.Join(named, " and "), fromRun, string(mode))
 }
 
-// remediationMode validates `output` against this server's ceiling.
+// remediationMode validates `output` against this server's write grant.
 func (s *Server) remediationMode(output string) (review.Mode, error) {
 	switch review.Mode(strings.TrimSpace(output)) {
 	case review.ModePatch:
 		return review.ModePatch, nil
 	case review.ModeApply:
-		if s.remediationCeiling() != review.ModeApply {
+		if !s.AllowWrites {
 			return "", proto.InvalidParams(
-				"invalid params: this server's write-authority ceiling is %q, so `output: \"apply\"` is refused. Use `output: \"patch\"` to receive a diff artifact instead.", s.remediationCeiling())
+				"invalid params: this server was launched without --allow-writes, so aimesh cannot apply changes here and `output: \"apply\"` is refused. Use `output: \"patch\"` to receive the complete diff and apply it with your own file tools.")
 		}
 		return review.ModeApply, nil
 	default:
@@ -1306,7 +1084,7 @@ func (s *Server) remediationMode(output string) (review.Mode, error) {
 }
 
 // remediateFromRun is the PRIMARY form: apply a prior review's accepted set.
-func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto.RequestEnv, fromRun string, mode review.Mode, wait int, key string, selection []string) (*proto.CallToolResult, error) {
+func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto.RequestEnv, workspace, fromRun string, mode review.Mode, wait int, key string, selection []string) (*proto.CallToolResult, error) {
 	// IDEMPOTENCY, in two independent forms. The key covers an explicit retry; the source-run guard
 	// covers the retry that forgot the key, or invented a new one. Both return the ORIGINAL
 	// receipt, because the alternative is a second, unrequested write.
@@ -1320,13 +1098,13 @@ func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto
 	}
 	if prior := s.runs.existingForSource(fromRun); prior != nil {
 		// A SELECTIVE APPLY DOES NOT GET A SECOND WINDOW ON THE SAME SOURCE RUN, and that is
-		// deliberate rather than an oversight of D8-A. This guard exists so that a decision set is
+		// deliberate. This guard exists so that a decision set is
 		// never applied twice, and a second call naming a different `select` is still a second
 		// application of the same set. It therefore attaches to the winner and returns the ORIGINAL
 		// receipt — including the original `selection` — rather than opening a second write window
 		// with a different filter.
 		//
-		// The consequence, stated so nobody discovers it: "apply findings 1–3, then 4–5" is NOT
+		// The consequence: "apply findings 1–3, then 4–5" is NOT
 		// available from one report run. Choose the selection in one call, or produce a fresh
 		// review_report run for the second tranche. Loosening this would trade a caller convenience
 		// for the one guarantee this surface exists to keep.
@@ -1336,10 +1114,9 @@ func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto
 	if rec == nil {
 		// THE REGISTRY MISS IS NOT THE END OF THE QUESTION. The registry is in-memory and bounded
 		// by count and TTL, so a handle can name a run this process really did produce and really
-		// did record — one evicted by retention, or one from before a restart — and answering
-		// `unknownRun` for it was the surface-parity defect: an ACP agent honours the same handle,
-		// from the same file, for the same run.
-		return s.remediateFromDisk(ctx, c, env, fromRun, mode, wait, key, selection)
+		// did record — one evicted by retention, or one from before a restart — and it is honoured from
+		// the run's own directory, exactly as an ACP agent honours the same handle from the same file.
+		return s.remediateFromDisk(ctx, c, env, workspace, fromRun, mode, wait, key, selection)
 	}
 	state, _, _, _ := rec.snapshot()
 	if state != StateComplete {
@@ -1363,10 +1140,13 @@ func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto
 			"run %q has no accepted findings to apply (%d finding(s), none in the accepted set). There is nothing to write.", fromRun, len(set.Findings))).
 			WithReason("no_accepted_findings")), nil
 	}
+	if !sameWorkspace(set.Workspace, workspace) {
+		return domainRefusal("", workspaceMismatch(fromRun)), nil
+	}
 	req := run.RemediateRequest{
 		Workspace: set.Workspace, WorkspaceIdentity: set.WorkspaceIdentity,
 		Mode: mode, Surface: "mcp",
-		Profile: set.Profile, ReviewerPanel: set.Panel,
+		Profile: set.Profile, ReviewerPanel: set.Panel, ComposedRoles: set.Overrides,
 		TrustedRoots: env.Roots, SourceRunID: fromRun,
 		Findings: set.Findings, Decisions: set.Decisions,
 		// The narrowing filter travels UNEXAMINED into the one governed write path. This surface
@@ -1394,7 +1174,7 @@ func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto
 // a remediation this process has already performed.
 //
 // WHAT THE HANDLE IS WORTH. It arrives from a peer, so it is VERIFIED rather than trusted: the id is
-// spelled as `<artifactDir>/<runId>` by the Manager (RunHandle) and then faces ReadDecisionSet's
+// joined to each of the named workspace's run-record locations and then faces ReadDecisionSet's
 // four checks — lexical containment BEFORE any filesystem call, canonical containment after symlink
 // resolution, the schema version, and `runId == the directory's own name`. Every failure answers
 // with the same `unknownRun`, so a peer that guesses gains no existence oracle and no path outside
@@ -1408,10 +1188,10 @@ func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto
 // refusals to double-write; one reports a receipt and one reports a halt. That is exactly what ACP
 // does today, and a durable "already applied" marker was deliberately NOT added — a wrong durable
 // record on a write path is a false success, which is worse than an honest halt.
-func (s *Server) remediateFromDisk(ctx context.Context, c *proto.Call, env *proto.RequestEnv, fromRun string,
+func (s *Server) remediateFromDisk(ctx context.Context, c *proto.Call, env *proto.RequestEnv, workspace, fromRun string,
 	mode review.Mode, wait int, key string, selection []string) (*proto.CallToolResult, error) {
 
-	set, _, err := s.Manager.ReadDecisionSet(s.Manager.RunHandle(fromRun))
+	set, _, err := s.Manager.ReadDecisionSetByID(workspace, fromRun)
 	if err != nil {
 		// A handle that names nothing on disk EITHER. This also absorbs the two registry-path
 		// refusals that have no on-disk counterpart, and they have none because the artifact says
@@ -1420,7 +1200,7 @@ func (s *Server) remediateFromDisk(ctx context.Context, c *proto.Call, env *prot
 		// and a remediation run all record no set at all — so `source_run_not_complete` and
 		// `source_run_not_reviewable` cannot be reached from a file that does not exist. (A running
 		// run is never evicted, so its record is always still here to answer with the first of
-		// those; and an evicted handle already answered `unknownRun` before this change.)
+		// those.)
 		return unknownRun(fromRun), nil
 	}
 	// The same ladder, in the same order, answering with the SAME reason codes the registry path
@@ -1428,6 +1208,9 @@ func (s *Server) remediateFromDisk(ctx context.Context, c *proto.Call, env *prot
 	// are those strings, held in one place so the two paths cannot drift apart.
 	if rerr := set.Remediable(); rerr != nil {
 		return domainRefusal("", rerr), nil
+	}
+	if !set.NamesWorkspace(workspace) {
+		return domainRefusal("", workspaceMismatch(fromRun)), nil
 	}
 	// THE IDENTITY BINDING, re-established across the report→apply gap. The registry path carries a
 	// live `fs.FileInfo` from the report run; a file cannot, so the canonical path and the durable
@@ -1443,9 +1226,9 @@ func (s *Server) remediateFromDisk(ctx context.Context, c *proto.Call, env *prot
 		// "same tree, different spelling" ambiguity from the one call that writes.
 		Workspace: set.WorkspaceCanonical, WorkspaceIdentity: identity,
 		Mode: mode, Surface: "mcp",
-		Profile: set.Profile, ReviewerPanel: set.Panel,
-		// The trusted roots IN FORCE NOW, not the ones the source run was launched with. A decision
-		// set outlives them, and the write is re-gated inside the governed write path.
+		Profile: set.Profile, ReviewerPanel: set.Panel, ComposedRoles: set.Roles,
+		// The roots THIS call declares, not the ones the source run was reviewed under. A decision set
+		// outlives them, and the write is re-gated inside the governed write path.
 		TrustedRoots: env.Roots,
 		// The handle, not `set.RunID`: ReadDecisionSet has just PROVEN they are the same string
 		// (the recorded runId must be the directory's own name), and using the handle is what makes
@@ -1462,6 +1245,32 @@ func (s *Server) remediateFromDisk(ctx context.Context, c *proto.Call, env *prot
 		AllowProtectedPaths: s.AllowProtectedPaths,
 	}
 	return s.startRemediate(ctx, c, req, wait, key)
+}
+
+// ReasonSourceRunWorkspaceMismatch refuses a remediation whose named workspace is not the tree the
+// source run reviewed.
+const ReasonSourceRunWorkspaceMismatch = "source_run_workspace_mismatch"
+
+// sameWorkspace reports whether the workspace a call names is the tree a run recorded, compared after
+// symlink resolution so two spellings of one directory agree.
+func sameWorkspace(recorded, named string) bool {
+	canon := func(p string) string {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return filepath.Clean(p)
+		}
+		if r, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+			return r
+		}
+		return abs
+	}
+	return recorded != "" && named != "" && canon(recorded) == canon(named)
+}
+
+func workspaceMismatch(fromRun string) error {
+	return fault.New(fault.Policy, fmt.Sprintf(
+		"run %q did not review the named workspace; name the absolute workspace that run reviewed", fromRun)).
+		WithReason(ReasonSourceRunWorkspaceMismatch)
 }
 
 // attachTo waits out the inline budget on a run this call did NOT start — the winner of an
@@ -1487,16 +1296,16 @@ func (s *Server) attachTo(ctx context.Context, c *proto.Call, rec *record, wait 
 	return s.payloadFor(rec)
 }
 
-// THE FULL-CYCLE WRITE FORM IS GONE FROM THIS SURFACE (D5).
+// THIS SURFACE HAS NO ONE-CALL REVIEW-AND-WRITE FORM.
 //
 // That form — run the governed cycle in report mode, then apply that run's accepted set through the
 // same write window — is ABSENT, not merely disabled, because on MCP it is the one write
 // shape whose caller can be left holding NOTHING — the run it would have to poll is a run only that
 // same, cancelled response would have named. See remediateHandler for the rule and the teaching
-// error, and docs/mcp.md for the breaking-change note.
+// error.
 //
-// The capability is not lost, it is two calls: review_report, then review_remediate {fromRun}. The
-// CLI keeps the one-call form, where the caller is a human who is shown the run directory on stderr.
+// The capability is two calls: review_report, then review_remediate {fromRun}. The CLI has the
+// one-call form, where the caller is a human who is shown the run directory on stderr.
 
 // startRemediate reserves and runs one from-run remediation.
 //
@@ -1663,7 +1472,7 @@ func (s *Server) runStatusHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 		"elapsedSeconds": elapsed(rec),
 	}
 	if set := rec.decisions(); set != nil {
-		out["remediable"] = s.allowRemediate() && !set.Inline && set.Accepted > 0
+		out["remediable"] = !set.Inline && set.Accepted > 0
 	}
 	text := fmt.Sprintf("Run %s (%s): %s after %.1fs.", rec.ID, rec.Tool, state, elapsed(rec))
 	if state == StateRunning {
@@ -1672,7 +1481,7 @@ func (s *Server) runStatusHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 		text += " Fetch the full result with review_run_result."
 	}
 	// A POLLER THAT NEVER FETCHES `review_run_result` MUST STILL NOT READ A PARTIALLY-REFUSED RUN AS
-	// CLEAN. `state` is "complete" for such a run and always will be (§13.4.2), so the two facts
+	// CLEAN. `state` is "complete" for such a run and always will be, so the two facts
 	// that distinguish it are lifted out of the terminal payload and repeated here. They are read
 	// from the finished payload rather than recomputed, so status and result cannot disagree.
 	if oc, ok := structured["outcome"].(string); ok && oc != "" {
@@ -1709,56 +1518,42 @@ func elapsed(rec *record) float64 {
 	return end.Sub(rec.Start).Seconds()
 }
 
-// --- panel selection (compose, never configure) ---
+// --- panel composition ---
 
-// resolveSelection turns `profile` / `panel` into the requested panel plus the per-role overrides
-// the Manager consumes. Every refusal here happens BEFORE any spend, and every message names the
-// field and the accepted values so the corrected call is derivable rather than guessable.
+// resolveSelection turns the call's `panel` into the requested seats and the role seats the Manager
+// resolves them from. Every refusal here happens BEFORE any spend, and every message names the field and
+// the accepted values so the corrected call is derivable rather than guessable.
 //
-// It deliberately does NOT decide whether an adapter/model pair RESOLVES — that is the resolver's
-// single answer for every surface (config.ResolvePanel), so an MCP call and a CLI invocation can
-// never disagree about what a name means. What it owns is what a surface owns: mutual exclusion,
-// the bound, seat completeness, and the compose-not-configure boundary.
-func (s *Server) resolveSelection(profile string, p *panelArg) (panelPick, map[review.Role]string, map[review.Role]string, error) {
-	profile = strings.TrimSpace(profile)
+// It does not decide whether a seat's model exists — the adapter answers that when the run starts, and
+// verifyReadiness can ask it first. What it owns is what a surface owns: completeness, the bound, and
+// that every seat names an adapter this server was launched with.
+func (s *Server) resolveSelection(p *panelArg) (panelPick, error) {
 	if p == nil {
-		pick := panelPick{source: "default"}
-		if profile != "" {
-			pick.source, pick.profile = "profile", profile
-			if err := s.checkProfile(profile); err != nil {
-				return panelPick{}, nil, nil, err
-			}
-		}
-		return pick, nil, nil, nil
-	}
-	if profile != "" {
-		return panelPick{}, nil, nil, proto.InvalidParams(
-			"invalid params: name EITHER `profile` (select a configured panel) OR `panel` (compose one), never both — a panel is composed or selected, never half of each. Call `review_list` to see the configured profiles.")
+		return panelPick{}, proto.InvalidParams(
+			"invalid params: `panel` is required — every review names its own seats. Corrected call: {\"panel\": {\"reviewers\": [{\"adapter\": \"<adapter>\", \"model\": \"<model>\"}], \"author_remediator\": {\"adapter\": \"<adapter>\", \"model\": \"<model>\"}}}")
 	}
 	if len(p.Reviewers) == 0 {
-		return panelPick{}, nil, nil, proto.InvalidParams(
-			"invalid params: `panel.reviewers` needs at least 1 seat — it is the blind primary panel. Corrected call: {\"panel\": {\"reviewers\": [{\"adapter\": \"<configured adapter>\", \"model\": \"<model>\"}], \"author_remediator\": {\"adapter\": \"<configured adapter>\", \"model\": \"<model>\"}}}")
+		return panelPick{}, proto.InvalidParams(
+			"invalid params: `panel.reviewers` needs at least 1 seat — it is the blind primary panel. Corrected call: {\"panel\": {\"reviewers\": [{\"adapter\": \"<adapter>\", \"model\": \"<model>\"}], \"author_remediator\": {\"adapter\": \"<adapter>\", \"model\": \"<model>\"}}}")
 	}
 	if len(p.Reviewers) > review.MaxReviewerSeats {
-		return panelPick{}, nil, nil, proto.InvalidParams(
+		return panelPick{}, proto.InvalidParams(
 			"invalid params: `panel.reviewers` has %d seats, exceeding the cap of %d. Each seat is a real model CLI, so the cap is a spend control and is never clamped — send at most %d.",
 			len(p.Reviewers), review.MaxReviewerSeats, review.MaxReviewerSeats)
 	}
-	// An ad-hoc panel MUST name its adjudicator. A hidden default would mean the caller composed a
-	// panel whose judgment becomes the accepted set without ever seeing which model that was.
+	// A panel MUST name its adjudicator: its judgment becomes the accepted set, so a hidden default
+	// would mean the caller composed a panel whose judge it never saw.
 	if p.AuthorRemediator == nil {
-		return panelPick{}, nil, nil, proto.InvalidParams(
-			"invalid params: `panel.author_remediator` is required for an ad-hoc panel — it is the HOST-ADJUDICATION seat whose judgment becomes the accepted set, and it is never defaulted for you. Corrected call: {\"panel\": {\"reviewers\": [...], \"author_remediator\": {\"adapter\": \"<configured adapter>\", \"model\": \"<model>\"}}}")
+		return panelPick{}, proto.InvalidParams(
+			"invalid params: `panel.author_remediator` is required — it is the HOST-ADJUDICATION seat whose judgment becomes the accepted set, and it is never defaulted for you. Corrected call: {\"panel\": {\"reviewers\": [...], \"author_remediator\": {\"adapter\": \"<adapter>\", \"model\": \"<model>\"}}}")
 	}
 	pick := panelPick{source: "adhoc", roles: map[review.Role]review.SeatSpec{}}
 	for i, seat := range p.Reviewers {
 		if err := s.checkConfigured(fmt.Sprintf("panel.reviewers[%d]", i), seat); err != nil {
-			return panelPick{}, nil, nil, err
+			return panelPick{}, err
 		}
 		pick.reviewers = append(pick.reviewers, seat.spec())
 	}
-	adapters := map[review.Role]string{}
-	models := map[review.Role]string{}
 	roleSeats := []struct {
 		role  review.Role
 		field string
@@ -1773,89 +1568,38 @@ func (s *Server) resolveSelection(profile string, p *panelArg) (panelPick, map[r
 			continue
 		}
 		if err := s.checkConfigured(rs.field, *rs.seat); err != nil {
-			return panelPick{}, nil, nil, err
+			return panelPick{}, err
 		}
-		// A single-slot lane is addressed by ROLE, and a role override carries no effort — there is
-		// no per-role effort anywhere in the configuration model. Accepting one here would silently
-		// drop it, which is exactly the kind of quiet non-execution this surface refuses.
+		// Reasoning effort is a per-seat vantage on the blind panel only. A single-slot role seat takes
+		// an effort-bearing model identifier instead, so a separate effort here would be silently
+		// dropped — which is why it is refused.
 		if strings.TrimSpace(rs.seat.Effort) != "" {
-			return panelPick{}, nil, nil, proto.InvalidParams(
-				"invalid params: %s.effort is not settable per call — reasoning effort is per-seat only on `panel.reviewers[]` (where a different effort is a different vantage). Remove it, or configure it in a profile and select that profile.", rs.field)
+			return panelPick{}, proto.InvalidParams(
+				"invalid params: %s.effort is not accepted — reasoning effort is per-seat only on `panel.reviewers[]`. Put an effort-bearing identifier in %s.model instead.", rs.field, rs.field)
 		}
-		spec := rs.seat.spec()
-		adapters[rs.role], models[rs.role] = spec.Adapter, spec.Model
-		pick.roles[rs.role] = spec
+		pick.roles[rs.role] = rs.seat.spec()
 	}
-	// A per-role override only reaches a lane the resolved profile actually HAS. Naming
-	// cross_check/verifier on a profile without that lane would be silently ignored — the request
-	// would run a panel the caller did not ask for — so it is refused with the reason named.
-	if err := s.checkRoleLanes(pick.roles); err != nil {
-		return panelPick{}, nil, nil, err
-	}
-	return pick, adapters, models, nil
+	return pick, nil
 }
 
-// checkConfigured enforces compose-not-configure for one seat. The refusal NAMES the configured
-// set, so the corrected call follows from the error.
+// checkConfigured enforces that a seat names an adapter this server was launched with, and that the
+// adapter's CLI can be started now. The refusal names the available set, so the corrected call follows
+// from the error.
 func (s *Server) checkConfigured(field string, seat seatArg) error {
 	spec := seat.spec()
 	if spec.Adapter == "" || spec.Model == "" {
 		return proto.InvalidParams("invalid params: %s needs a non-empty adapter and model (got adapter=%q model=%q)", field, spec.Adapter, spec.Model)
 	}
-	if len(s.Adapters) == 0 {
-		return proto.InvalidParams("invalid params: %s cannot be resolved — this server bound no configured adapter set, so ad-hoc panel composition is refused", field)
+	if s.Adapters.Empty() {
+		return proto.InvalidParams("invalid params: %s cannot be resolved — this server was launched with no adapter. The operator must add --adapter <name> (or %s) to the host configuration that starts it.", field, launchflags.EnvVar)
 	}
-	if !slices.Contains(s.Adapters, spec.Adapter) {
-		known := append([]string(nil), s.Adapters...)
-		slices.Sort(known)
+	if !s.Adapters.Has(spec.Adapter) {
 		return proto.InvalidParams(
-			"invalid params: %s names adapter %q, which is not configured on this server — configured adapters are: %s. A call selects from the configured set; it never introduces an adapter, a path or a launch argument.",
-			field, spec.Adapter, strings.Join(known, ", "))
+			"invalid params: %s names adapter %q, which this server was not launched with — available adapters are: %s. A call uses the adapters named at launch; it never introduces one.",
+			field, spec.Adapter, strings.Join(s.Adapters.Names(), ", "))
 	}
-	return nil
-}
-
-// checkProfile refuses an unknown profile name pre-spend, naming the configured ones.
-func (s *Server) checkProfile(name string) error {
-	var names []string
-	for _, p := range s.Config.Profiles() {
-		if p.Name == name {
-			return nil
-		}
-		names = append(names, p.Name)
-	}
-	slices.Sort(names)
-	return proto.InvalidParams(
-		"invalid params: unknown profile %q — configured profiles are: %s (call `review_list` to see their panels), or compose a `panel` instead.",
-		name, strings.Join(names, ", "))
-}
-
-// checkRoleLanes refuses a single-slot override for a lane the target profile does not define.
-func (s *Server) checkRoleLanes(roles map[review.Role]review.SeatSpec) error {
-	if len(roles) == 0 {
-		return nil
-	}
-	target := s.Config.DefaultProfile()
-	var lanes []SeatFact
-	for _, p := range s.Config.Profiles() {
-		if p.Name == target {
-			lanes = p.Lanes
-			break
-		}
-	}
-	has := map[string]bool{}
-	for _, l := range lanes {
-		has[l.Role] = true
-	}
-	for role := range roles {
-		if role == review.RoleAuthorRemediator {
-			continue // every profile has an adjudicator; an absent one fails in the resolver
-		}
-		if !has[string(role)] {
-			return proto.InvalidParams(
-				"invalid params: `panel.%s` names a lane the default profile %q does not define, and a call cannot CREATE a lane (that is configuration). It would have been silently ignored, so it is refused instead: drop it, or select a profile that has that lane.",
-				role, target)
-		}
+	if ok, why := s.Adapters.Available(spec.Adapter); !ok {
+		return proto.InvalidParams("invalid params: %s names adapter %q, whose CLI cannot be started right now: %s", field, spec.Adapter, sanitizeDetail(why))
 	}
 	return nil
 }
@@ -1871,16 +1615,13 @@ func (s *Server) resolveWorkspace(env *proto.RequestEnv, args runArgs, tool stri
 	switch {
 	case path != "" && len(args.InlineWorkspace) > 0:
 		return "", false, cleanup, nil, proto.InvalidParams(
-			"invalid params: provide EITHER `workspace` (a path inside this server's trusted roots) OR `inlineWorkspace` (content supplied over the wire), never both")
+			"invalid params: provide EITHER `workspace` (an absolute directory path) OR `inlineWorkspace` (content supplied over the wire), never both")
 	case path == "" && len(args.InlineWorkspace) == 0:
 		return "", false, cleanup, nil, proto.InvalidParams(
-			"invalid params: `workspace` is required (a directory inside this server's trusted roots). To review content this server cannot read from disk, supply `inlineWorkspace` instead.")
+			"invalid params: `workspace` is required (an absolute directory path). To review content this server cannot read from disk, supply `inlineWorkspace` instead.")
 	case path != "":
-		// TRUSTED-ROOT CONFINEMENT. The path a peer named must resolve INSIDE the roots a human
-		// authorized at LAUNCH. A path outside them — or any path at all when no root was
-		// established — is refused HERE, before any spend, with the machine reason code attached.
-		// The non-overridable read denylist still applies inside a trusted root, so a `.env` under
-		// an allowed project is refused just the same.
+		// The workspace is judged against this call's own scope (callScope built it from this path)
+		// and the non-overridable read denylist, before any spend, with the machine reason code attached.
 		if _, derr := env.Trust.ResolveRead(path); derr != nil {
 			return "", false, cleanup, domainRefusal("", rootFault(derr, env.Roots)), nil
 		}
@@ -1897,16 +1638,14 @@ func (s *Server) resolveWorkspace(env *proto.RequestEnv, args runArgs, tool stri
 // reason code, and appends the operator-facing remedy — so a host user reads "how do I allow this"
 // rather than only "refused".
 func rootFault(err error, roots []string) error {
-	msg := err.Error()
+	hint := ""
 	switch scope.ReasonOf(err) {
 	case scope.ReasonNoRoots:
-		msg += " — this MCP server has no trusted root, so it refuses every filesystem path; the operator must launch it as `aimesh review mcp --root <project-dir>`"
+		hint = " — this call declared no path, so it reads no file; name an absolute `workspace` (and any extra `roots`)"
 	case scope.ReasonOutsideRoot:
-		// The roots themselves are NOT named: their paths map the operator's machine, and a caller
-		// does not need them in order to correct the call.
-		msg += fmt.Sprintf(" — this server has %d trusted root(s) established at launch; a request may narrow them but never widen them, and their paths are not reported over this surface", len(roots))
+		hint = fmt.Sprintf(" — the path is outside the %d director(y/ies) this call declared; add it to `roots` if the call should read it", len(roots))
 	}
-	return fault.Wrap(fault.Containment, "refused by workspace scope policy", err).
+	return fault.Wrap(fault.Containment, "refused by workspace scope policy", fmt.Errorf("%w%s", err, hint)).
 		WithHalt("M6").WithReason(string(scope.ReasonOf(err))).WithSignal("")
 }
 
@@ -1955,72 +1694,6 @@ func materializeInline(files map[string]string) (string, error) {
 		}
 	}
 	return dir, nil
-}
-
-// intersectRoots returns the INTERSECTION of two root sets: for each pair, the deeper directory
-// when one contains the other, and nothing when they are disjoint. It is never a union — a client
-// that declares a root this server was not launched with does not thereby gain it.
-//
-// An empty result is fail-closed by construction: with no effective root, every request path is
-// refused.
-func intersectRoots(server, client []string) []string {
-	var out []string
-	add := func(p string) {
-		for _, have := range out {
-			if sameRoot(have, p) {
-				return
-			}
-		}
-		out = append(out, p)
-	}
-	for _, c := range client {
-		for _, sr := range server {
-			switch {
-			case underRoot(c, sr):
-				add(c) // the client narrowed
-			case underRoot(sr, c):
-				add(sr) // the server is already narrower
-			}
-		}
-	}
-	return out
-}
-
-// foldRootPaths is true only on Windows, where the filesystem itself is case-insensitive and
-// `C:\Proj` and `c:\proj` are the same directory. It mirrors meshcore/scope's `foldPaths`.
-//
-// It is a VAR rather than a `runtime.GOOS ==` written inline for one reason: the intersection rule is a
-// containment guarantee, and its Windows branch is the one a unix machine can never execute. Holding the
-// platform answer in a substitutable variable lets the Windows BRANCH be exercised on any platform — the
-// same pattern `streamAliasing` and `reparseAttr` already use — so the branch is tested rather than
-// merely compiled. It does not make the guarantee verified on real NTFS; see docs/security.md's platform
-// matrix for what is and is not covered.
-var foldRootPaths = runtime.GOOS == "windows"
-
-func underRoot(p, root string) bool {
-	p, root = filepath.Clean(strings.TrimSpace(p)), filepath.Clean(strings.TrimSpace(root))
-	if p == "" || root == "" {
-		return false
-	}
-	if sameRoot(p, root) {
-		return true
-	}
-	prefix := root
-	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
-		prefix += string(filepath.Separator)
-	}
-	if foldRootPaths {
-		return strings.HasPrefix(strings.ToLower(p), strings.ToLower(prefix))
-	}
-	return strings.HasPrefix(p, prefix)
-}
-
-func sameRoot(a, b string) bool {
-	a, b = filepath.Clean(a), filepath.Clean(b)
-	if foldRootPaths {
-		return strings.EqualFold(a, b)
-	}
-	return a == b
 }
 
 // --- progress + logging mapping ---

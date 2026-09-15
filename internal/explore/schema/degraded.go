@@ -1,6 +1,6 @@
 package schema
 
-// This file holds the DEGRADED terminal artifact (design §1) — what exploremesh emits when the
+// This file holds the DEGRADED terminal artifact — what exploremesh emits when the
 // collator becomes unavailable AFTER the fan-out, or when an identity halt fires: the blind round-1
 // artifacts are equally valid in both cases, so the run still produces a terminal artifact rather than
 // nothing. It is deliberately PER MODE-CLASS (the REV 3 re-check finding: a synthesized "disagreement
@@ -20,13 +20,13 @@ import (
 	"sort"
 )
 
-// ModeClass is a mode's SPACE class (design §1/§3) — it decides which degraded terminal artifact is
+// ModeClass is a mode's SPACE class — it decides which degraded terminal artifact is
 // honest for the mode, and nothing else. It is app-owned mode grammar carried on the ModeSpec.
 type ModeClass string
 
 const (
 	// EmergentSpace: the candidate/claim space is AUTHORED by the explorers, so any grouping across
-	// explorers is entity resolution (§0 F-B) and may only happen through the recorded canonicalization
+	// explorers is entity resolution and may only happen through the recorded canonicalization
 	// ledger — never inside a degraded fallback.
 	EmergentSpace ModeClass = "emergent_space"
 	// FixedSpace: the option/criterion universe is GIVEN to the explorers, so grouping by an exact value
@@ -34,8 +34,8 @@ const (
 	FixedSpace ModeClass = "fixed_space"
 )
 
-// UncollatedLabel is the exact, non-negotiable label carried by an EMERGENT-space degraded artifact
-// (design §1). It states plainly that no entity resolution happened, so no reader (or downstream
+// UncollatedLabel is the exact, non-negotiable label carried by an EMERGENT-space degraded artifact.
+// It states plainly that no entity resolution happened, so no reader (or downstream
 // exploration) can mistake the raw envelope set for a collated result.
 const UncollatedLabel = "uncollated — no entity resolution performed"
 
@@ -61,7 +61,7 @@ type TypedClaim struct {
 
 // RegisterEntry is one row of a FIXED-space degraded register: an exact value of the mode's declared key
 // field plus every explorer that reported it, with that explorer's full response for the row. Genuine
-// because the key universe was GIVEN to the explorers (§1).
+// because the key universe was GIVEN to the explorers.
 type RegisterEntry struct {
 	Key       string             `json:"key"`
 	Positions []RegisterPosition `json:"positions"`
@@ -74,7 +74,7 @@ type RegisterPosition struct {
 	Response    map[string]any   `json:"response"`
 }
 
-// DegradedOutput is the terminal artifact for a run that lost its collator after the fan-out (design §1).
+// DegradedOutput is the terminal artifact for a run that lost its collator after the fan-out.
 // It satisfies the mode-package ModeOutput contract via Summary(), so the surfaces render it exactly like
 // any other terminal output — a degraded run is a RESULT, not a hole. Exactly one of ClaimIndex (emergent)
 // or Register (fixed) is populated, per Class.
@@ -102,7 +102,7 @@ func (o DegradedOutput) Summary() string {
 	}
 }
 
-// Degrade builds the degraded terminal artifact for a mode class (design §1). keyField is the FIXED-space
+// Degrade builds the degraded terminal artifact for a mode class. keyField is the FIXED-space
 // mode's declared key field and is ignored for the emergent path; an emergent-space artifact ALWAYS
 // carries UncollatedLabel. envelopes must be the blind round-1 envelopes (raw + attributed).
 func Degrade(class ModeClass, modeName string, reason DegradedReason, detail string, envelopes []Envelope, keyField string) DegradedOutput {
@@ -152,7 +152,7 @@ func claimIndex(envelopes []Envelope) []TypedClaim {
 }
 
 // hostRegister groups the envelopes by the EXACT value of the mode's declared key field — legitimate for a
-// FIXED-space mode because that value space was handed to the explorers (§1). A repeated key field yields
+// FIXED-space mode because that value space was handed to the explorers. A repeated key field yields
 // one register row per value. Keys are emitted in sorted order for determinism; an envelope missing the key
 // field is recorded under the empty key so nothing is silently dropped.
 func hostRegister(envelopes []Envelope, keyField string) []RegisterEntry {

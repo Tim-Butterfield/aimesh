@@ -21,7 +21,7 @@ Individual targets:
 | Target | What it does |
 |---|---|
 | `make build-all` | build every workspace module |
-| `make install` | install the `aimesh` binary into `GOBIN`, and remove any superseded `reviewmesh` / `exploremesh` binary. Plain `go install ./cmd/aimesh` does the install part without `make`. |
+| `make install` | install the `aimesh` binary into `GOBIN`, and remove any `reviewmesh` / `exploremesh` binary found there. Plain `go install ./cmd/aimesh` does the install part without `make`. |
 | `make test-all` | test every workspace module (`-count=1`: the gate never trusts the test cache) |
 | `make race-all` | every package under the race detector — the gate's check |
 | `make race` | the fast subset (transports, stdio pumps, the run registry) for a quick local loop |
@@ -130,12 +130,11 @@ from architecture within one reading, and the next person maintains it as though
 Retrofitting the labels later means re-deriving *which* code was transitional, which is exactly the
 knowledge that has already been lost by then.
 
-**The task id is not decoration, and `make boundary-check` now fails the build without it.** A
+**The task id is not decoration, and `make boundary-check` fails the build without it.** A
 `SUNSET-PATH` comment that does not cite `MCP26-SUNSET` is a failure, in any `.go` file in the repo,
 test files included. The reason is specific: the removal is performed by grepping for the id, so a
-marker the grep does not find is a marker that does not exist. Every marker the MCP migration wrote
-named the concept ("legacy removal task") and none named the id — the convention was followed in spirit
-and broken in letter at all 28 sites, invisibly, for nine phases.
+marker the grep does not find is a marker that does not exist. A marker that names only the concept
+("legacy removal task") follows the convention in spirit and breaks it in letter, invisibly.
 
 The live example is the MCP legacy era. Its removal task is tracked under the id **MCP26-SUNSET**;
 its yes/no trigger (adoption of the modern era by the hosts we support, not a date) and the complete

@@ -183,7 +183,7 @@ func assertTheTwoMustNots(t *testing.T, lines []string) {
 func startMCP(t *testing.T, args ...string) (*modernClient, *lockedBuffer, func()) {
 	t.Helper()
 	bin := binary(t)
-	cmd := exec.Command(bin, append([]string{"explore", "mcp"}, args...)...)
+	cmd := exec.Command(bin, append([]string{"explore", "mcp", "--adapter", "fake"}, args...)...)
 	cmd.Dir = t.TempDir()
 	cmd.Env = hermeticEnv(t)
 	var stderr lockedBuffer
@@ -266,6 +266,7 @@ func TestSubprocess_ModernEraTranscriptOverTheRealBinary(t *testing.T) {
 		"name": "explore",
 		"arguments": map[string]any{
 			"purpose": "choose a datastore for the ingest service", "criteria": []string{"cost", "latency"}, "mode": "map",
+			"panel": defaultPanel(),
 		},
 		"_meta": mergeMeta(c.meta("debug"), map[string]any{"progressToken": "modern-1"}),
 	})
@@ -286,6 +287,7 @@ func TestSubprocess_ModernEraTranscriptOverTheRealBinary(t *testing.T) {
 		"name": "explore",
 		"arguments": map[string]any{
 			"purpose": "choose a queue", "criteria": []string{"cost"}, "mode": "map",
+			"panel": defaultPanel(),
 		},
 		"_meta": c.meta("not-a-level"),
 	})
@@ -363,6 +365,7 @@ func TestSubprocess_LegacyProtocolModeIsGenuinelyLegacy(t *testing.T) {
 		"name": "explore",
 		"arguments": map[string]any{
 			"purpose": "choose a datastore", "criteria": []string{"cost"}, "mode": "map",
+			"panel": defaultPanel(),
 		},
 	})
 	if call.Error != nil {

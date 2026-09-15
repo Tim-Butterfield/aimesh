@@ -20,8 +20,18 @@ func ProjectHome() (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	base := cwd
-	if root, ok := FindRoot(cwd); ok {
+	return ProjectHomeFor(cwd)
+}
+
+// ProjectHomeFor is ProjectHome for an explicit directory rather than the process working directory.
+// A server that serves many workspaces resolves each call's state from that call's own workspace,
+// never from wherever the process happened to start.
+func ProjectHomeFor(dir string) (string, bool) {
+	if dir == "" {
+		return "", false
+	}
+	base := dir
+	if root, ok := FindRoot(dir); ok {
 		base = root
 	}
 	home := filepath.Join(base, HomeDirName)
@@ -44,10 +54,17 @@ func ComponentDir(name string) (string, bool) {
 	return filepath.Join(home, name), true
 }
 
-// HomeEnvVar overrides the base directory containing the user-scope `.aimesh/`. It is the ONE home
-// override for the whole tool: each component used to carry its own (REVIEWMESH_HOME, EXPLOREMESH_HOME)
-// back when they were separate applications with separate state directories, and three variables that
-// had to be set together to get one hermetic run was a trap rather than a feature.
+// ComponentDirFor is ComponentDir for an explicit directory (see ProjectHomeFor).
+func ComponentDirFor(dir, name string) (string, bool) {
+	home, ok := ProjectHomeFor(dir)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(home, name), true
+}
+
+// HomeEnvVar overrides the base directory containing the user-scope `.aimesh/`. It is the one home
+// override for the whole tool, so a single variable makes a run hermetic.
 const HomeEnvVar = "AIMESH_HOME"
 
 // UserHomeBase returns the BASE directory that contains the user-scope `.aimesh/` (so the state
@@ -101,11 +118,43 @@ func ProjectComponentPath(cwd, name string) (string, bool) {
 // The directory is deliberately NOT created here — this answers "where"; the caller's own MkdirAll
 // answers "make it".
 func RunDir(name, override string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	return RunDirFor(cwd, name, override)
+}
+
+// RunDirFor is RunDir for an explicit directory: `<dir's project .aimesh>/<name>/runs` when that state
+// directory already exists, else the OS temp location. It never creates `.aimesh/`.
+func RunDirFor(dir, name, override string) string {
 	if override != "" {
 		return override
 	}
-	if dir, ok := ComponentDir(name); ok {
-		return filepath.Join(dir, RunsSubdir)
+	if cdir, ok := ComponentDirFor(dir, name); ok {
+		return filepath.Join(cdir, RunsSubdir)
 	}
+	return TempRunDir(name)
+}
+
+// RunDirIn is RunDirFor without the walk to a repository root: `<dir>/.aimesh/<name>/runs` only when
+// `<dir>/.aimesh` itself exists, else the temp run directory (override wins). A server whose caller
+// declares dir as its scope uses it, so a run record never lands in a parent directory's state
+// directory outside that scope. It creates nothing.
+func RunDirIn(dir, name, override string) string {
+	if override != "" {
+		return override
+	}
+	if dir != "" {
+		home := filepath.Join(dir, HomeDirName)
+		if fi, err := os.Stat(home); err == nil && fi.IsDir() {
+			return filepath.Join(home, name, RunsSubdir)
+		}
+	}
+	return TempRunDir(name)
+}
+
+// TempRunDir is the run directory used when no project state directory applies.
+func TempRunDir(name string) string {
 	return filepath.Join(os.TempDir(), HomeDirName[1:], name, RunsSubdir)
 }

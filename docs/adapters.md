@@ -15,6 +15,48 @@ adapter (`meshcore/model/fake`) that is a **test-only, hidden, internal harness*
 user-configurable, and never resolvable from user configuration. The shipped `default` profile in each
 app is deliberately **unconfigured**: nothing runs until you point it at a real provider CLI.
 
+## Which adapters are available where
+
+Availability depends on the surface, because the MCP and ACP servers read no aimesh configuration.
+
+| Surface | Available adapters | Where the binary is found |
+|---|---|---|
+| CLI (`aimesh review run`, `aimesh explore run`, `doctor`, `list`) | every code-owned recipe, plus the user-defined `acpAdapters` instances in `~/.aimesh/adapters.yaml` | `adapters.<name>.path` in the shared `adapters.yaml` (project scope over user scope), else `PATH` |
+| MCP / ACP (`aimesh mcp`, `aimesh review mcp|acp`, `aimesh explore mcp|acp`) | **only** the adapters named at launch with `--adapter` or `AIMESH_ADAPTERS` | the path given at launch, else `PATH` |
+
+On MCP and ACP the named adapters are also the egress bound: a call's panel may name only them, so the
+host configuration that starts the server is where an operator decides which provider CLIs may receive
+content. User-defined `acpAdapters` instances and saved adapter paths are not read there.
+
+### Naming an adapter at launch
+
+```text
+--adapter <name>            find <name>'s CLI on PATH
+--adapter <name>=<path>     use the CLI at <path>
+```
+
+`--adapter` is repeatable. The environment form lists the same entries separated by the OS path-list
+separator (`;` on Windows, `:` elsewhere): `AIMESH_ADAPTERS=claude-code;devin-cli=%LOCALAPPDATA%\devin\cli\bin\devin.exe`.
+Give one form or the other; both together refuse startup. `<name>` must be a code-owned recipe
+(`claude-code`, `codex-cli`, `agy-cli`, `ollama`, `devin-cli`, `gemini-cli`, `cursor-cli`); an unknown name, a
+duplicate, an empty entry or an empty path refuses startup. `fake` is an internal test harness and is not
+accepted outside tests. A named adapter whose CLI cannot be started is still listed, with
+`available: false` and the reason, by `review_list`/`explore_list`, and checked again on every call, so a
+CLI installed after launch becomes usable without a restart.
+
+### Path expansion
+
+A `<path>` is expanded with the running OS's own syntax, so one host configuration works for every user:
+
+| | Windows | macOS / Linux |
+|---|---|---|
+| variable | `%VAR%` (e.g. `%LOCALAPPDATA%`, `%APPDATA%`, `%USERPROFILE%`) | `$VAR` or `${VAR}` (e.g. `$HOME`) |
+| literal | `%%` is a literal `%`; `$` is always literal | `$$` is a literal `$` |
+| home | a leading `~` is the current user's home | a leading `~` is the current user's home |
+
+An undefined variable, an unmatched `%`, an unterminated `${`, an invalid variable name, `~otheruser`, or a
+result that is not an absolute path refuses startup with a configuration error naming the entry.
+
 ## The adapter contract
 
 meshcore's `model.Adapter` Go interface (`meshcore/model/model.go`) is deliberately small:
@@ -136,13 +178,12 @@ reviewmesh  doctor --probe-deep          # SPENDS: one real call per required ad
 aimesh explore doctor --probe-deep --json   # `probes[].deep: true` marks the rows that spent
 ```
 
-On the **MCP** surface the deep probe is a **launch** flag (`aimesh review mcp --probe-deep`,
-`aimesh explore mcp --probe-deep`), not a tool parameter. It runs once, before serving, and each
-domain's readiness tool (`review_doctor` / `explore_doctor`) then *reports* those rows. That is
-deliberate: those tools carry
-`readOnlyHint` and promises to start nothing and spend nothing, and a peer able to trigger a spend by
-calling it would make that annotation a lie. The ACP surfaces expose no readiness projection, so there
-is nothing there to surface it in.
+On the **MCP and ACP** surfaces the same one-token check is a **per-call** option, `verifyReadiness`
+(an MCP tool argument; `_meta.reviewmesh.verifyReadiness` / `_meta.exploremesh.verifyReadiness` over
+ACP). It probes each distinct adapter/model/effort the call's panel names, before anything else is
+invoked, and halts the run if one cannot do real work; `dryRun` prices those calls without making them.
+The readiness tools (`review_doctor` / `explore_doctor`) stay free: they carry `readOnlyHint`, start no
+model call and report only whether each launched adapter's CLI can be started.
 
 If a governed run does hit one of these, the failure is reported as a Class A adapter fault (or Class F
 on a timeout) with the classified signal, and the CLI hint says the same thing this section does: run
@@ -288,7 +329,7 @@ Devin is treated strictly as an **adapter/gateway profile**: one CLI fans out to
 name-bound, tier-encoded model slugs.
 
 - **Binary:** `devin` (`devin.exe` on Windows), detected on `PATH` or a configured path.
-- **Invoke argv:** `devin --model <modelArg> -p <prompt>`.
+- **Invoke argv:** `devin --model <modelArg> --respect-workspace-trust false -p <prompt>`. Print mode cannot answer the CLI's workspace-trust prompt and every call runs in a fresh, never-trusted isolated copy, so the trust check is skipped for that invocation only; the user's own `respect_workspace_trust` setting is left unchanged.
 - **modelArg rendering:** configure `model` as the **full display name** from Devin's model selector (e.g.
   `Claude Opus 4.8`) with the reasoning tier in a separate `effort` field. `RenderDevinModelArg` renders
   the final `--model` slug (lowercase; spaces/periods → hyphens; collapse/trim; append normalized effort).
@@ -311,7 +352,7 @@ name-bound, tier-encoded model slugs.
 - **`--skip-trust` is REQUIRED, not optional.** Without it Gemini refuses to answer in any directory it
   has not been told to trust, exiting **55** with no output. Callers legitimately run in untrusted
   directories — exploremesh contains each call in a fresh empty temp cwd, which is never trusted — so
-  the adapter could not succeed at all before this flag was added. Safe because `--approval-mode plan`
+  without it the adapter could not succeed at all. Safe because `--approval-mode plan`
   already confines the model to read-only. (`GEMINI_CLI_TRUST_WORKSPACE=true` is the env equivalent.)
 - **Evidence tier:** `none` — the recipe *targets* an `envelope` identity method, but gemini does not
   report which model answered, so no extraction is possible (`ParseIdentity` returns `""` → the verifier

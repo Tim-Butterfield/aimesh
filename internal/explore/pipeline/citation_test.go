@@ -8,7 +8,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// TestRun_Citations_ValidatedInPipeline is the end-to-end C1 assertion over the hermetic fake panel: the
+// TestRun_Citations_ValidatedInPipeline is the end-to-end citation assertion over the hermetic fake panel: the
 // collator is SHOWN the `envelope#k` aliases in its prompt, cites some of them, and the host — inside
 // pipeline.Run, so every surface gets the same result — keeps the refs that resolve, drops the ones that
 // do not, and labels the finding it could not source. A citation defect must not halt the run.

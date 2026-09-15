@@ -3,30 +3,22 @@ package mcp_test
 // FROM-RUN, RESOLVED FROM DISK — the MCP half of the surface-parity invariant, proven against a real
 // run.Manager, a real workspace, a real decision-set artifact and a real live write.
 //
-// THE DEFECT THESE CLOSE. `review_remediate {fromRun}` resolved a handle from the in-memory run
-// registry and nowhere else. The registry is bounded by count and TTL and dies with the process, so a
-// handle naming a run this server really did produce — and whose decision set is sitting in that
-// run's own directory — was answered `unknown_run_id`. ACP honours the same handle, from the same
-// file, for the same run. Same handle, same recorded decisions, two answers depending on the surface.
+// WHAT THESE HOLD. The in-memory run registry is bounded by count and TTL and dies with the process,
+// so `review_remediate {fromRun}` also resolves a handle from the run's own directory: a handle naming
+// a run this server really did produce, whose decision set is recorded there, applies — the same
+// answer ACP gives for the same handle, from the same file.
 //
 // HOW A RESTART IS STAGED. A restarted server is a NEW registry over the SAME artifact directory, so
 // each test drives two `mcp.Server` values over one `run.Manager`: the first reports, the second
 // remediates. Nothing is deleted and no clock is moved — the second server simply never saw the run,
 // which is exactly what a restarted one has not.
 //
-// AGAINST THE OLD CODE every test in this file FAILS, and six of the seven fail at the same place —
-// the durable-handle assertion in `report`, which is the root of the defect: the run id a client was
-// handed and the directory the decision set was recorded in were two independently minted names, so
-// the only handle a client held named nothing on disk and the fallback could never have fired for a
-// real client at all. `_AnInlineRunIsStillRefusedByNameFromDisk` gets past that (an inline run has no
-// workspace to pin) and fails on the refusal itself: `unknown_run_id` where the caller must be told
-// `inline_workspace_not_remediable`.
+// The durable-handle assertion in `report` is what makes the disk path reachable: the run id a client
+// is handed must name the directory the decision set is recorded in.
 //
-// Two of them are PRESERVATION guards over the new path rather than proofs of new behaviour —
-// `_AHandleThisAgentDidNotProduceIsRefused` and `_AWriteRunIsNotAFromRunSource`. What they hold is
-// that adding a reader added no way to point a governed write at an arbitrary directory, and no way
-// to apply a run that never adjudicated anything. They would pass vacuously on the old code if the
-// handle assertion did not run first; they are here for what they would catch in the new one.
+// Two tests are guards — `_AHandleThisAgentDidNotProduceIsRefused` and `_AWriteRunIsNotAFromRunSource`.
+// They hold that the reader gives no way to point a governed write at an arbitrary directory, and no
+// way to apply a run that never adjudicated anything.
 
 import (
 	"context"
@@ -76,11 +68,25 @@ func (s *silenceableReviewer) Invoke(ctx context.Context, c model.Call) (model.R
 	return s.valid.Invoke(ctx, c)
 }
 
+// hostAdapter is the adapter name the author_remediator seat names. It is a built-in recipe so the
+// server's launch set can hold it (newServer launches it at a test-owned executable); the Manager maps
+// it to writingHost, so no real CLI is ever invoked.
+const hostAdapter = "claude-code"
+
+// fromRunPanel is the panel every report in this file composes: the fake reviewer, and writingHost as
+// the adjudicator.
+func fromRunPanel() map[string]any {
+	return map[string]any{
+		"reviewers":         []any{map[string]any{"adapter": "fake", "model": "fake-model"}},
+		"author_remediator": map[string]any{"adapter": hostAdapter, "model": "write-model"},
+	}
+}
+
 // writingHost is the author_remediator lane: it adjudicates the reviewer's finding as apply-worthy
 // and returns a real anchored edit, so an apply produces an observable change to a real file.
 type writingHost struct{}
 
-func (writingHost) Name() string              { return "write-host" }
+func (writingHost) Name() string              { return hostAdapter }
 func (writingHost) Available() (bool, string) { return true, "ok" }
 
 func (writingHost) Invoke(_ context.Context, c model.Call) (model.Result, error) {
@@ -120,25 +126,11 @@ func newFromRunFixture(t *testing.T) *fromRunFixture {
 		t.Fatal(err)
 	}
 
+	// The configuration a launch-configured server builds (app.loadLaunch): the built-in defaults, no
+	// profiles, and apply reachable on the agent surfaces because the server gates writes itself.
 	cfg := config.Default()
-	cfg.Adapters["write-host"] = config.Adapter{ModelIdentity: "invocation_tag"}
-	cfg.ModelCatalog["write-model"] = config.CatalogEntry{
-		Provider: "x", CanonicalModel: "mm",
-		Adapters: map[string]config.AdapterModel{"write-host": {ModelArg: "mm"}},
-	}
-	cfg.Profiles["mcp-fromrun"] = config.Profile{
-		Description:       "mcp from-run harness",
-		AdapterPreference: []string{"write-host", "fake"},
-		Lanes: map[string]config.Lane{
-			"author_remediator": {Execution: "host", Adapter: "write-host", Model: "write-model"},
-			"reviewer":          {Execution: "adapter", Adapter: "fake", Model: "fake-model"},
-		},
-	}
-	cfg.DefaultProfile = "mcp-fromrun"
-	// The write-authority ceiling is RAISED by the capability, never bypassed — the same grant
-	// `aimesh review mcp --allow-remediate` makes, so the Manager resolves exactly the policy the tool
-	// list was built from.
-	cfg = config.WithSurfaceCapability(cfg, "mcp", config.CapabilityAllowRemediate)
+	cfg.Adapters[hostAdapter] = config.Adapter{ModelIdentity: "invocation_tag"}
+	cfg.Surfaces.DefaultModeBySurface = map[string]string{"cli": "apply", "ci": "report", "acp": "apply", "mcp": "apply"}
 	one := 1
 	cfg.Review.MaxOuterCycles = &one
 
@@ -147,7 +139,7 @@ func newFromRunFixture(t *testing.T) *fromRunFixture {
 	return &fromRunFixture{
 		mgr: &run.Manager{
 			Cfg:         cfg,
-			Adapters:    map[string]model.Adapter{"fake": rv, "write-host": writingHost{}},
+			Adapters:    map[string]model.Adapter{"fake": rv, hostAdapter: writingHost{}},
 			ArtifactDir: art, TempBase: t.TempDir(),
 		},
 		rv: rv, art: art, ws: ws, file: file,
@@ -159,15 +151,14 @@ func newFromRunFixture(t *testing.T) *fromRunFixture {
 func (f *fromRunFixture) server(t *testing.T) *client {
 	t.Helper()
 	return serve(t, newServer(t, f.mgr, func(s *mcp.Server) {
-		s.Roots, s.AllowRemediate = []string{f.ws}, true
-		s.PolicyCeiling = review.ModeApply
+		s.Ceiling, s.AllowWrites = []string{f.ws}, true
 	}))
 }
 
 // report runs one report turn and returns its runId — the only handle this surface ever hands out.
 func (f *fromRunFixture) report(t *testing.T, c *client) string {
 	t.Helper()
-	res := c.tool(t, "review_report", map[string]any{"workspace": f.ws})
+	res := c.tool(t, "review_report", map[string]any{"workspace": f.ws, "panel": fromRunPanel()})
 	if res.isError || res.rpc != nil {
 		t.Fatalf("the report turn must succeed: %+v %+v", res.structured, res.rpc)
 	}
@@ -199,10 +190,10 @@ func (f *fromRunFixture) applied(t *testing.T) bool {
 	return strings.Contains(f.body(t), "func main() { _ = 0 }")
 }
 
-func remediate(t *testing.T, c *client, fromRun string) toolResult {
+func (f *fromRunFixture) remediate(t *testing.T, c *client, fromRun string) toolResult {
 	t.Helper()
 	return c.tool(t, "review_remediate", map[string]any{
-		"fromRun": fromRun, "output": "apply", "allowWrite": true,
+		"fromRun": fromRun, "workspace": f.ws, "output": "apply", "allowWrite": true,
 	})
 }
 
@@ -213,7 +204,7 @@ func TestMCPFromRun_AnEvictedHandleStillAppliesFromDisk(t *testing.T) {
 	f := newFromRunFixture(t)
 	sourceRun := f.report(t, f.server(t))
 
-	res := remediate(t, f.server(t), sourceRun)
+	res := f.remediate(t, f.server(t), sourceRun)
 	if res.rpc != nil {
 		t.Fatalf("a from-disk apply must not be a protocol error: %+v", res.rpc)
 	}
@@ -265,7 +256,7 @@ func TestMCPFromRun_TheAppliedSetIsTheInspectedSet(t *testing.T) {
 		t.Fatalf("the control turn must raise nothing once the panel is silenced; got %v", control["findings"])
 	}
 
-	if res := remediate(t, f.server(t), sourceRun); res.isError || res.rpc != nil {
+	if res := f.remediate(t, f.server(t), sourceRun); res.isError || res.rpc != nil {
 		t.Fatalf("the apply must succeed from the stored set: %+v %+v", res.structured, res.rpc)
 	}
 	if !f.applied(t) {
@@ -276,7 +267,7 @@ func TestMCPFromRun_TheAppliedSetIsTheInspectedSet(t *testing.T) {
 // c2Structured runs a second report turn and returns its structured payload.
 func c2Structured(t *testing.T, c *client, ws string) map[string]any {
 	t.Helper()
-	res := c.tool(t, "review_report", map[string]any{"workspace": ws})
+	res := c.tool(t, "review_report", map[string]any{"workspace": ws, "panel": fromRunPanel()})
 	if res.isError || res.rpc != nil {
 		t.Fatalf("the control report turn must succeed: %+v %+v", res.structured, res.rpc)
 	}
@@ -296,7 +287,7 @@ func TestMCPFromRun_AStaleTreeHaltsRatherThanWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := remediate(t, f.server(t), sourceRun)
+	res := f.remediate(t, f.server(t), sourceRun)
 	if res.rpc != nil {
 		t.Fatalf("a halt must not be a protocol error: %+v", res.rpc)
 	}
@@ -329,12 +320,12 @@ func TestMCPFromRun_ASecondApplyAfterARestartHalts(t *testing.T) {
 	f := newFromRunFixture(t)
 	sourceRun := f.report(t, f.server(t))
 
-	if res := remediate(t, f.server(t), sourceRun); res.isError || res.rpc != nil {
+	if res := f.remediate(t, f.server(t), sourceRun); res.isError || res.rpc != nil {
 		t.Fatalf("the first apply must succeed: %+v %+v", res.structured, res.rpc)
 	}
 	applied := f.body(t)
 
-	res := remediate(t, f.server(t), sourceRun)
+	res := f.remediate(t, f.server(t), sourceRun)
 	if !res.isError {
 		t.Fatalf("a second apply across a restart must not read as a clean write: %+v", res.structured)
 	}
@@ -350,9 +341,8 @@ func TestMCPFromRun_ASecondApplyAfterARestartHalts(t *testing.T) {
 // VERIFIED against this agent's own artifact directory rather than trusted — and every way of failing
 // answers alike, so a peer gains no existence oracle over paths outside it.
 //
-// This is a PRESERVATION guard, and it is the one that matters most: on the old code nothing resolved
-// at all, so it passed vacuously. What it now holds is that adding a reader did not add a way to
-// point a governed write at an arbitrary directory.
+// This guard is the one that matters most: it holds that the reader gives no way to point a governed
+// write at an arbitrary directory.
 func TestMCPFromRun_AHandleThisAgentDidNotProduceIsRefused(t *testing.T) {
 	f := newFromRunFixture(t)
 	f.report(t, f.server(t)) // a real run exists, so the artifact directory is populated
@@ -368,7 +358,7 @@ func TestMCPFromRun_AHandleThisAgentDidNotProduceIsRefused(t *testing.T) {
 		"../" + filepath.Base(elsewhere), // a traversal spelled as a run id
 		filepath.Join(f.art, "nope"),     // a well-formed handle naming nothing
 	} {
-		res := remediate(t, c, handle)
+		res := f.remediate(t, c, handle)
 		if res.rpc != nil {
 			t.Fatalf("handle %q: an unresolvable handle is a domain refusal, not a protocol error: %+v", handle, res.rpc)
 		}
@@ -394,13 +384,14 @@ func TestMCPFromRun_AnInlineRunIsStillRefusedByNameFromDisk(t *testing.T) {
 	c := f.server(t)
 	res := c.tool(t, "review_report", map[string]any{
 		"inlineWorkspace": map[string]any{"main.go": "package main\n\nfunc main() {}\n"},
+		"panel":           fromRunPanel(),
 	})
 	if res.isError || res.rpc != nil {
 		t.Fatalf("an inline review must work: %+v %+v", res.structured, res.rpc)
 	}
 	runID, _ := res.structured["runId"].(string)
 
-	got := remediate(t, f.server(t), runID)
+	got := f.remediate(t, f.server(t), runID)
 	if !got.isError {
 		t.Fatalf("remediating an inline run must fail closed, got %+v", got.structured)
 	}
@@ -416,7 +407,7 @@ func TestMCPFromRun_AnInlineRunIsStillRefusedByNameFromDisk(t *testing.T) {
 func TestMCPFromRun_AWriteRunIsNotAFromRunSource(t *testing.T) {
 	f := newFromRunFixture(t)
 	sourceRun := f.report(t, f.server(t))
-	res := remediate(t, f.server(t), sourceRun)
+	res := f.remediate(t, f.server(t), sourceRun)
 	if res.isError || res.rpc != nil {
 		t.Fatalf("the apply must succeed: %+v %+v", res.structured, res.rpc)
 	}
@@ -424,7 +415,7 @@ func TestMCPFromRun_AWriteRunIsNotAFromRunSource(t *testing.T) {
 	if writeRun == "" {
 		t.Fatal("a remediation must carry its own runId")
 	}
-	again := remediate(t, f.server(t), writeRun)
+	again := f.remediate(t, f.server(t), writeRun)
 	if !again.isError {
 		t.Fatalf("a remediation run must never be a from-run source: %+v", again.structured)
 	}

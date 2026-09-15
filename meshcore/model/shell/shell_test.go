@@ -360,7 +360,7 @@ func TestClaude_RealReviewEnvelope_PrimaryModelAndUnwrap(t *testing.T) {
 	}
 }
 
-// TestClaude_ShortResponse_RequestedModelBeatsAuxiliary pins the fix for a FALSE identity mismatch.
+// TestClaude_ShortResponse_RequestedModelBeatsAuxiliary guards against a FALSE identity mismatch.
 // Claude Code runs a small auxiliary haiku model for internal bookkeeping and reports it in modelUsage
 // beside the answering model. On a SHORT response the auxiliary can produce MORE output tokens than the
 // real answer — measured against Claude Code 2.1.219, a one-word reply to `--model opus` reported haiku
@@ -387,7 +387,7 @@ func TestClaude_ShortResponse_RequestedModelBeatsAuxiliary(t *testing.T) {
 	}
 }
 
-// TestClaude_RequestedModelAbsent_ReportsSubstitute proves the fix does NOT weaken the
+// TestClaude_RequestedModelAbsent_ReportsSubstitute proves that preference does NOT weaken the
 // no-silent-fallback invariant: when the requested model never ran, the parser reports what DID run so
 // the verifier can classify a mismatch and halt. It must never echo the requested model back.
 func TestClaude_RequestedModelAbsent_ReportsSubstitute(t *testing.T) {

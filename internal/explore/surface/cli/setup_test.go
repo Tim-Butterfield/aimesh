@@ -246,7 +246,7 @@ func TestSetup_ProfileLifecycle(t *testing.T) {
 
 	// The removed set-default flag stays removed: naming it is an unknown-flag usage error.
 	if code, _, _ = setup(t, "--set-default-profile", "base"); code != 2 {
-		t.Errorf("--set-default-profile must no longer exist (want a usage error), got exit %d", code)
+		t.Errorf("--set-default-profile must not exist (want a usage error), got exit %d", code)
 	}
 }
 

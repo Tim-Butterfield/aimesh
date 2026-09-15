@@ -1,9 +1,9 @@
 package govern
 
-// This file is the HOST-TALLIED DECISION (design §3 Shortlist row / §4): the criterion vocabulary with
+// This file is the HOST-TALLIED DECISION: the criterion vocabulary with
 // its ORIGIN + AGGREGATION METHOD, the FROZEN + HASHED decision inputs, and the ballot tally itself. Like the
 // rest of this package it calls no model — every value here is a deterministic host rule over persisted
-// artifacts (§0 F-C).
+// artifacts.
 //
 // Two properties are load-bearing and are enforced by construction rather than by convention:
 //
@@ -11,11 +11,11 @@ package govern
 //     option order, the criterion set, the tally method, the shortlist size and the quorum / tie /
 //     missing-response policy into one InputsHash. The pipeline calls it BEFORE the ballot round is
 //     dispatched, and the host renders that hash INTO the ballot prompt — so "the criteria predate the votes"
-//     is a property of the persisted prompt bytes, not a claim about the code (§4: "else a criterion is
+//     is a property of the persisted prompt bytes, not a claim about the code ("else a criterion is
 //     introduced after seeing which candidate it favors"). Tally REFUSES an unfrozen decision.
 //   - THE HOST TALLIES; THE MODEL ONLY VOTES. Tally is arithmetic over the recorded ballots and nothing else.
 //     No model ever asserts a ranking, and Decision.Rendering states what a ballot actually is — an INFORMED
-//     PREFERENCE UNDER SHARED FRAMING (§4). It is never consensus, and it is never `emergent`: emergent is
+//     PREFERENCE UNDER SHARED FRAMING. It is never consensus, and it is never `emergent`: emergent is
 //     host-counted blind round-1 salience, a different measurement of a different thing.
 
 import (
@@ -35,12 +35,12 @@ import (
 // ballots by the exact rule that produced it.
 const DecisionRuleVersion = "host-ballot-tally@v1"
 
-// BallotQuery is the versioned query id recorded on a ballot-placement claim (§9). It is deliberately
+// BallotQuery is the versioned query id recorded on a ballot-placement claim. It is deliberately
 // DIFFERENT from CorroborationQuery: `voted` and `emergent` are two different measurements and a reader must
 // never have to infer which one a claim reports.
 const BallotQuery = "ballot-over-confirmed-universe@v1"
 
-// DecisionMethod is the frozen tally method (§4: the method is frozen + hashed before judgments are solicited).
+// DecisionMethod is the frozen tally method (the method is frozen + hashed before judgments are solicited).
 type DecisionMethod string
 
 // MethodPositionalBallot is the v1 host tally: each ballot's RANKING awards positional (Borda) points — an
@@ -50,9 +50,9 @@ type DecisionMethod string
 // summing the two would be the host inventing a weighting nobody froze.
 const MethodPositionalBallot DecisionMethod = "host-positional-ballot@v1"
 
-// --- Criteria: origin + aggregation method (design §4) ---
+// --- Criteria: origin + aggregation method ---
 
-// CriterionOrigin records WHERE a decision criterion came from (§4). It matters because a criterion the
+// CriterionOrigin records WHERE a decision criterion came from. It matters because a criterion the
 // collator introduced carries a different epistemic weight from one the user stated, and a result that hides
 // the difference invites the collator to author the standard it is then judged against.
 type CriterionOrigin string
@@ -63,7 +63,7 @@ const (
 	OriginCollatorProposedAuthorized CriterionOrigin = "collator_proposed_authorized"
 )
 
-// AggregationMethod records HOW a criterion's evidence is combined (§4) — so a reader can tell a ballot from
+// AggregationMethod records HOW a criterion's evidence is combined — so a reader can tell a ballot from
 // a mention count from a collator judgment without inferring it from the prose.
 type AggregationMethod string
 
@@ -75,7 +75,7 @@ const (
 	AggregationCollatorJudgment  AggregationMethod = "collator_judgment"
 )
 
-// Authorization is the EXPLICIT PERSISTED EVENT §4 requires before a `collator_proposed_authorized` criterion
+// Authorization is the EXPLICIT PERSISTED EVENT required before a `collator_proposed_authorized` criterion
 // may be used: who authorized it, when, which criterion version, and over what scope. Without it the origin
 // is not usable — that is the whole point of the origin existing.
 type Authorization struct {
@@ -97,7 +97,7 @@ func (a Authorization) Validate() error {
 	return nil
 }
 
-// Criterion is one decision criterion with its origin + aggregation method (§4).
+// Criterion is one decision criterion with its origin + aggregation method.
 type Criterion struct {
 	Name              string            `json:"name"`
 	Origin            CriterionOrigin   `json:"origin"`
@@ -107,7 +107,7 @@ type Criterion struct {
 }
 
 // Validate checks the criterion is usable: a name, a known origin, a known aggregation method, and — for a
-// collator-proposed criterion — the explicit authorization event §4 requires. A collator-proposed criterion
+// collator-proposed criterion — the required explicit authorization event. A collator-proposed criterion
 // WITHOUT an authorization is an error rather than a downgrade: silently demoting it to `explorer_proposed`
 // would launder exactly the provenance the field exists to record.
 func (c Criterion) Validate() error {
@@ -137,9 +137,9 @@ func (c Criterion) Validate() error {
 	return nil
 }
 
-// --- The frozen decision inputs (design §4) ---
+// --- The frozen decision inputs ---
 
-// DecisionInputs is EVERYTHING a ranking depends on, fixed before any ranking judgment is solicited (§4).
+// DecisionInputs is EVERYTHING a ranking depends on, fixed before any ranking judgment is solicited.
 // Every field is host material or frozen policy; none of it is model output.
 type DecisionInputs struct {
 	RulesVersion string         `json:"rulesVersion"`
@@ -211,7 +211,7 @@ type FrozenDecision struct {
 	InputsHash string         `json:"inputsHash"`
 }
 
-// FreezeDecision fixes + hashes every decision input BEFORE any ranking judgment is solicited (§4). The
+// FreezeDecision fixes + hashes every decision input BEFORE any ranking judgment is solicited. The
 // quorum, tie rule and missing-response policy are taken from the panel govern.Freeze already froze at the
 // start of the run rather than re-authored here, so they are older than the ballot by an entire fan-out.
 func FreezeDecision(p Panel, universe canon.Result, pres canon.Presentation, criteria []Criterion, method DecisionMethod, shortlistSize int) (FrozenDecision, error) {
@@ -241,9 +241,8 @@ func FreezeDecision(p Panel, universe canon.Result, pres canon.Presentation, cri
 // The delimiters are `=====`, deliberately NOT `-----`. This string is the FIRST bytes of the ballot
 // prompt, and the argv-passing adapters (ollama, devin-cli, agy-cli, cursor-cli) hand the prompt to
 // their CLI as a positional argument. A prompt opening with a dash is parsed by those CLIs as an
-// option: measured 2026-08-30, a shortlist run lost 3 of 5 seats this way — devin exited 2 printing
-// its usage, cursor exited 1 echoing prompt text — while the three PromptOnStdin recipes (codex-cli,
-// claude-code, gemini-cli) were unaffected. Quorum failed and the ranking was withheld. Keep the first
+// option, so those seats fail while the PromptOnStdin recipes (codex-cli, claude-code, gemini-cli) do
+// not — enough to fail quorum and withhold the ranking. Keep the first
 // character of this header a letter or `=`.
 func (f FrozenDecision) Render() string {
 	var b strings.Builder
@@ -262,7 +261,7 @@ func (f FrozenDecision) Render() string {
 	return b.String()
 }
 
-// --- Ballots + the host tally (design §4) ---
+// --- Ballots + the host tally ---
 
 // Ballot is ONE explorer's recorded preference over the CONFIRMED universe. Ranking is ordered (best first)
 // and may be partial; Approved is a separate acceptability question.
@@ -273,7 +272,7 @@ type Ballot struct {
 	Approved    []string                `json:"approved"`
 	// Rationale is the voter's stated reasoning — MODEL PROSE. It is carried on the value only so the host can
 	// move it into the collatorNarrative namespace; `json:"-"` keeps it out of the machine record entirely, so
-	// there is no serialized governance field a model's words can occupy (§0 F-C).
+	// there is no serialized governance field a model's words can occupy.
 	Rationale string `json:"-"`
 }
 
@@ -323,7 +322,7 @@ type DecisionEntry struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// Decision is the terminal host tally (design §4): the frozen inputs, every recorded ballot, the ranked
+// Decision is the terminal host tally: the frozen inputs, every recorded ballot, the ranked
 // entries, and the honest rendering of what a ballot IS.
 type Decision struct {
 	Frozen      FrozenDecision  `json:"frozen"`
@@ -351,7 +350,7 @@ func (d Decision) Shortlisted() []DecisionEntry {
 }
 
 // Rejected returns the entries that did NOT make the cut, in rank order — carried with their host reason so
-// a shortlist never silently loses a candidate the panel nominated (§4's minority carry-through applied to
+// a shortlist never silently loses a candidate the panel nominated (the minority carry-through rule applied to
 // the decision).
 func (d Decision) Rejected() []DecisionEntry {
 	out := make([]DecisionEntry, 0, len(d.Entries))
@@ -380,16 +379,16 @@ type TallyInput struct {
 	BallotRoundID string
 }
 
-// Tally computes the ranking from the recorded ballots (design §4). It is the ONLY place a Shortlist ranking
+// Tally computes the ranking from the recorded ballots. It is the ONLY place a Shortlist ranking
 // is produced, and it is pure arithmetic: positional points from the rankings, approvals tallied separately,
 // deterministic ordering, the frozen cut applied, and a claim pinned to every shortlisted entry.
 //
-// It withholds rather than guesses in three cases, all of them §4's rules rather than this function's taste:
+// It withholds rather than guesses in three cases, all of them governance rules rather than this function's taste:
 // a contested partition under a ranked candidate, a respondents count below the frozen quorum, and a tie at
 // the shortlist boundary under the frozen tie rule.
 func Tally(in TallyInput) (Decision, error) {
 	if strings.TrimSpace(in.Frozen.InputsHash) == "" {
-		return Decision{}, fmt.Errorf("tally: the decision inputs were not frozen — a ranking may only be computed under inputs fixed + hashed BEFORE the ballot was solicited (design §4)")
+		return Decision{}, fmt.Errorf("tally: the decision inputs were not frozen — a ranking may only be computed under inputs fixed + hashed BEFORE the ballot was solicited")
 	}
 	if in.Frozen.InputsHash != in.Frozen.Inputs.Hash() {
 		return Decision{}, fmt.Errorf("tally: the frozen decision inputs do not match their hash — the framing changed after the freeze")
@@ -578,7 +577,7 @@ func ballotClaim(in TallyInput, e DecisionEntry, tiedAtBoundary, quorumMet bool)
 }
 
 // ballotSensitivity computes a ranked candidate's support under BOTH plausible partitions when a contested
-// mapping reaches it (§4), so the definitive `ranked` label can be withheld and a range emitted instead.
+// mapping reaches it, so the definitive `ranked` label can be withheld and a range emitted instead.
 //
 // The two directions are asymmetric and both are honest:
 //   - the alternative JOINS the held entities: they would have been ONE option on the ballot, so their

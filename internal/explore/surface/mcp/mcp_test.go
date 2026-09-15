@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -15,12 +17,13 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/audit"
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
+	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 
 	"github.com/Tim-Butterfield/aimesh/internal/explore/pipeline"
-	"github.com/Tim-Butterfield/aimesh/internal/explore/profile"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/mcp"
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 )
 
 // The exploremesh MCP surface is driven in these tests by the OFFICIAL MCP Go SDK client
@@ -121,68 +124,48 @@ func (f *fakeExplorer) opts() pipeline.Options {
 
 // fakeConfig supplies the `list`/`doctor` projections. The readiness detail deliberately CONTAINS an
 // absolute path, because meshcore composes those details and the surface's job is to strip them.
-type fakeConfig struct{ set profile.Set }
+type fakeConfig struct{}
 
-func (f fakeConfig) ProfileSet() profile.Set { return f.set }
-
-func (f fakeConfig) Adapters() []mcp.AdapterFact {
+func (fakeConfig) Adapters() []mcp.AdapterFact {
 	return []mcp.AdapterFact{
-		{Name: "fake", DisplayName: "Fake", Kind: "fake", Configured: true},
-		{Name: "claude-code", DisplayName: "Claude Code", Kind: "shell", Configured: true, IdentityEvidenceCapability: "envelope"},
+		{Name: "fake", Kind: "fake", Available: true, Source: "flag"},
+		{Name: "claude-code", Kind: "shell", Available: true, Source: "flag", IdentityEvidenceCapability: "envelope"},
 	}
 }
 
-func (f fakeConfig) Readiness() (bool, []mcp.ReadinessCheck) {
+func (fakeConfig) Readiness() (bool, []mcp.ReadinessCheck) {
 	return true, []mcp.ReadinessCheck{
-		{Name: "roster: explorers >= 2", OK: true, Detail: "2 explorers"},
-		{Name: "adapter: claude-code", OK: true, Detail: "required — found at /usr/local/bin/claude (version 1.2.3)"},
+		{Name: "adapter: fake", OK: true, Detail: "internal test adapter"},
+		{Name: "adapter: claude-code", OK: true, Detail: "found at /usr/local/bin/claude (version 1.2.3)"},
 	}
 }
 
-func testPlan(t *testing.T) roster.Plan {
+// launchSet is the adapter set test servers are launched with: the internal fake, and claude-code at an
+// executable this test owns, so its availability is real without a CLI on the machine.
+func launchSet(t *testing.T) launchflags.Set {
 	t.Helper()
-	plan, err := roster.Roster{
-		Explorers: []roster.Explorer{{Adapter: "fake", Model: "m1"}, {Adapter: "fake", Model: "m2"}},
-		Collator:  roster.Collator{Adapter: "fake", Model: "mc"},
-	}.Plan()
-	if err != nil {
-		t.Fatalf("plan: %v", err)
+	t.Setenv(fake.EnvVar, "1")
+	cc := filepath.Join(t.TempDir(), "claude")
+	if runtime.GOOS == "windows" {
+		cc += ".exe"
 	}
-	return plan
-}
-
-func testProfiles(t *testing.T) profile.Set {
-	t.Helper()
-	return profile.Set{
-		SchemaVersion:  1,
-		DefaultProfile: "default",
-		Profiles: map[string]profile.Profile{
-			"default": {
-				Explorers: []roster.Explorer{{Adapter: "fake", Model: "m1"}, {Adapter: "fake", Model: "m2"}, {Adapter: "fake", Model: "m3"}},
-				Collator:  roster.Collator{Adapter: "fake", Model: "mc"},
-			},
-			"pair": {
-				Explorers: []roster.Explorer{{Adapter: "fake", Model: "p1"}, {Adapter: "fake", Model: "p2"}},
-				Collator:  roster.Collator{Adapter: "fake", Model: "mc"},
-				// One profile names its canonicalizers explicitly, so the projections have both provenances
-				// to report and `derived` never gets to be the only shape a test ever sees.
-				Canonicalizers: []roster.Explorer{{Adapter: "fake", Model: "canon-p1"}, {Adapter: "fake", Model: "canon-p2"}},
-			},
-		},
+	if err := os.WriteFile(cc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("fixture: %v", err)
 	}
+	return launchflags.NewSet(
+		launchflags.Adapter{Name: "fake", Source: launchflags.SourceFlag},
+		launchflags.Adapter{Name: "claude-code", Path: cc, Source: launchflags.SourceFlag},
+	)
 }
 
 // newServer builds a hermetic MCP server; tune applies per-test configuration before it serves.
 func newServer(t *testing.T, exp mcp.Explorer, tune ...func(*mcp.Server)) *mcp.Server {
 	t.Helper()
 	t.Setenv("AIMESH_HOME", t.TempDir())
-	t.Setenv("AIMESH_HOME", t.TempDir())
 	s := &mcp.Server{
 		Explorer: exp,
-		Plan:     testPlan(t),
-		Profiles: testProfiles(t),
-		Adapters: []string{"claude-code", "fake"},
-		Config:   fakeConfig{set: testProfiles(t)},
+		Adapters: launchSet(t),
+		Config:   fakeConfig{},
 		// Capture is ON in production; tests disable it unless they are testing capture, so no test
 		// writes a run directory into the repo.
 		DisableCapture: true,
@@ -258,10 +241,27 @@ func textOf(res *sdk.CallToolResult) string {
 	return b.String()
 }
 
+// defaultPanel is the panel an explore call carries when a test does not name one: every call composes
+// its own seats, and most tests are about something other than the panel.
+func defaultPanel() map[string]any {
+	return map[string]any{
+		"explorers": []any{
+			map[string]any{"adapter": "fake", "model": "m1"},
+			map[string]any{"adapter": "fake", "model": "m2"},
+		},
+		"collator": map[string]any{"adapter": "fake", "model": "mc"},
+	}
+}
+
+// exploreArgs builds an explore call. A "panel" key set to nil omits the panel entirely; an absent one gets
+// defaultPanel.
 func exploreArgs(extra map[string]any) map[string]any {
-	args := map[string]any{"purpose": "choose a datastore", "criteria": []string{"cost", "latency"}, "mode": "map"}
+	args := map[string]any{"purpose": "choose a datastore", "criteria": []string{"cost", "latency"}, "mode": "map", "panel": defaultPanel()}
 	for k, v := range extra {
 		args[k] = v
+	}
+	if p, has := args["panel"]; has && p == nil {
+		delete(args, "panel")
 	}
 	return args
 }
@@ -540,9 +540,8 @@ func TestMalformedRequests_AreProtocolErrorsWithTeachingMessages(t *testing.T) {
 		{"compare without axes", "explore", map[string]any{"purpose": "x", "criteria": []string{"c"}, "mode": "compare", "options": []string{"a", "b"}}, "comparisonAxes"},
 		{"forecast without unit", "explore", map[string]any{"purpose": "x", "criteria": []string{"c"}, "mode": "forecast", "target": "t", "unit": "", "horizon": "h"}, "unit"},
 
-		// Belongs-to-another-mode. These are the cases the four separate tools used to catch for free
-		// via their per-tool decode; with one tool they must be refused EXPLICITLY, because a silently
-		// dropped parameter reads to the caller as one that was honoured.
+		// Belongs-to-another-mode. They are refused EXPLICITLY, because a silently dropped parameter reads
+		// to the caller as one that was honoured.
 		{"artifact on a map run", "explore", map[string]any{"purpose": "x", "criteria": []string{"c"}, "mode": "map", "artifact": "a"}, "does not belong to mode"},
 		{"target on a challenge run", "explore", map[string]any{"purpose": "x", "criteria": []string{"c"}, "mode": "challenge", "artifact": "a", "target": "t"}, "does not belong to mode"},
 		{"options on a forecast run", "explore", map[string]any{"purpose": "x", "criteria": []string{"c"}, "mode": "forecast", "target": "t", "unit": "u", "horizon": "h", "options": []string{"a", "b"}}, "does not belong to mode"},
@@ -576,34 +575,84 @@ func TestUnknownTool_IsAProtocolError(t *testing.T) {
 	}
 }
 
-// --- panel: select or compose, fail-closed ---
+// --- panel: composed per call, fail-closed ---
 
-func TestPanel_ProfileSelectionAndCount(t *testing.T) {
-	exp := &fakeExplorer{}
-	s := connect(t, newServer(t, exp))
-	res := call(t, s, "explore", exploreArgs(map[string]any{"panel": map[string]any{"profile": "pair"}}))
-	if res.IsError {
-		t.Fatalf("isError: %s", textOf(res))
-	}
-	out := structured(t, res)
-	pan, _ := out["panel"].(map[string]any)
-	req, _ := pan["requested"].(map[string]any)
-	if req["source"] != "profile" || req["profile"] != "pair" {
-		t.Errorf("requested = %v", req)
-	}
-	if got := exp.plan().Explorers; len(got) != 2 || got[0].Model != "p1" {
-		t.Errorf("executed panel = %v, want the `pair` profile", got)
-	}
-	// A count is never clamped: over-range fails rather than quietly running fewer seats.
+// refusal calls explore expecting a protocol error, and returns its message.
+func refusal(t *testing.T, s *sdk.ClientSession, args map[string]any) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := s.CallTool(ctx, &sdk.CallToolParams{Name: "explore",
-		Arguments: exploreArgs(map[string]any{"panel": map[string]any{"profile": "pair", "count": 9}})}); err == nil {
-		t.Error("an out-of-range count must fail, never be clamped")
+	res, err := s.CallTool(ctx, &sdk.CallToolParams{Name: "explore", Arguments: args})
+	if err == nil {
+		t.Fatalf("want a protocol error, got result isError=%v: %v", res.IsError, res.StructuredContent)
+	}
+	return err.Error()
+}
+
+func TestPanel_IsRequiredAndTheRefusalShowsTheCorrectedCall(t *testing.T) {
+	exp := &fakeExplorer{}
+	s := connect(t, newServer(t, exp))
+	msg := refusal(t, s, exploreArgs(map[string]any{"panel": nil}))
+	for _, want := range []string{"`panel` is required", `"explorers"`, `"collator"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal must contain %q; got %q", want, msg)
+		}
+	}
+	if exp.callCount() != 0 {
+		t.Errorf("explorer ran %d times; a missing panel must be refused before any spend", exp.callCount())
 	}
 }
 
-func TestPanel_AdHocCompositionIsFailClosedAgainstTheConfiguredSet(t *testing.T) {
+func TestPanel_ProfileAndCountAreNotParameters(t *testing.T) {
+	s := connect(t, newServer(t, &fakeExplorer{}))
+	for _, key := range []string{"profile", "count"} {
+		panel := defaultPanel()
+		panel[key] = "x"
+		if msg := refusal(t, s, exploreArgs(map[string]any{"panel": panel})); !strings.Contains(msg, "unknown field") {
+			t.Errorf("panel.%s must be an unknown field; got %q", key, msg)
+		}
+	}
+}
+
+func TestPanel_RefusesAnAdapterThatCannotRun(t *testing.T) {
+	seats := func(adapter string) map[string]any {
+		return map[string]any{
+			"explorers": []any{map[string]any{"adapter": adapter, "model": "x1"}, map[string]any{"adapter": "fake", "model": "x2"}},
+			"collator":  map[string]any{"adapter": "fake", "model": "xc"},
+		}
+	}
+	t.Run("an empty launch set names --adapter", func(t *testing.T) {
+		s := connect(t, newServer(t, &fakeExplorer{}, func(s *mcp.Server) { s.Adapters = launchflags.NewSet() }))
+		if msg := refusal(t, s, exploreArgs(nil)); !strings.Contains(msg, "--adapter") {
+			t.Errorf("refusal must name --adapter; got %q", msg)
+		}
+	})
+	t.Run("an adapter whose CLI cannot be started", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "absent-claude")
+		s := connect(t, newServer(t, &fakeExplorer{}, func(s *mcp.Server) {
+			s.Adapters = launchflags.NewSet(
+				launchflags.Adapter{Name: "fake", Source: launchflags.SourceFlag},
+				launchflags.Adapter{Name: "claude-code", Path: missing, Source: launchflags.SourceFlag},
+			)
+		}))
+		if msg := refusal(t, s, exploreArgs(map[string]any{"panel": seats("claude-code")})); !strings.Contains(msg, "cannot be started") {
+			t.Errorf("refusal must say the CLI cannot be started; got %q", msg)
+		}
+	})
+}
+
+func TestExplore_VerifyReadinessReachesThePipeline(t *testing.T) {
+	exp := &fakeExplorer{}
+	s := connect(t, newServer(t, exp))
+	if res := call(t, s, "explore", exploreArgs(map[string]any{"verifyReadiness": true})); res.IsError {
+		t.Fatalf("unexpected isError: %s", textOf(res))
+	}
+	if !exp.opts().VerifyReadiness {
+		t.Fatal("verifyReadiness was accepted on the wire but not passed to the pipeline")
+	}
+}
+
+func TestPanel_CompositionIsFailClosedAgainstTheLaunchSet(t *testing.T) {
 	exp := &fakeExplorer{}
 	s := connect(t, newServer(t, exp))
 	ok := call(t, s, "explore", exploreArgs(map[string]any{"panel": map[string]any{
@@ -628,8 +677,8 @@ func TestPanel_AdHocCompositionIsFailClosedAgainstTheConfiguredSet(t *testing.T)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// COMPOSE, NEVER CONFIGURE: an adapter outside the startup-bound set is refused, and the refusal
-	// names the configured set so the corrected call follows from the error.
+	// COMPOSE, NEVER CONFIGURE: an adapter outside the launch set is refused, and the refusal names the
+	// launched set so the corrected call follows from the error.
 	_, err := s.CallTool(ctx, &sdk.CallToolParams{Name: "explore", Arguments: exploreArgs(map[string]any{"panel": map[string]any{
 		"explorers": []any{
 			map[string]any{"adapter": "totally-new-cli", "model": "x1"},
@@ -638,19 +687,10 @@ func TestPanel_AdHocCompositionIsFailClosedAgainstTheConfiguredSet(t *testing.T)
 		"collator": map[string]any{"adapter": "fake", "model": "xc"},
 	}})})
 	if err == nil {
-		t.Fatal("an unconfigured adapter must be refused")
+		t.Fatal("an adapter the server was not launched with must be refused")
 	}
-	if !strings.Contains(err.Error(), "not configured") || !strings.Contains(err.Error(), "claude-code") {
-		t.Errorf("refusal must name the configured set; got %v", err)
-	}
-	// The two panel forms are mutually exclusive.
-	_, err = s.CallTool(ctx, &sdk.CallToolParams{Name: "explore", Arguments: exploreArgs(map[string]any{"panel": map[string]any{
-		"profile":   "pair",
-		"explorers": []any{map[string]any{"adapter": "fake", "model": "x1"}, map[string]any{"adapter": "fake", "model": "x2"}},
-		"collator":  map[string]any{"adapter": "fake", "model": "xc"},
-	}})})
-	if err == nil || !strings.Contains(err.Error(), "EITHER") {
-		t.Errorf("profile + ad-hoc together must be refused; got %v", err)
+	if !strings.Contains(err.Error(), "was not launched with") || !strings.Contains(err.Error(), "claude-code") {
+		t.Errorf("refusal must name the launched set; got %v", err)
 	}
 	// The fan-out cap is a spend control: over-cap fails, it is never clamped.
 	seats := make([]any, 0, 17)
@@ -836,8 +876,15 @@ func TestList_IsSanitizedAndReportsTheLimits(t *testing.T) {
 			}
 		}
 	}
-	if out["limits"] == nil || out["modes"] == nil || out["profiles"] == nil {
+	if out["limits"] == nil || out["modes"] == nil || out["note"] == nil {
 		t.Errorf("list payload = %v", out)
+	}
+	if _, has := out["profiles"]; has {
+		t.Errorf("list must not report profiles: %v", out)
+	}
+	first, _ := adapters[0].(map[string]any)
+	if _, has := first["available"]; !has {
+		t.Errorf("adapter rows must carry available: %v", first)
 	}
 	limits, _ := out["limits"].(map[string]any)
 	if limits["maxPanelExplorers"] == nil || limits["maxWaitSeconds"] == nil {
@@ -871,6 +918,14 @@ func TestDoctor_StripsPathsFromCheckDetails(t *testing.T) {
 	}
 	if strings.Contains(textOf(res), "/usr/local/bin") {
 		t.Errorf("doctor leaked a binary path in the human rendering: %s", textOf(res))
+	}
+	for _, key := range []string{"ok", "protocolMode", "protocolEra"} {
+		if _, has := out[key]; !has {
+			t.Errorf("doctor payload must carry %q: %v", key, out)
+		}
+	}
+	if note, _ := out["note"].(string); !strings.Contains(note, "verifyReadiness") {
+		t.Errorf("doctor note must point at verifyReadiness: %q", note)
 	}
 }
 
@@ -932,11 +987,11 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 		{"explore_list", "explore_list", map[string]any{}},
 		{"explore_doctor", "explore_doctor", map[string]any{}},
 		{"a completed exploration", "explore", exploreArgs(nil)},
-		{"a completed comparison", "explore", map[string]any{"mode": "compare",
+		{"a completed comparison", "explore", exploreArgs(map[string]any{"mode": "compare",
 			"purpose": "pick one", "criteria": []string{"cost"},
 			"options":        []string{"a", "b"},
 			"comparisonAxes": []any{map[string]any{"name": "cost", "direction": "lower_is_better"}},
-		}},
+		})},
 		{"run_status on a finished run", "explore_run_status", map[string]any{"runId": runID}},
 		{"run_result on a finished run", "explore_run_result", map[string]any{"runId": runID}},
 		{"run_result on an unknown run", "explore_run_result", map[string]any{"runId": "run-nope"}},
@@ -954,12 +1009,9 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 		check(t, declaredOutputSchemas(t, hs), "explore", structured(t, call(t, hs, "explore", exploreArgs(nil))))
 	})
 
-	// (c) There is deliberately NO admission-refusal case here. It used to be driven by the
-	// concurrency cap, and before that the lifetime cap; both are gone, and with them the last way
-	// this surface could refuse an `explore` call BEFORE the run exists. Every remaining refusal on
-	// the run-starting path is either a protocol error (no structuredContent to validate) or a halt
-	// that already has a run id — covered by (a) and (b). Reinstating a synthetic case here would
-	// assert a payload shape nothing produces, which is worse coverage than none.
+	// (c) There is deliberately NO admission-refusal case here: this surface has no admission bound, so
+	// every refusal on the run-starting path is either a protocol error (no structuredContent to
+	// validate) or a halt that already has a run id — covered by (a) and (b).
 
 	// (d) a run that is genuinely STILL RUNNING: the `running` reply, and run_result mid-flight — the
 	// payload that must not drop the panel echo its own schema marks required.

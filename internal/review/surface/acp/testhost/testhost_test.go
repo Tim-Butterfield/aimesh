@@ -36,13 +36,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// launchTrusting starts the child agent with `ws` as its TRUSTED root — the operator step a
-// real ACP host performs (`aimesh review acp --root <project>`). Over ACP a workspace path in a
-// request is not its own consent, so a driver that will send one must authorize it at launch;
-// an unlisted path is refused before any run (see the acp package's scope tests).
-func launchTrusting(t *testing.T, framing, ws string, env []string) (*Client, func() error, error) {
+// launchAgent starts the child agent the way a host configuration does: launched with the internal
+// fake adapter, and nothing else set up. allowWrites adds `--allow-writes`.
+func launchAgent(t *testing.T, framing string, env []string, allowWrites bool) (*Client, func() error, error) {
 	t.Helper()
-	return LaunchWith(testBin, Options{Framing: framing, Roots: []string{ws}, Env: env})
+	return LaunchWith(testBin, Options{Framing: framing, Adapters: []string{"fake"}, AllowWrites: allowWrites, Env: env})
 }
 
 func workspace(t *testing.T) string {
@@ -54,44 +52,30 @@ func workspace(t *testing.T) string {
 	return ws
 }
 
-// fakeProfileHome creates an isolated AIMESH_HOME whose config points defaultProfile at the
-// shipped-but-hidden fake profile — the deterministic, fully-local profile the child `reviewmesh acp`
-// runs. (The shipped `default` profile now ships UNCONFIGURED, so a bare home would not resolve.)
-func fakeProfileHome(t *testing.T) string {
-	t.Helper()
-	return fakeProfileHomeWith(t, "")
-}
-
-// fakeProfileHomeWith is fakeProfileHome with extra top-level config appended — for tests that
-// must exercise a NON-seed policy (e.g. widening `surfaces.defaultModeBySurface.acp`). Everything
-// it does not set still comes from the shipped seed.
-func fakeProfileHomeWith(t *testing.T, extraYAML string) string {
-	t.Helper()
-	home := t.TempDir()
-	dir := filepath.Join(home, ".aimesh", "review")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("schemaVersion: 1\ndefaultProfile: fake-smoke\n"+extraYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return home
-}
-
+// env isolates the child from the developer's machine: a fresh AIMESH_HOME (the durable session
+// store), a temp artifact directory, a deterministic fake scenario, and the unlocked internal fake.
 func env(t *testing.T) []string {
 	t.Helper()
-	return envIn(t, fakeProfileHome(t))
+	return envIn(t, t.TempDir())
 }
 
-// envIn is env with an explicit AIMESH_HOME (so a test can supply its own config layer).
+// envIn is env with an explicit AIMESH_HOME, so two child processes can share a session store.
 func envIn(t *testing.T, home string) []string {
 	t.Helper()
 	return append(os.Environ(),
 		"REVIEWMESH_ARTIFACT_DIR="+t.TempDir(),
 		"REVIEWMESH_FAKE_SCENARIO=valid", // deterministic 1-finding report
 		"AIMESH_HOME="+home,              // never touch the real home (durable session store)
-		"AIMESH_INTERNAL_FAKE=1",         // unlock the hidden internal fake harness for the child
+		"AIMESH_INTERNAL_FAKE=1",         // unlock the internal fake adapter for the child
 	)
+}
+
+// panelMeta is the `_meta` a review turn carries: every seat is the fake adapter.
+func panelMeta() map[string]any {
+	seat := map[string]any{"adapter": "fake", "model": "fake-model"}
+	return map[string]any{"reviewmesh": map[string]any{
+		"panel": map[string]any{"reviewers": []any{seat}, "author_remediator": seat},
+	}}
 }
 
 // promptRM extracts the reviewmesh result block from an ACP v1 PromptResponse result
@@ -115,12 +99,12 @@ func updEventType(upd map[string]any) string {
 	return s
 }
 
-// The minimal required ACP flow over a real subprocess, for both framings.
+// The minimal required ACP flow over a real subprocess, for both framings, on a fresh home.
 func TestACP_ReportFlow(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
 			ws := workspace(t)
-			c, stop, err := launchTrusting(t, framing, ws, env(t))
+			c, stop, err := launchAgent(t, framing, env(t), false)
 			if err != nil {
 				t.Fatalf("launch: %v", err)
 			}
@@ -148,8 +132,11 @@ func TestACP_ReportFlow(t *testing.T) {
 			if init.Result["capabilities"] != nil || init.Result["serverInfo"] != nil {
 				t.Errorf("initialize must not carry top-level capabilities/serverInfo (ACP v1): %+v", init.Result)
 			}
+			if rm := promptRM(t, init.Result); rm["writes"] != "agent" || rm["diffAvailable"] != true {
+				t.Errorf("initialize must disclose writes=agent diffAvailable=true without --allow-writes: %+v", rm)
+			}
 
-			rev, err := c.Call("review", map[string]any{"workspace": ws, "mode": "report"})
+			rev, err := c.Call("review", map[string]any{"workspace": ws, "mode": "report", "_meta": panelMeta()})
 			if err != nil {
 				t.Fatalf("review: %v", err)
 			}
@@ -162,7 +149,6 @@ func TestACP_ReportFlow(t *testing.T) {
 			if rev.Result["mode"] != "report" {
 				t.Errorf("review mode = %v, want report", rev.Result["mode"])
 			}
-			// audit artifacts written under the run dir
 			runDir, _ := rev.Result["runDir"].(string)
 			if runDir == "" {
 				t.Fatal("review result missing runDir")
@@ -184,7 +170,7 @@ func TestACP_SessionFlow(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
 			ws := workspace(t)
-			c, stop, err := launchTrusting(t, framing, ws, env(t))
+			c, stop, err := launchAgent(t, framing, env(t), false)
 			if err != nil {
 				t.Fatalf("launch: %v", err)
 			}
@@ -205,14 +191,13 @@ func TestACP_SessionFlow(t *testing.T) {
 			if sid == "" {
 				t.Fatalf("session/new returned no sessionId: %+v", sn.Result)
 			}
-			pr, err := c.Call("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "report"})
+			pr, err := c.Call("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "report", "_meta": panelMeta()})
 			if err != nil {
 				t.Fatalf("session/prompt: %v", err)
 			}
 			if pr.Error != nil {
 				t.Fatalf("session/prompt error: %+v", pr.Error)
 			}
-			// ACP v1 PromptResponse: top-level stopReason; reviewmesh details under _meta.reviewmesh.
 			if pr.Result["stopReason"] != "end_turn" {
 				t.Errorf("session/prompt stopReason = %v, want end_turn", pr.Result["stopReason"])
 			}
@@ -226,14 +211,13 @@ func TestACP_SessionFlow(t *testing.T) {
 	}
 }
 
-// session/prompt streams ordered session/update progress notifications (JSON-RPC
-// notifications, no id) tagged with the session id, then the terminal response — for both
-// framings. initialize advertises session.update.
+// session/prompt streams ordered session/update progress notifications (JSON-RPC notifications, no
+// id) tagged with the session id, then the terminal response — for both framings.
 func TestACP_SessionPromptProgress(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
 			ws := workspace(t)
-			c, stop, err := launchTrusting(t, framing, ws, env(t))
+			c, stop, err := launchAgent(t, framing, env(t), false)
 			if err != nil {
 				t.Fatalf("launch: %v", err)
 			}
@@ -243,13 +227,9 @@ func TestACP_SessionPromptProgress(t *testing.T) {
 				}
 			}()
 
-			init, err := c.Call("initialize", map[string]any{"protocolVersion": 1})
-			if err != nil || init.Error != nil {
+			if init, err := c.Call("initialize", map[string]any{"protocolVersion": 1}); err != nil || init.Error != nil {
 				t.Fatalf("initialize: err=%v resp=%+v", err, init)
 			}
-			// The ACP v1 initialize result no longer advertises a reviewmesh `session` block;
-			// session/update progress streaming is verified by the ordered notifications below.
-
 			sn, err := c.Call("session/new", nil)
 			if err != nil || sn.Error != nil {
 				t.Fatalf("session/new: err=%v resp=%+v", err, sn)
@@ -259,7 +239,7 @@ func TestACP_SessionPromptProgress(t *testing.T) {
 				t.Fatalf("session/new returned no sessionId: %+v", sn.Result)
 			}
 
-			pr, notes, err := c.CallCollecting("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "report"})
+			pr, notes, err := c.CallCollecting("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "report", "_meta": panelMeta()})
 			if err != nil {
 				t.Fatalf("session/prompt: %v", err)
 			}
@@ -281,8 +261,6 @@ func TestACP_SessionPromptProgress(t *testing.T) {
 					t.Errorf("unexpected notification method %q", n.Method)
 					continue
 				}
-				// ACP v1 SessionNotification: top-level params.sessionId + params.update (the
-				// SessionUpdate variant). reviewmesh eventType lives under update._meta.reviewmesh.
 				if n.Params["sessionId"] != sid {
 					t.Errorf("notification sessionId = %v, want %s", n.Params["sessionId"], sid)
 				}
@@ -306,8 +284,6 @@ func TestACP_SessionPromptProgress(t *testing.T) {
 			if startIdx >= doneIdx {
 				t.Errorf("run_started (idx %d) must precede run_completed (idx %d)", startIdx, doneIdx)
 			}
-			// CallCollecting returns the terminal response only after every preceding
-			// notification, so the response is guaranteed to follow the progress stream.
 			if sd, err := c.Call("shutdown", nil); err != nil || sd.Error != nil {
 				t.Errorf("shutdown: err=%v resp=%+v", err, sd)
 			}
@@ -346,12 +322,12 @@ func TestACP_SessionLoadMethodNotFound(t *testing.T) {
 	}
 }
 
-// session/prompt with host-mediated inline content (no workspace path): the Client
-// materializes it to a temp workspace and reviews it end-to-end — both framings.
+// session/prompt with host-mediated inline content (no workspace path): the agent materializes it to
+// a temp workspace and reviews it end-to-end — both framings.
 func TestACP_InlineWorkspace(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
-			c, stop, err := Launch(testBin, framing, env(t), nil)
+			c, stop, err := launchAgent(t, framing, env(t), false)
 			if err != nil {
 				t.Fatalf("launch: %v", err)
 			}
@@ -369,7 +345,7 @@ func TestACP_InlineWorkspace(t *testing.T) {
 			}
 			sid, _ := sn.Result["sessionId"].(string)
 			pr, err := c.Call("session/prompt", map[string]any{
-				"sessionId": sid, "mode": "report",
+				"sessionId": sid, "mode": "report", "_meta": panelMeta(),
 				"inlineWorkspace": map[string]any{"main.go": "package main\n\nfunc main() {}\n"},
 			})
 			if err != nil {
@@ -421,16 +397,29 @@ func TestACP_InvalidRequests(t *testing.T) {
 	}
 }
 
-// REGRESSION (security): over a REAL `reviewmesh acp` subprocess on the SHIPPED seed config, a
-// host that advertises no `fs` capabilities at all — so the connection ceiling stays `apply` —
-// and asks for `mode: "apply"` runs in REPORT mode. That is the seed's
-// `surfaces.defaultModeBySurface.acp: report` write-authority ceiling; before that entry existed
-// the ACP surface fell through to `apply` and a host could reach LIVE workspace writes with no
-// config opt-in. The cap must be explicit (a `mode_degraded` warn plus modeDegraded /
-// requestedMode in the echo), and the workspace must be left untouched.
-func TestACP_SeedPolicyCapsApplyToReport(t *testing.T) {
+// A child launched with no adapter starts, and a review turn is refused with a message naming the
+// launch flag — on a fresh home with nothing set up.
+func TestACP_NoAdapterRefusesAReviewTurnByName(t *testing.T) {
 	ws := workspace(t)
-	c, stop, err := launchTrusting(t, acp.FramingNewline, ws, env(t))
+	c, stop, err := Launch(testBin, acp.FramingNewline, env(t), nil)
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	defer stop()
+	rev, err := c.Call("review", map[string]any{"workspace": ws, "mode": "report", "_meta": panelMeta()})
+	if err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	if rev.Error == nil || !strings.Contains(rev.Error.Message, "--adapter") {
+		t.Errorf("a review on an agent with no adapter must be refused naming --adapter, got %+v", rev)
+	}
+}
+
+// Without --allow-writes, an apply turn over a REAL subprocess is refused, naming the grant and the
+// patch turn, and the workspace is left untouched.
+func TestACP_ApplyWithoutAllowWritesIsRefused(t *testing.T) {
+	ws := workspace(t)
+	c, stop, err := launchAgent(t, acp.FramingNewline, env(t), false)
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
@@ -440,7 +429,6 @@ func TestACP_SeedPolicyCapsApplyToReport(t *testing.T) {
 		}
 	}()
 
-	// No clientCapabilities: nothing narrows the connection, so only config policy can cap.
 	if init, err := c.Call("initialize", map[string]any{"protocolVersion": 1}); err != nil || init.Error != nil {
 		t.Fatalf("initialize: err=%v resp=%+v", err, init)
 	}
@@ -449,35 +437,22 @@ func TestACP_SeedPolicyCapsApplyToReport(t *testing.T) {
 		t.Fatalf("session/new: err=%v resp=%+v", err, sn)
 	}
 	sid, _ := sn.Result["sessionId"].(string)
-	pr, notes, err := c.CallCollecting("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "apply"})
+	pr, err := c.Call("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "apply", "_meta": panelMeta()})
 	if err != nil {
 		t.Fatalf("session/prompt: %v", err)
 	}
-	if pr.Error != nil {
-		t.Fatalf("session/prompt error: %+v", pr.Error)
+	if pr.Error == nil {
+		t.Fatalf("an apply turn without --allow-writes must be refused, got %+v", pr.Result)
 	}
-	rm := promptRM(t, pr.Result)
-	if rm["mode"] != "report" {
-		t.Errorf("effective mode = %v, want report (shipped acp surface ceiling)", rm["mode"])
-	}
-	if rm["modeDegraded"] != true || rm["requestedMode"] != "apply" {
-		t.Errorf("the cap must be reported, not silent: %+v", rm)
-	}
-	var warned bool
-	for _, n := range notes {
-		if upd, ok := n.Params["update"].(map[string]any); ok && updEventType(upd) == "mode_degraded" {
-			warned = true
-		}
-	}
-	if !warned {
-		t.Error("expected a mode_degraded session/update warning")
+	if !strings.Contains(pr.Error.Message, "--allow-writes") || !strings.Contains(pr.Error.Message, "patch") {
+		t.Errorf("the refusal must name --allow-writes and the patch turn: %q", pr.Error.Message)
 	}
 	b, rerr := os.ReadFile(filepath.Join(ws, "main.go"))
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
 	if strings.Contains(string(b), "// reviewmesh[") {
-		t.Error("a policy-capped ACP run must not write to the live workspace")
+		t.Error("an apply capped to patch must not write to the live workspace")
 	}
 }
 
@@ -492,13 +467,11 @@ func canonical(t *testing.T, v any) string {
 	return p
 }
 
-// The ACP ceiling is config-visible POLICY, not a hard-coded refusal: a user who widens
-// `surfaces.defaultModeBySurface.acp` to `apply` gets apply over a write-capable connection —
-// the run is not degraded and it does reach the live workspace.
-func TestACP_WidenedPolicyHonorsApply(t *testing.T) {
+// With --allow-writes, the two-turn write applies over a real subprocess: the report turn's RESPONSE
+// carries the `runDir`, and the apply turn keyed on that handle writes the set turn one adjudicated.
+func TestACP_AllowWritesHonorsApply(t *testing.T) {
 	ws := workspace(t)
-	home := fakeProfileHomeWith(t, "surfaces:\n  defaultModeBySurface:\n    acp: apply\n")
-	c, stop, err := launchTrusting(t, acp.FramingNewline, ws, envIn(t, home))
+	c, stop, err := launchAgent(t, acp.FramingNewline, env(t), true)
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
@@ -508,19 +481,19 @@ func TestACP_WidenedPolicyHonorsApply(t *testing.T) {
 		}
 	}()
 
-	if init, err := c.Call("initialize", map[string]any{"protocolVersion": 1}); err != nil || init.Error != nil {
+	init, err := c.Call("initialize", map[string]any{"protocolVersion": 1})
+	if err != nil || init.Error != nil {
 		t.Fatalf("initialize: err=%v resp=%+v", err, init)
+	}
+	if rm := promptRM(t, init.Result); rm["writes"] != "aimesh" {
+		t.Errorf("initialize must disclose writes=aimesh with --allow-writes: %+v", rm)
 	}
 	sn, err := c.Call("session/new", nil)
 	if err != nil || sn.Error != nil {
 		t.Fatalf("session/new: err=%v resp=%+v", err, sn)
 	}
 	sid, _ := sn.Result["sessionId"].(string)
-	// TURN ONE — the report. Its RESPONSE carries the `runDir`, which is the two-phase write rule's
-	// handle (D5) AND, now, the address of the decision set turn two applies. The handle is no
-	// longer a token the surface merely records: it is resolved against this agent's own artifact
-	// directory, so a fabricated one is refused before any work starts.
-	rp, err := c.Call("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "report"})
+	rp, err := c.Call("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "report", "_meta": panelMeta()})
 	if err != nil {
 		t.Fatalf("session/prompt (report): %v", err)
 	}
@@ -531,7 +504,6 @@ func TestACP_WidenedPolicyHonorsApply(t *testing.T) {
 	if sourceRun == "" {
 		t.Fatal("the report turn must hand back its runDir")
 	}
-	// TURN TWO — the write, keyed on that handle. It applies the set turn one adjudicated.
 	pr, err := c.Call("session/prompt", map[string]any{"sessionId": sid, "workspace": ws, "mode": "apply", "fromRun": sourceRun})
 	if err != nil {
 		t.Fatalf("session/prompt: %v", err)
@@ -541,18 +513,13 @@ func TestACP_WidenedPolicyHonorsApply(t *testing.T) {
 	}
 	rm := promptRM(t, pr.Result)
 	if rm["mode"] != "apply" {
-		t.Errorf("effective mode = %v, want apply (config widened the acp ceiling)", rm["mode"])
+		t.Errorf("effective mode = %v, want apply", rm["mode"])
 	}
 	if rm["modeDegraded"] != nil {
-		t.Errorf("a widened policy must not degrade: %+v", rm)
+		t.Errorf("a granted apply must not degrade: %+v", rm)
 	}
-	// TWO runs, TWO handles: the write has its own run directory (its journal and receipt live
-	// there) and names the run whose decisions it applied. Across a real process boundary, which is
-	// the point of this harness.
-	//
-	// `sourceRunDir` is the CANONICAL directory — the run the write actually read, symlinks
-	// resolved — so it is compared canonically rather than by string. On macOS every temp path is
-	// reached through a symlinked `/var`, so a byte comparison here would test the platform.
+	// TWO runs, TWO handles: the write has its own run directory and names the run whose decisions
+	// it applied. `sourceRunDir` is the canonical directory, so it is compared canonically.
 	if canonical(t, rm["sourceRunDir"]) != canonical(t, sourceRun) {
 		t.Errorf("sourceRunDir = %v, want the report turn's runDir %q", rm["sourceRunDir"], sourceRun)
 	}
@@ -564,28 +531,19 @@ func TestACP_WidenedPolicyHonorsApply(t *testing.T) {
 		t.Fatal(rerr)
 	}
 	if !strings.Contains(string(b), "// reviewmesh[") {
-		t.Errorf("an honored apply should have written the remediation to the workspace, got:\n%s", b)
+		t.Errorf("a granted apply should have written the remediation to the workspace, got:\n%s", b)
 	}
 }
 
-// Real CROSS-PROCESS durability: subprocess A (a shared AIMESH_HOME) creates + persists a
-// session and exits; a SEPARATE subprocess B advertises sessionCapabilities.resume, resumes
-// that session from the durable store, and runs a session/prompt that omits `workspace` using
-// the restored cwd — proving resume survives an agent restart, not just in-process state.
+// Real CROSS-PROCESS durability: subprocess A (a shared AIMESH_HOME) creates and persists a session
+// and exits; a SEPARATE subprocess B advertises sessionCapabilities.resume, resumes that session from
+// the durable store, and runs a session/prompt that omits `workspace` using the restored cwd.
 func TestACP_ResumeAcrossSubprocesses(t *testing.T) {
-	home := fakeProfileHome(t)
+	home := t.TempDir()
 	ws := workspace(t)
-	envWith := func() []string {
-		return append(os.Environ(),
-			"REVIEWMESH_ARTIFACT_DIR="+t.TempDir(),
-			"REVIEWMESH_FAKE_SCENARIO=valid",
-			"AIMESH_HOME="+home,      // shared durable session store across both subprocesses
-			"AIMESH_INTERNAL_FAKE=1", // unlock the hidden internal fake harness for the children
-		)
-	}
 
 	// Instance A: create + persist a session, then terminate.
-	cA, stopA, err := launchTrusting(t, acp.FramingNewline, ws, envWith())
+	cA, stopA, err := launchAgent(t, acp.FramingNewline, envIn(t, home), false)
 	if err != nil {
 		t.Fatalf("launch A: %v", err)
 	}
@@ -605,7 +563,7 @@ func TestACP_ResumeAcrossSubprocesses(t *testing.T) {
 	}
 
 	// Instance B (a fresh process, same AIMESH_HOME): resume + prompt without workspace.
-	cB, stopB, err := launchTrusting(t, acp.FramingNewline, ws, envWith())
+	cB, stopB, err := launchAgent(t, acp.FramingNewline, envIn(t, home), false)
 	if err != nil {
 		t.Fatalf("launch B: %v", err)
 	}
@@ -634,8 +592,8 @@ func TestACP_ResumeAcrossSubprocesses(t *testing.T) {
 		t.Errorf("ResumeSessionResponse should be an empty object, got %+v", rs.Result)
 	}
 	pr, err := cB.Call("session/prompt", map[string]any{
-		"sessionId": sid,
-		"prompt":    []any{map[string]any{"type": "text", "text": "review"}},
+		"sessionId": sid, "_meta": panelMeta(),
+		"prompt": []any{map[string]any{"type": "text", "text": "review"}},
 	})
 	if err != nil || pr.Error != nil {
 		t.Fatalf("resumed session/prompt: err=%v resp=%+v", err, pr)

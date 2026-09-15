@@ -12,7 +12,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// FileSnippet is one WHOLE workspace file shown to the reviewer. The collector no longer clips a
+// FileSnippet is one WHOLE workspace file shown to the reviewer. The collector does not clip a
 // file or stops early (see workspace.Snippet), so there is no truncation for this prompt to
 // declare — every file it names, it carries in full.
 type FileSnippet struct {

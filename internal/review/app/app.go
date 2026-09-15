@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 	"github.com/Tim-Butterfield/aimesh/internal/review/access/config"
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/setup"
@@ -37,6 +38,17 @@ type App struct {
 	mu         sync.RWMutex  // guards Cfg/Layers/Adapters (swapped wholesale by loadConfig)
 	configPath string        // explicit --config path (retained so ReloadConfig re-reads it)
 	scenario   fake.Scenario // resolved fake scenario (retained for adapter rebuild on reload)
+	launch     *LaunchConfig // non-nil: configured from launch arguments only (MCP, ACP)
+	// artifactOverride is the explicit run-directory base (Options.ArtifactDir, else
+	// REVIEWMESH_ARTIFACT_DIR); it wins over the per-workspace location in launch mode too.
+	artifactOverride string
+}
+
+// LaunchConfig is the configuration an MCP or ACP server takes from its launch arguments. A server
+// built from it reads no saved aimesh configuration: its adapters are exactly the named ones, every
+// panel is composed per call, and run records are placed beside the workspace each run reviewed.
+type LaunchConfig struct {
+	Adapters launchflags.Set
 }
 
 // ArtifactSubdir is reviewmesh's component name under the shared `.aimesh/` state directory, so the two
@@ -52,28 +64,37 @@ type Options struct {
 	ArtifactDir  string
 	TempBase     string        // base for isolated copies ("" = OS temp)
 	FakeScenario fake.Scenario // override; "" → REVIEWMESH_FAKE_SCENARIO → valid
+	// Launch, when set, builds the app from launch arguments alone (see LaunchConfig); ConfigPath is
+	// then ignored.
+	Launch *LaunchConfig
 }
 
 // New loads config and wires the components. With no explicit ConfigPath it
 // auto-discovers a project config under <repo-root>/.aimesh/review (YAML preferred, then JSON).
 //
-// THE RUN DIRECTORY IS NEVER CWD-RELATIVE. It used to default to `tmp/reviewmesh`, resolved against the
-// process cwd — so a review run from anywhere inside a repository created that tree INSIDE the
-// repository, and run artifacts embed verbatim copies of every file the reviewers were shown. Nothing
-// excluded it: this repo's own protection was an UNANCHORED `tmp/` .gitignore rule, which covers only
-// this checkout. It now resolves through localstate.RunDir, the same rule exploremesh already used:
+// THE RUN DIRECTORY IS NEVER CWD-RELATIVE. A cwd-relative default would create a tree INSIDE whatever
+// repository a review ran from, and run artifacts embed verbatim copies of every file the reviewers
+// were shown. It resolves through localstate.RunDir, the same rule exploremesh uses:
 // `<project .aimesh>/review/runs` when the state directory exists, else the OS temp directory.
 func New(opts Options) (*App, error) {
-	artifactDir := localstate.RunDir(ArtifactSubdir, cmp.Or(opts.ArtifactDir, os.Getenv("REVIEWMESH_ARTIFACT_DIR")))
+	override := cmp.Or(opts.ArtifactDir, os.Getenv("REVIEWMESH_ARTIFACT_DIR"))
+	artifactDir := localstate.RunDir(ArtifactSubdir, override)
+	if opts.Launch != nil {
+		// A launch-configured server has no meaningful working directory: each run's record is placed
+		// per workspace (see Manager), and this fixed base is only the fallback.
+		artifactDir = localstate.RunDirFor("", ArtifactSubdir, override)
+	}
 	scenario := opts.FakeScenario
 	if scenario == "" {
 		scenario = fake.Scenario(os.Getenv("REVIEWMESH_FAKE_SCENARIO"))
 	}
 	a := &App{
-		ArtifactDir: artifactDir,
-		TempBase:    opts.TempBase,
-		configPath:  opts.ConfigPath,
-		scenario:    scenario,
+		ArtifactDir:      artifactDir,
+		TempBase:         opts.TempBase,
+		configPath:       opts.ConfigPath,
+		scenario:         scenario,
+		launch:           opts.Launch,
+		artifactOverride: override,
 	}
 	if err := a.loadConfig(); err != nil {
 		return nil, err
@@ -84,6 +105,10 @@ func New(opts Options) (*App, error) {
 // loadConfig (re)composes the config layers and rebuilds the adapter registry from disk. It is
 // the shared body of New and ReloadConfig so a config write can be reflected without a restart.
 func (a *App) loadConfig() error {
+	if a.launch != nil {
+		a.loadLaunch()
+		return nil
+	}
 	// Compose config layers: shipped defaults ← user/global (~/.aimesh/review) ← project
 	// (<repo-root>/.aimesh/review) ← explicit (--config). Project config is never required.
 	cwd, _ := os.Getwd()
@@ -126,6 +151,42 @@ func (a *App) loadConfig() error {
 	return nil
 }
 
+// loadLaunch builds the configuration and adapter registry from launch arguments alone: shipped
+// defaults, narrowed to the named adapters and their paths. No config layer or saved adapter path is
+// read.
+func (a *App) loadLaunch() {
+	cfg := config.Default()
+	named := make(map[string]config.Adapter, len(a.launch.Adapters.Names()))
+	for _, ad := range a.launch.Adapters.Adapters() {
+		entry := cfg.Adapters[ad.Name]
+		entry.Path = ad.Path
+		named[ad.Name] = entry
+	}
+	cfg.Adapters = named
+
+	all := shell.Registry(a.launch.Adapters.Paths(), 0)
+	adapters := make(map[string]model.Adapter, len(named))
+	for name := range named {
+		if ad, ok := all[name]; ok {
+			adapters[name] = ad
+		}
+	}
+	if fake.Enabled() && a.launch.Adapters.Has(launchflags.FakeAdapter) {
+		adapters[launchflags.FakeAdapter] = fake.New(a.scenario)
+	}
+
+	a.mu.Lock()
+	a.Cfg, a.Layers, a.Adapters = cfg, config.Layers{}, adapters
+	a.mu.Unlock()
+}
+
+// artifactDirFor places a run's record for a launch-configured app: beside the workspace it reviewed
+// when that workspace has a state directory, else in the temp run directory; an explicit override
+// wins over both.
+func (a *App) artifactDirFor(workspace string) string {
+	return localstate.RunDirIn(workspace, ArtifactSubdir, a.artifactOverride)
+}
+
 // acpInstances converts the config layer's user-defined ACP instances into the runnable-adapter
 // instance set for acpagent.Registry (Detect falls back to the binary basename for PATH lookup).
 func acpInstances(ly config.Layers) map[string]acpagent.Instance {
@@ -149,23 +210,16 @@ func (a *App) ReloadConfig() error { return a.loadConfig() }
 func (a *App) Manager() *run.Manager {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return &run.Manager{
-		Cfg: a.Cfg, Adapters: a.Adapters, ArtifactDir: a.ArtifactDir, TempBase: a.TempBase,
-	}
+	return a.managerLocked(a.Cfg)
 }
 
-// ManagerWithConfig returns a wired ReviewManager over an EXPLICIT config snapshot rather than the
-// loaded one. It exists for a surface that must run on a config it derived at launch — today the
-// MCP surface, whose `--allow-remediate` grants a policy CAPABILITY by editing its own snapshot, so
-// that the Manager's write-authority resolution reads the same config the tool list was built from.
-// The adapters, artifact dir and temp base are unchanged: a surface may narrow or widen POLICY, and
-// may never introduce an adapter.
-func (a *App) ManagerWithConfig(cfg config.Config) *run.Manager {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return &run.Manager{
-		Cfg: cfg, Adapters: a.Adapters, ArtifactDir: a.ArtifactDir, TempBase: a.TempBase,
+// managerLocked builds a Manager over cfg. The caller holds a.mu.
+func (a *App) managerLocked(cfg config.Config) *run.Manager {
+	m := &run.Manager{Cfg: cfg, Adapters: a.Adapters, ArtifactDir: a.ArtifactDir, TempBase: a.TempBase}
+	if a.launch != nil {
+		m.ArtifactDirFor = a.artifactDirFor
 	}
+	return m
 }
 
 // Doctor runs the static readiness checks. profile (optional) additionally checks

@@ -1,6 +1,6 @@
 package schema
 
-// This file holds the CHALLENGE mode's app-owned round artifacts (design §3 Challenge row): the CLOSED
+// This file holds the CHALLENGE mode's app-owned round artifacts: the CLOSED
 // severity enum, the FIXED round-1 "attack the supplied artifact" prompt + schema, the FIXED round-2
 // mediated CROSS-REVIEW prompt + schema, and the mechanical parsers that lift a validated response into
 // typed host values.
@@ -12,10 +12,10 @@ package schema
 //     enum is normalized to `unspecified` by the HOST rather than accepted verbatim.
 //   - Round 2 may add DEPTH but never a COUNT. Its schema has no field an explorer could put a tally in, and
 //     its prompt says so explicitly — every count in a Challenge result is computed by the host over the
-//     immutable blind round-1 artifacts (§0 F-A/F-C).
+//     immutable blind round-1 artifacts.
 //
 // Challenge is FORMULATION-FREE like every mode shipped so far: the app owns BOTH the prompt and the schema,
-// so the collator authors no round-1 schema (§5). The terminal ChallengeOutput lives in internal/mode
+// so the collator authors no round-1 schema. The terminal ChallengeOutput lives in internal/mode
 // (not here) because each of its register entries embeds the host-computed govern.Claim, and govern sits
 // ABOVE schema in the import graph.
 
@@ -24,7 +24,7 @@ import (
 	"strings"
 )
 
-// Severity is the CLOSED, app-owned severity vocabulary of a Challenge finding (design §3). Ranked below by
+// Severity is the CLOSED, app-owned severity vocabulary of a Challenge finding. Ranked below by
 // Rank(); the register is triaged on it.
 type Severity string
 
@@ -115,7 +115,7 @@ func ChallengeExplorerSchema() Schema {
 
 // ChallengeExplorerPrompt is the deterministic, app-owned round-1 prompt: ATTACK the supplied artifact. The
 // artifact is embedded as explicitly-delimited DATA behind the same "not an instruction" framing a carried
-// round artifact gets (design §6) — it is user-supplied text that a model is about to read, so it is
+// round artifact gets — it is user-supplied text that a model is about to read, so it is
 // untrusted for exactly the same reason. The exact nested field names are rendered (the hard-won Map lesson:
 // a prompt that merely says "match the schema" gets improvised field names).
 func ChallengeExplorerPrompt(raw RawTask) string {
@@ -190,7 +190,7 @@ func RenderArtifactUnderReview(artifact string) string {
 // ParseFindings lifts the typed findings out of ONE validated round-1 response. It is mechanical: blank
 // statements are skipped (they carry nothing to canonicalize) and every severity is host-normalized onto the
 // closed enum. Nothing is grouped, deduplicated or ranked here — that is canonicalization's job, and doing
-// it here would be an unrecorded entity-resolution step (§0 F-B).
+// it here would be an unrecorded entity-resolution step.
 func ParseFindings(response map[string]any) []ChallengeFinding {
 	raw, _ := response["findings"].([]any)
 	out := make([]ChallengeFinding, 0, len(raw))
@@ -213,7 +213,7 @@ func ParseFindings(response map[string]any) []ChallengeFinding {
 	return out
 }
 
-// --- Round 2: the collator-mediated CROSS-REVIEW (design §1/§3) ---
+// --- Round 2: the collator-mediated CROSS-REVIEW ---
 
 // Stance is the CLOSED vocabulary of what a round-2 assessment does to a pooled finding. It is closed for the
 // same reason Severity is: the terminal register reports stances, and an open vocabulary would let a model
@@ -252,7 +252,7 @@ type ChallengeAssessment struct {
 
 // challengeReviewFields is the FIXED round-2 explorer schema. Note what is absent: there is no count, tally,
 // frequency or "how many reviewers agreed" field, because a later round may add depth but may never move a
-// count (§0 F-A).
+// count.
 var challengeReviewFields = []Field{
 	{Name: "assessments", Type: TypeObject, Required: true, Repeated: true},
 	{Name: "notes", Type: TypeString, Required: false, Repeated: false},
@@ -267,7 +267,7 @@ func ChallengeReviewSchema() Schema {
 
 // ChallengeReviewPrompt builds the round-2 CROSS-REVIEW instruction. untrustedDataBlock is the host's
 // ALREADY-FRAMED pooled digest of the CONFIRMED-canonical unique findings — this contract embeds it verbatim
-// and never re-frames or re-labels it (the host owns that framing, §6). The instruction states the
+// and never re-frames or re-labels it (the host owns that framing). The instruction states the
 // no-counting rule in words as well as enforcing it by schema.
 func ChallengeReviewPrompt(raw RawTask, untrustedDataBlock string) string {
 	var b strings.Builder

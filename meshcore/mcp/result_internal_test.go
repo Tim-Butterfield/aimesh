@@ -251,7 +251,7 @@ func TestResultEnvelope_ModernOrderingIsDeterministic(t *testing.T) {
 	}
 }
 
-// --- §7.4: content-addressed resource identity ---
+// --- content-addressed resource identity ---
 
 func TestAdvertisedResources_ModernURIsCarryTheDigestAndLegacyDoesNot(t *testing.T) {
 	list := []Resource{{URI: "aimesh://run/r1/patch", Name: "r1/patch", Digest: "sha256:abc123"}}

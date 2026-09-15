@@ -9,9 +9,8 @@
 // permission ceiling, and no capability narrowing. The one exploremesh-specific convention is
 // criteria-via-_meta: on `session/prompt` the ACP text prompt becomes the task PURPOSE and the load-
 // bearing CRITERIA arrive under `_meta.exploremesh.criteria` (absent/blank → invalid-params, never
-// silently invented). The same `_meta.exploremesh` optionally selects the PANEL — a named `profile` from
-// the profile set the agent bound to at startup, and a `count` (top-N by preference order, or "all") —
-// both fail closed with invalid-params rather than being clamped or coerced (design §7). The applied task
+// silently invented). The same `_meta.exploremesh` carries the REQUIRED `panel` — the explorers and the
+// collator this turn composes from the adapters the agent was launched with (`--adapter`). The applied task
 // AND the panel that ran are echoed back in the PromptResponse `_meta.exploremesh`.
 package acp
 
@@ -26,7 +25,6 @@ import (
 	"io"
 	"maps"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -37,10 +35,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/capture"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/mode"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/pipeline"
-	"github.com/Tim-Butterfield/aimesh/internal/explore/profile"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/runview"
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 )
 
 // agentProtocolVersion is the ACP protocol version this agent implements (integer, per ACP v1).
@@ -59,7 +57,7 @@ const (
 	codeExploreHalt    = -32000 // an exploration halt; data carries exitCode + haltClass + failure
 )
 
-// v1 budget caps (design §F8). The frame cap (16 MiB) comes free from meshcore/acp; these bound the
+// v1 budget caps. The frame cap (16 MiB) comes free from meshcore/acp; these bound the
 // exploration itself before any model subprocess is spawned.
 const (
 	// maxRosterExplorers bounds how many explorers a single ACP turn may fan out to — a hostile/huge
@@ -81,8 +79,8 @@ type Explorer interface {
 }
 
 // pipelineExplorer is the default Explorer: it runs the exploremesh pipeline over a pre-built registry.
-// The registry (adapter set) is resolved once at server construction from the server's plan — the
-// roster is the server's config; only the TASK arrives per ACP prompt.
+// The registry is resolved once at launch from the adapters the agent was launched with; each prompt
+// supplies the task and the panel it composes from them.
 type pipelineExplorer struct {
 	reg pipeline.Registry
 }
@@ -98,22 +96,12 @@ func (p pipelineExplorer) Run(ctx context.Context, plan roster.Plan, raw schema.
 
 // Server is the exploremesh ACP agent server.
 type Server struct {
-	// Explorer routes an exploration to the pipeline; Plan is the server's configured roster (peer
-	// explorers + one collator) — the ACP prompt supplies only the task, never a new roster.
+	// Explorer routes an exploration to the pipeline.
 	Explorer Explorer
-	Plan     roster.Plan
-	// Profiles is the OPTIONAL profile SET the agent bound to at startup (design §7): every profile a
-	// `session/prompt` may select by `_meta.exploremesh.profile`, plus the name of the one a prompt that
-	// names none binds to. When it holds NO profiles the agent is bound to a single ANONYMOUS roster (an
-	// explicit --roster) — Plan is that panel and naming any `_meta.exploremesh.profile` is invalid-params.
-	// Plan always stays the DEFAULT panel, so a prompt selecting neither profile nor count runs exactly
-	// that panel.
-	Profiles profile.Set
-	// Adapters is the STARTUP-BOUND set of adapter names an ad-hoc `_meta.exploremesh.panel` may compose
-	// from (the names the agent's registry resolved). It is the compose-not-configure boundary: a prompt
-	// selects within this set and can never add to it. EMPTY means ad-hoc composition is refused outright
-	// — fail-closed, because "no configured set" must not read as "any adapter is fine".
-	Adapters []string
+	// Adapters are the adapters this agent was launched with (`--adapter`). A prompt's panel may name only
+	// these, and only while the adapter's CLI can be started; it can never introduce one. EMPTY means every
+	// prompt is refused until the operator names an adapter.
+	Adapters launchflags.Set
 	Framing  string // "" / "newline" (default) | "content-length"
 	// TurnTimeout is the total-turn wall-clock budget for one exploration (0 → defaultTurnTimeout).
 	TurnTimeout time.Duration
@@ -359,36 +347,55 @@ type sessionNewParams struct {
 }
 
 // sessionPromptParams is the ACP v1 `session/prompt` params for exploremesh: the protocol session id, the
-// host's prompt content, and the exploremesh `_meta` carrying the load-bearing criteria (design decision:
-// criteria-via-_meta).
+// host's prompt content, and the exploremesh `_meta` carrying the load-bearing criteria (criteria-via-_meta).
 type sessionPromptParams struct {
 	SessionID string          `json:"sessionId"`
 	Prompt    json.RawMessage `json:"prompt,omitempty"`
 	Meta      *promptMeta     `json:"_meta,omitempty"`
 }
 
-// promptMeta is the sanctioned `_meta` extension point; exploremesh reads only its own `exploremesh` key.
+// promptMeta is the sanctioned `_meta` extension point; exploremesh reads only its own `exploremesh` key,
+// and decodes it strictly (see decodeExploreMeta).
 type promptMeta struct {
-	Exploremesh *exploreMetaIn `json:"exploremesh,omitempty"`
+	Exploremesh json.RawMessage `json:"exploremesh,omitempty"`
+}
+
+// decodeExploreMeta decodes `_meta.exploremesh` STRICTLY: an unknown key inside exploremesh's own namespace
+// is invalid-params rather than a silently ignored field, because a mistyped run-forming field that is
+// quietly dropped would run something the driver did not ask for. Keys elsewhere in `_meta` belong to the
+// host and are ignored.
+func decodeExploreMeta(p sessionPromptParams) (*exploreMetaIn, error) {
+	if p.Meta == nil {
+		return nil, nil
+	}
+	raw := bytes.TrimSpace(p.Meta.Exploremesh)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var em exploreMetaIn
+	if err := dec.Decode(&em); err != nil {
+		return nil, fmt.Errorf("_meta.exploremesh is malformed: %w", err)
+	}
+	return &em, nil
 }
 
 // exploreMetaIn is the incoming `_meta.exploremesh` shape. criteria are REQUIRED (absent/blank →
 // invalid-params); priorContext is optional; purpose, when present, OVERRIDES the prompt text (documented
 // so a driver can supply an exact purpose independent of the human prompt). mode selects the app-owned
-// exploration mode (absent/blank → the default map; an unknown mode → invalid-params). profile + count
-// select the PANEL out of the agent's bound profile set (design §7): both are optional and both fail
-// closed — an unknown profile or an invalid/out-of-range count is invalid-params, never coerced.
+// exploration mode (absent/blank → the default map; an unknown mode → invalid-params). panel is REQUIRED.
 type exploreMetaIn struct {
 	Criteria     []string `json:"criteria,omitempty"`
 	PriorContext string   `json:"priorContext,omitempty"`
 	Purpose      string   `json:"purpose,omitempty"`
 	Mode         string   `json:"mode,omitempty"`
-	// Artifact is the ARTIFACT UNDER REVIEW (design §3 Challenge row) — the thing the panel attacks, supplied
+	// Artifact is the ARTIFACT UNDER REVIEW — the thing the panel attacks, supplied
 	// inline by the driver. It is optional at the protocol level and REQUIRED by whichever modes say so
 	// (mode.ValidateTask); a mode that needs it and does not get it is invalid-params, never a run that
 	// reviews nothing.
 	Artifact string `json:"artifact,omitempty"`
-	// The FIXED-SPACE declarations (design §3 Compare + Forecast rows): the option set / criteria /
+	// The FIXED-SPACE declarations: the option set / criteria /
 	// estimation target the requester fixes BEFORE any explorer speaks. Like `artifact` they are optional at
 	// the protocol level and REQUIRED by whichever mode says so (mode.ValidateTask) — a mode that needs one
 	// and does not get it is invalid-params, never a run over a space nobody declared.
@@ -399,30 +406,21 @@ type exploreMetaIn struct {
 	Horizon         string                    `json:"horizon,omitempty"`
 	// ConditioningEvent is the optional "assume this holds" clause of a forecast.
 	ConditioningEvent string `json:"conditioningEvent,omitempty"`
-	// Profile names a profile from the agent's bound set (absent/blank → the set's default profile).
-	Profile string `json:"profile,omitempty"`
-	// Count selects the top-N explorers by PREFERENCE order. It is raw because the wire accepts BOTH an
-	// integer and the string "all" (absent → every explorer); any other shape is invalid-params.
-	Count json.RawMessage `json:"count,omitempty"`
-	// Panel is the AD-HOC panel composition (surface parity, mcp-design.md §Surface-parity): 2..16
-	// explorers plus a collator, each named by (adapter, model, effort) IDENTIFIER. It is the ACP
-	// analogue of the CLI's repeatable --explorer/--collator and MCP's `panel` parameter, and it is
-	// COMPOSE-NOT-CONFIGURE: every adapter must already be in the set the agent bound at STARTUP, so a
-	// prompt can select or re-arrange the configured seats but can never introduce an adapter, a binary
-	// path or a launch argument. It is mutually exclusive with profile/count.
+	// Panel is the REQUIRED panel composition: 2..16 explorers plus a collator, each named by (adapter,
+	// model, effort) IDENTIFIER. It is the ACP analogue of the CLI's repeatable --explorer/--collator and
+	// MCP's `panel` parameter. Every adapter must be one the agent was launched with, so a prompt can never
+	// introduce an adapter, a binary path or a launch argument. Model identifiers pass to the adapter's CLI
+	// verbatim.
 	Panel *panelSpec `json:"panel,omitempty"`
-	// Canonicalizers names the two identities that propose the canonicalization (design §4) — the ACP
+	// Canonicalizers names the two identities that propose the canonicalization — the ACP
 	// analogue of the CLI's repeatable `--canonicalizer` and MCP's `canonicalizers` argument. EITHER absent
-	// (the host derives them: slot a from the collator, slot b from the first explorer by PREFERENCE order
-	// that differs from it) or EXACTLY TWO; one entry is invalid-params, because it does not say which slot
-	// it fills. Like `panel` it is COMPOSE-NOT-CONFIGURE: every adapter must already be in the agent's
-	// startup-bound set. It applies to whichever panel resolved (profile, default or ad-hoc) and OVERRIDES
-	// that panel's own canonicalizers.
+	// (the host derives them: slot a from the collator, slot b from the first explorer in panel order that
+	// differs from it) or EXACTLY TWO; one entry is invalid-params, because it does not say which slot it
+	// fills. Every adapter must be one the agent was launched with.
 	Canonicalizers []slotSpec `json:"canonicalizers,omitempty"`
 	// DumpRun opts this turn into the run-directory CAPTURE the CLI's --dump-run performs (envelopes,
-	// raw outputs, prompts, the versioned manifest) under $EXPLOREMESH_ARTIFACT_DIR. Before it, an ACP
-	// run left NO disk record at all while a CLI run could — a surface-parity gap, since the run record
-	// is the audit artifact every governance claim is checkable against.
+	// raw outputs, prompts, the versioned manifest) under $EXPLOREMESH_ARTIFACT_DIR — the audit record every
+	// governance claim is checkable against.
 	DumpRun bool `json:"dumpRun,omitempty"`
 	// MaxParallel bounds how many of this turn's explorers invoke their model CLI AT ONCE. Absent,
 	// the whole panel runs in parallel. It is per-turn rather than a server flag for the same reason
@@ -436,6 +434,10 @@ type exploreMetaIn struct {
 	// identity pre-flight, which is an exploration's first model call. It is mutually exclusive with
 	// dumpRun: a dry run performs no exploration, so there is nothing to record.
 	DryRun bool `json:"dryRun,omitempty"`
+	// VerifyReadiness asks every distinct panel identity whether its CLI can do real work — one bounded
+	// one-token call each — before the identity pre-flight, and halts the turn if any cannot. It SPENDS;
+	// a dry run prices the probes and performs none.
+	VerifyReadiness bool `json:"verifyReadiness,omitempty"`
 }
 
 // panelSpec is the ad-hoc `_meta.exploremesh.panel` shape: ordered explorers + the single collator.
@@ -445,42 +447,35 @@ type panelSpec struct {
 }
 
 // slotSpec names ONE seat by identifier. There is deliberately no path/args/binary field: those are
-// configuration, and configuration is human-only (design §Non-goals).
+// configuration, and configuration is human-only.
 type slotSpec struct {
 	Adapter string `json:"adapter"`
 	Model   string `json:"model"`
 	Effort  string `json:"effort,omitempty"`
 }
 
-// panel is the exploration panel one prompt resolved to: the executable plan, the effective profile name
-// ("" when the agent is bound to a raw --roster with no named profiles), and the SELECTED vs configured
-// explorer counts — all echoed back so the driver sees exactly which panel ran.
+// panel is the exploration panel one prompt composed: the executable plan the pipeline runs.
 type panel struct {
-	plan     roster.Plan
-	profile  string
-	selected int
-	full     int
-	// adHoc marks a panel COMPOSED by the prompt (`_meta.exploremesh.panel`) rather than selected from
-	// the bound profile set — so the echo says which of the two happened instead of leaving a driver to
-	// infer it from an empty profile name.
-	adHoc bool
+	plan roster.Plan
 }
 
-// resolvePanel resolves the panel a prompt runs on from the OPTIONAL `_meta.exploremesh.profile` +
-// `count`, mirroring the CLI's --profile/--count precedence (design §7): the named profile (else the
-// bound set's default) supplies the ORDERED explorers, then count takes the top-N by preference and
-// SelectTopN canonicalizes the attribution order. An unknown profile or an invalid/out-of-range count is
-// invalid-params (-32602) — never clamped, never silently coerced. A prompt naming NEITHER runs the
-// server's configured Plan unchanged.
+// panelExample is the corrected shape a refusal hands back, so the fix follows from the error.
+const panelExample = `{"panel": {"explorers": [{"adapter": "<adapter>", "model": "<model>"}, {"adapter": "<adapter>", "model": "<model>"}], "collator": {"adapter": "<adapter>", "model": "<model>"}}}`
+
+// resolvePanel resolves the REQUIRED `_meta.exploremesh.panel` into the plan a prompt runs, then applies
+// the optional canonicalizer override. Every refusal is invalid-params (-32602), before any spend.
 func (s *Server) resolvePanel(em *exploreMetaIn) (panel, *rpcError) {
-	pan, perr := s.resolvePanelSeats(em)
+	if em == nil || em.Panel == nil {
+		return panel{}, &rpcError{Code: codeInvalidParams, Message: "invalid params: _meta.exploremesh.panel is required — every prompt composes its own explorers and collator from the adapters this agent was launched with. Corrected _meta.exploremesh: " + panelExample}
+	}
+	pan, perr := s.adHocPanel(em.Panel)
 	if perr != nil {
 		return panel{}, perr
 	}
-	// The CANONICALIZER override (design §4), applied to whichever panel resolved. It is resolved here, with
-	// the panel, because it is the same kind of decision — which governed identities run — and because both
-	// must be refused before the task is even validated, so a bad governance spec costs nothing.
-	if em != nil && len(em.Canonicalizers) > 0 {
+	// The CANONICALIZER override. It is resolved here, with the panel, because it is the same
+	// kind of decision — which governed identities run — and both must be refused before the task is even
+	// validated, so a bad governance spec costs nothing.
+	if len(em.Canonicalizers) > 0 {
 		cs, cerr := s.canonicalizerSlots(em.Canonicalizers)
 		if cerr != nil {
 			return panel{}, cerr
@@ -490,9 +485,9 @@ func (s *Server) resolvePanel(em *exploreMetaIn) (panel, *rpcError) {
 	return pan, nil
 }
 
-// canonicalizerSlots validates + converts `_meta.exploremesh.canonicalizers`. Compose-not-configure is
-// enforced per seat (the same check an ad-hoc panel seat gets), and the 0-or-2 / distinct-identities rule
-// is roster.ValidateCanonicalizers' — the one authority every surface and the profile schema share.
+// canonicalizerSlots validates + converts `_meta.exploremesh.canonicalizers`. Each seat gets the same
+// launch-set check a panel seat gets, and the 0-or-2 / distinct-identities rule is
+// roster.ValidateCanonicalizers' — the one authority every surface and the profile schema share.
 func (s *Server) canonicalizerSlots(specs []slotSpec) ([]roster.Explorer, *rpcError) {
 	out := make([]roster.Explorer, 0, len(specs))
 	for i, c := range specs {
@@ -507,67 +502,10 @@ func (s *Server) canonicalizerSlots(specs []slotSpec) ([]roster.Explorer, *rpcEr
 	return out, nil
 }
 
-// resolvePanelSeats resolves the explorer/collator seats (profile+count, ad-hoc, or the bound default).
-func (s *Server) resolvePanelSeats(em *exploreMetaIn) (panel, *rpcError) {
-	name := ""
-	var rawCount json.RawMessage
-	if em != nil {
-		name, rawCount = strings.TrimSpace(em.Profile), em.Count
-	}
-	// AD-HOC composition wins nothing by precedence: it is MUTUALLY EXCLUSIVE with profile/count, exactly
-	// as `--explorer/--collator` are with `--roster/--profile` on the CLI. A prompt that supplies both is
-	// asking for two different panels and is told so, rather than having one silently ignored.
-	if em != nil && em.Panel != nil {
-		if name != "" || hasCount(rawCount) {
-			return panel{}, &rpcError{Code: codeInvalidParams, Message: "invalid params: _meta.exploremesh.panel (ad-hoc composition) cannot be combined with profile or count — supply exactly one"}
-		}
-		return s.adHocPanel(em.Panel)
-	}
-	// The SOURCE roster: its slice order is PREFERENCE (what count selects the top-N from).
-	var src roster.Roster
-	var pname string
-	if len(s.Profiles.Profiles) == 0 {
-		// No named profile set bound: the server's Plan IS the single anonymous roster (an explicit
-		// --roster), so naming ANY profile is a configuration error rather than a silent fallback.
-		if name != "" {
-			return panel{}, &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
-				"invalid params: unknown profile %q — this agent is bound to a single roster file (--roster), which defines no named profiles", name)}
-		}
-		if !hasCount(rawCount) {
-			// Nothing to re-select: run the configured Plan exactly as-is.
-			return panel{plan: s.Plan, selected: len(s.Plan.Explorers), full: len(s.Plan.Explorers)}, nil
-		}
-		// Canonicalizers travel with the roster: a `count` re-selects the EXPLORERS, and must not quietly
-		// discard the governance identities the bound roster names.
-		src = roster.Roster{Explorers: s.Plan.Explorers, Collator: s.Plan.Collator, Canonicalizers: s.Plan.Canonicalizers}
-	} else {
-		if name == "" {
-			name = s.Profiles.DefaultProfile
-		}
-		p, ok := s.Profiles.Get(name)
-		if !ok {
-			return panel{}, &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
-				"invalid params: unknown profile %q (configured profiles: %s)", name, strings.Join(s.Profiles.Names(), ", "))}
-		}
-		src, pname = p.Roster(), name
-	}
-	full := len(src.Explorers)
-	n, cerr := selectCount(rawCount, full)
-	if cerr != nil {
-		return panel{}, cerr
-	}
-	plan, err := src.SelectTopN(n)
-	if err != nil {
-		// n<2 / n>configured (never clamped, §7), or an invalid profile roster.
-		return panel{}, &rpcError{Code: codeInvalidParams, Message: "invalid params: " + err.Error()}
-	}
-	return panel{plan: plan, profile: pname, selected: n, full: full}, nil
-}
-
-// adHocPanel builds the panel from an ad-hoc `_meta.exploremesh.panel` composition. Every failure is
-// invalid-params with a field-addressed message: an under-sized panel, an over-sized one (the fan-out cap
-// is a spend control, never clamped), a missing collator, a duplicate (adapter, model, effort) triple, or
-// — the load-bearing one — an adapter that is not in the agent's STARTUP-BOUND configured set.
+// adHocPanel builds the plan from a `_meta.exploremesh.panel` composition. Every failure is invalid-params
+// with a field-addressed message: an under-sized panel, an over-sized one (the fan-out cap is a spend
+// control, never clamped), a missing collator, a duplicate (adapter, model, effort) triple, or an adapter
+// this agent was not launched with.
 func (s *Server) adHocPanel(spec *panelSpec) (panel, *rpcError) {
 	if len(spec.Explorers) < 2 {
 		return panel{}, &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
@@ -578,7 +516,7 @@ func (s *Server) adHocPanel(spec *panelSpec) (panel, *rpcError) {
 			"invalid params: _meta.exploremesh.panel.explorers has %d entries, exceeding the fan-out cap of %d", len(spec.Explorers), maxRosterExplorers)}
 	}
 	if spec.Collator == nil {
-		return panel{}, &rpcError{Code: codeInvalidParams, Message: "invalid params: _meta.exploremesh.panel.collator is required — an ad-hoc panel must name the seat that collates it"}
+		return panel{}, &rpcError{Code: codeInvalidParams, Message: "invalid params: _meta.exploremesh.panel.collator is required — a panel must name the seat that collates it. Corrected _meta.exploremesh: " + panelExample}
 	}
 	var r roster.Roster
 	for i, e := range spec.Explorers {
@@ -596,66 +534,36 @@ func (s *Server) adHocPanel(spec *panelSpec) (panel, *rpcError) {
 	if err != nil {
 		return panel{}, &rpcError{Code: codeInvalidParams, Message: "invalid params: " + err.Error()}
 	}
-	n := len(plan.Explorers)
-	return panel{plan: plan, selected: n, full: n, adHoc: true}, nil
+	return panel{plan: plan}, nil
 }
 
-// checkConfigured enforces compose-not-configure for one ad-hoc seat: a non-empty adapter+model, and an
-// adapter that the agent already resolved at startup. The refusal NAMES the configured set, so the
-// corrected call is derivable from the error rather than guessable.
+// checkConfigured enforces that one seat names a non-empty adapter + model, an adapter this agent was
+// launched with, and one whose CLI can be started now. The refusal NAMES the launched set, so the corrected
+// call is derivable from the error rather than guessable.
 func (s *Server) checkConfigured(field string, slot slotSpec) *rpcError {
 	adapter, model := strings.TrimSpace(slot.Adapter), strings.TrimSpace(slot.Model)
 	if adapter == "" || model == "" {
 		return &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
 			"invalid params: %s needs a non-empty adapter and model (got adapter=%q model=%q)", field, adapter, model)}
 	}
-	if len(s.Adapters) == 0 {
+	if s.Adapters.Empty() {
 		return &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
-			"invalid params: %s cannot be resolved — this agent bound no configured adapter set, so ad-hoc panel composition is refused", field)}
+			"invalid params: %s cannot be resolved — this agent was launched with no adapter; the operator must add --adapter <name> (or %s) to the command that starts it", field, launchflags.EnvVar)}
 	}
-	if !slices.Contains(s.Adapters, adapter) {
+	if !s.Adapters.Has(adapter) {
 		return &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
-			"invalid params: %s names adapter %q, which is not configured for this agent — configured adapters are: %s (a prompt selects from the configured set; it never introduces one)",
-			field, adapter, strings.Join(s.Adapters, ", "))}
+			"invalid params: %s names adapter %q, which this agent was not launched with — available adapters are: %s (a prompt uses the adapters named at launch; it never introduces one)",
+			field, adapter, strings.Join(s.Adapters.Names(), ", "))}
+	}
+	if ok, why := s.Adapters.Available(adapter); !ok {
+		return &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
+			"invalid params: %s names adapter %q, whose CLI cannot be started right now: %s", field, adapter, why)}
 	}
 	return nil
 }
 
-// hasCount reports whether `count` was actually supplied (an absent or explicitly null value is not).
-func hasCount(raw json.RawMessage) bool {
-	return len(raw) > 0 && string(bytes.TrimSpace(raw)) != "null"
-}
-
-// selectCount resolves `_meta.exploremesh.count` to a concrete explorer count: absent/null or the string
-// "all" → every configured explorer; a JSON integer → that many. Anything else (a non-integer number, an
-// unrecognized string, an object/array) is invalid-params — the count is never guessed at nor clamped.
-func selectCount(raw json.RawMessage, full int) (int, *rpcError) {
-	if !hasCount(raw) {
-		return full, nil
-	}
-	var str string
-	if json.Unmarshal(raw, &str) == nil {
-		if strings.EqualFold(strings.TrimSpace(str), "all") {
-			return full, nil
-		}
-		return 0, &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
-			"invalid params: invalid count %q — want an integer or \"all\"", str)}
-	}
-	var num json.Number
-	if json.Unmarshal(raw, &num) != nil {
-		return 0, &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
-			"invalid params: invalid count %s — want an integer or \"all\"", string(raw))}
-	}
-	i, err := num.Int64()
-	if err != nil {
-		return 0, &rpcError{Code: codeInvalidParams, Message: fmt.Sprintf(
-			"invalid params: count %s must be a whole number (or \"all\")", string(raw))}
-	}
-	return int(i), nil
-}
-
 func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif bool, f Framer, sessionID string) *rpcResponse {
-	// v1 payload cap (design §F8): reject an oversized params blob before parsing/dispatch.
+	// v1 payload cap: reject an oversized params blob before parsing/dispatch.
 	if len(req.Params) > maxPromptParamsBytes {
 		if notif {
 			return nil
@@ -671,12 +579,15 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif 
 			return errResp(req.ID, codeInvalidParams, "invalid params: "+err.Error())
 		}
 	}
-	// -- panel selection via _meta (design §7): an OPTIONAL profile + count choose WHICH explorers run.
-	// Resolved BEFORE the task is validated so a bad panel fails as cheaply as a bad task.
-	var metaIn *exploreMetaIn
-	if p.Meta != nil {
-		metaIn = p.Meta.Exploremesh
+	metaIn, merr := decodeExploreMeta(p)
+	if merr != nil {
+		if notif {
+			return nil
+		}
+		return errResp(req.ID, codeInvalidParams, "invalid params: "+merr.Error())
 	}
+	// -- the REQUIRED panel, resolved BEFORE the task is validated so a bad panel fails as cheaply as a bad
+	// task.
 	pan, perr := s.resolvePanel(metaIn)
 	if perr != nil {
 		if notif {
@@ -684,7 +595,7 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif 
 		}
 		return errResp(req.ID, perr.Code, perr.Message)
 	}
-	// v1 roster-size cap (design §F8): a selected panel larger than the cap must not fan out over ACP.
+	// v1 roster-size cap: a selected panel larger than the cap must not fan out over ACP.
 	if len(pan.plan.Explorers) > maxRosterExplorers {
 		if notif {
 			return nil
@@ -740,8 +651,8 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif 
 		}
 		return errResp(req.ID, codeInvalidParams, "invalid params: "+err.Error())
 	}
-	// The MODE's own task requirement (design §3): e.g. `challenge` needs `_meta.exploremesh.artifact`. It is
-	// invalid-params — the same fail-closed posture criteria and profile/count already take — so a driver is
+	// The MODE's own task requirement: e.g. `challenge` needs `_meta.exploremesh.artifact`. It is
+	// invalid-params — the same fail-closed posture criteria and the panel already take — so a driver is
 	// told exactly what to supply instead of getting a run that reviewed nothing.
 	if err := mode.ValidateTask(raw.Mode, raw); err != nil {
 		if notif {
@@ -759,7 +670,7 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif 
 		return errResp(req.ID, codeInvalidParams, "invalid params: dryRun cannot be combined with dumpRun — a dry run makes no model calls, so there are no envelopes, raw outputs or prompts to capture; the shape comes back in _meta.exploremesh.shape")
 	}
 
-	// Total-turn budget: wrap the exploration in a wall-clock timeout (design §F8).
+	// Total-turn budget: wrap the exploration in a wall-clock timeout.
 	turnTimeout := s.TurnTimeout
 	if turnTimeout <= 0 {
 		turnTimeout = defaultTurnTimeout
@@ -779,11 +690,11 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif 
 		})
 	}
 
-	maxParallel, dry := 0, false
+	maxParallel, dry, verify := 0, false, false
 	if metaIn != nil {
-		maxParallel, dry = metaIn.MaxParallel, metaIn.DryRun
+		maxParallel, dry, verify = metaIn.MaxParallel, metaIn.DryRun, metaIn.VerifyReadiness
 	}
-	out, err := s.Explorer.Run(runCtx, pan.plan, raw, pipeline.Options{MaxParallel: maxParallel, DryRun: dry}, onEvent)
+	out, err := s.Explorer.Run(runCtx, pan.plan, raw, pipeline.Options{MaxParallel: maxParallel, DryRun: dry, VerifyReadiness: verify}, onEvent)
 	if notif {
 		return nil // notification: ran for side effects, no response
 	}
@@ -897,49 +808,36 @@ func countNonBlank(ss []string) int {
 }
 
 // exploreMeta builds the PromptResponse `_meta.exploremesh` echo: the applied purpose + the criteria list
-// actually used, the PANEL that ran (the effective profile plus the selected vs configured explorer
-// counts, so a driver sees exactly which explorers a `count` subset picked), plus a summary of the run
-// outcome (formulation source, collator identity, panel size, findings). It NEVER echoes priorContext
-// content (only whether it was supplied).
+// actually used, the PANEL that ran, plus a summary of the run outcome (formulation source, collator
+// identity, panel size, findings). It NEVER echoes priorContext content (only whether it was supplied).
 //
 // The governance block and the per-mode detail come from internal/surface/runview — the SAME projection
 // the MCP surface returns, so the two surfaces cannot drift on what a run reported (surface-parity
 // invariant).
 func exploreMeta(raw schema.RawTask, out pipeline.Result, status string, pan panel) map[string]any {
 	em := map[string]any{
-		"status":   status,
-		"purpose":  raw.Purpose,
-		"criteria": raw.Criteria,
-		"mode":     runview.EffectiveMode(raw.Mode),
-		// "" = the agent is bound to a raw roster file (--roster), which defines no named profiles.
-		"profile":             pan.profile,
-		"explorersSelected":   pan.selected,
-		"explorersConfigured": pan.full,
-		"priorContext":        raw.PriorContext != "",
-		"formulationSource":   string(out.Formulation.Source),
-		"collatorStatus":      string(out.CollatorStatus),
-		"panelSize":           len(out.Envelopes),
-		"dropped":             len(out.Dropped),
+		"status":            status,
+		"purpose":           raw.Purpose,
+		"criteria":          raw.Criteria,
+		"mode":              runview.EffectiveMode(raw.Mode),
+		"priorContext":      raw.PriorContext != "",
+		"formulationSource": string(out.Formulation.Source),
+		"collatorStatus":    string(out.CollatorStatus),
+		"panelSize":         len(out.Envelopes),
+		"dropped":           len(out.Dropped),
 	}
 	if out.CollatorCaveat != "" {
 		em["collatorCaveat"] = out.CollatorCaveat
 	}
 	em["artifactSupplied"] = strings.TrimSpace(raw.Artifact) != ""
-	// The AD-HOC panel echo (surface parity with the CLI's --explorer/--collator and MCP's `panel`): a
-	// prompt that composed its own panel gets the composition it asked for reflected back, so "requested"
-	// and "executed" are comparable without the driver having to remember what it sent.
-	if pan.adHoc {
-		em["panelSource"] = "adhoc"
-	} else if pan.profile != "" {
-		em["panelSource"] = "profile"
-	} else {
-		em["panelSource"] = "default"
-	}
+	// The panel echo: the composition the prompt asked for, reflected back, so "requested" and "executed"
+	// are comparable without the driver having to remember what it sent.
+	em["panelSource"] = "adhoc"
 	em["explorers"] = slotEcho(pan.plan.Explorers)
 	em["collator"] = map[string]any{"adapter": pan.plan.Collator.Adapter, "model": pan.plan.Collator.Model, "effort": pan.plan.Collator.Effort}
-	// The CANONICALIZER echo: which identities held the merge-agreement rule, and — the fact that was
-	// previously unrecorded anywhere — WHO CHOSE THEM. `canonicalizerSource` is the run's own provenance when
-	// a canonicalizing mode ran; before that it is what the config asked for.
+	// The CANONICALIZER echo: which identities held the merge-agreement rule, and WHO CHOSE THEM.
+	// `canonicalizerSource` is the run's own provenance when a canonicalizing mode ran; before that it is
+	// what the prompt asked for.
 	em["canonicalizers"] = slotEcho(pan.plan.Canonicalizers)
 	if src := out.CanonicalizerProvenance; src != "" {
 		em["canonicalizerSource"] = src

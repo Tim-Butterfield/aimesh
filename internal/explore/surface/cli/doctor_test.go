@@ -125,8 +125,8 @@ func TestExitCodes_FollowTheSharedTaxonomy(t *testing.T) {
 	}
 }
 
-// TestExitCodes_SuccessIsStillZero guards the other half of a breaking change: nothing that used to
-// succeed may start reporting a class.
+// TestExitCodes_SuccessIsStillZero guards the other half of the exit-code contract: a success
+// never reports a failure class.
 func TestExitCodes_SuccessIsStillZero(t *testing.T) {
 	writeProfiles(t, profileEnv(t))
 	for _, args := range [][]string{

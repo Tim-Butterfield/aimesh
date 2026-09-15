@@ -8,8 +8,14 @@ result:
   only thing it writes is its own run directory under `$EXPLOREMESH_ARTIFACT_DIR` (on by default,
   `--no-capture` turns it off). The evidence export, which is the one exploremesh command that writes where
   a human points it, is **not** exposed over MCP at all.
-- **`aimesh review mcp`** — review, and (only when the operator enables it) **remediation**. It takes
-  filesystem paths, and one of its tools writes. See [aimesh review mcp](#reviewmesh-mcp) below.
+- **`aimesh review mcp`** — review and **remediation**. It takes filesystem paths; its remediation tool
+  always supplies the diff, and writes the workspace only when the operator launched it with
+  `--allow-writes`. See [aimesh review mcp](#aimesh-review-mcp) below.
+
+**Both servers read no aimesh configuration.** Their adapters, write grant and optional root ceiling come
+from the arguments and environment the host starts them with, so they work on a fresh install with no
+setup step. Saved configuration (`~/.aimesh`, a project `.aimesh/`, profiles, the model catalog) is for
+the CLI only; a project `.aimesh/` may still hold run records, but it is never read as configuration.
 
 The protocol transport is shared: `meshcore/mcp`, a hand-rolled, domain-free JSON-RPC 2.0 server over the
 newline-delimited framing MCP stdio uses (itself shared with `meshcore/acp`). Everything from
@@ -24,25 +30,35 @@ surfaces sit), **[security.md](security.md)** (what leaves the machine).
 ## One server, both domains (`aimesh mcp`)
 
 `aimesh mcp` serves **both** domains' tools over one stdio connection — the single entry a host
-config needs:
+config needs. The adapters it may use are named in the entry itself:
 
 ```json
-{ "mcpServers": { "aimesh": { "command": "aimesh", "args": ["mcp"] } } }
+{ "mcpServers": { "aimesh": { "command": "aimesh", "args": ["mcp", "--adapter", "claude-code", "--adapter", "codex-cli"] } } }
 ```
 
 `--only review` or `--only explore` narrows it to one domain's tools. Narrowing is worth having: a
 tool list costs a model attention on every call, and a review-only user should not carry explore's
 tools. Beyond `--only` it accepts **every flag of the domains it serves** — naming one whose domain
-`--only` excluded is refused rather than ignored, because `--allow-remediate` under `--only explore`
-would otherwise read as a capability grant that silently did nothing.
+`--only` excluded is refused rather than ignored, because `--allow-writes` under `--only explore`
+would otherwise read as a grant that silently did nothing. `--adapter` is shared by both domains.
 
-**Every flag is launch-time, set once.** The capability grants (`--allow-remediate`,
-and the trusted-root ceiling cannot be per-call: the caller is a model,
-and one that could grant itself write access or widen its own filesystem reach would make the grant
-meaningless. Everything a caller legitimately varies per run — the workspace, a narrowing `roots`,
-the profile or panel, `waitSeconds`, `maxParallel`, `dryRun` — is a tool parameter, so **one
-configured server serves many repos, folders and non-repos without editing a config or restarting
-the host.**
+**Every grant is launch-time, set once.** Which adapters may receive content (`--adapter`), whether
+aimesh may write a workspace (`--allow-writes`) and the optional root ceiling (`--root`) cannot be
+per-call: the caller is a model, and one that could grant itself an adapter, write access or a wider
+filesystem reach would make the grant meaningless. Everything a caller legitimately varies per run —
+the absolute workspace, extra `roots`, the panel and its model identifiers, `waitSeconds`,
+`maxParallel`, `dryRun`, `verifyReadiness` — is a tool parameter, so **one server entry serves many
+repos, folders and non-repos, and many simultaneous conversations, without editing a config or
+restarting the host.**
+
+### Fresh install
+
+A host can start `aimesh mcp` before anything has been set up. It starts with no saved configuration at
+all. Launched with no `--adapter`, it still serves: `review_doctor` and `explore_doctor` report a failing
+`adapters` check, `writes` is `"agent"`, and every run-starting call is refused with a message naming
+`--adapter <name>` (or `AIMESH_ADAPTERS`). A domain refuses to start only when its own launch arguments are
+invalid (an unknown adapter name, an undefined variable in a path); `aimesh mcp` then serves the other
+domain and says so on stderr, and with `--only` it exits.
 
 `dryRun: true` is the one every calling model should know about: it resolves the plan, the panel and
 the preflight, then stops before the first model call and answers with `status: "planned"` and a
@@ -55,26 +71,78 @@ cheaply, and `payload.bytes` is the figure that decides it: the workspace is sen
 seat, per round. Its `findings` array is empty because it looked at nothing, never because the tree
 was clean — branch on `status`, not on the count.
 
-A domain whose configuration is incomplete refuses at launch rather than serving a half-built tool
-list, so a composed server needs both domains configured; use `--only` while the other is still
-unconfigured.
-
-## At a glance (`aimesh explore mcp`)
+## At a glance
 
 ```bash
-aimesh explore mcp [--roster <path>] [--protocol dual|legacy]
-                [--wait-seconds <n>] [--turn-timeout <dur>] [--no-capture]
+aimesh mcp         [--only review|explore] <flags of the domains served>
+aimesh explore mcp [--adapter <name>[=<path>]]... [--no-capture] <shared flags>
+aimesh review mcp  [--adapter <name>[=<path>]]... [--allow-writes] [--root <dir>]... [--allow-broad-root]
+                   [--verify-cmd <cmd>]... [--verify-timeout <dur>] [--verify-baseline]
+                   [--allow-protected-paths] <shared flags>
+
+shared flags: [--protocol dual|legacy] [--framing newline|content-length]
+              [--wait-seconds <n>] [--turn-timeout <dur>] [--strict-schema]
 ```
 
-The per-domain commands remain, and serve exactly one domain each. Example client entry:
+The per-domain commands serve exactly one domain each.
+
+| Flag | Domain | Meaning |
+|---|---|---|
+| `--adapter <name>` | both | An adapter calls may use; its CLI is found on `PATH`. Repeatable. Only named adapters are available: they are who may receive the content a call sends. |
+| `--adapter <name>=<path>` | both | The same, at the CLI's full path. |
+| `AIMESH_ADAPTERS` | both | The environment form, for hosts that can set environment but not arguments: entries separated by the path-list separator (`;` on Windows, `:` elsewhere). Give `--adapter` or `AIMESH_ADAPTERS`, not both. |
+| `--allow-writes` | review | Lets `review_remediate` with `output: "apply"` write the workspace. Without it aimesh never changes project content; `output: "patch"` still supplies the diff. |
+| `--root <dir>` | review | Optional **ceiling**, repeatable: every path a call declares must lie inside it. Without it a call may declare any absolute directory that is not the filesystem root, a home directory, a system tree or a protected directory. |
+| `--allow-broad-root` | review | Permit a `--root` that is normally refused as over-broad. Never waives the read denylist. |
+| `--no-capture` | explore | Do not write a run directory per run. |
+
+**Adapter names** are the built-in recipes: `claude-code`, `codex-cli`, `gemini-cli`, `agy-cli`,
+`cursor-cli`, `devin-cli`, `ollama`. An unknown name, a duplicate, an empty entry or an empty `name=` path
+refuses startup (`adapter_unknown`, `adapter_duplicate`, `adapter_empty_entry`, `adapter_empty_path`), as
+does setting both forms (`adapter_flag_env_conflict`). User-defined ACP adapters from saved configuration
+are not available here.
+
+**Path expansion** follows the platform the path was written for, so a path copied from that platform's
+documentation works unchanged:
+
+| Platform | Expands | Literal | Refused |
+|---|---|---|---|
+| Windows | `%NAME%` | `%%` → `%`; `$` is always literal | an unmatched `%` |
+| macOS / Linux | `$NAME`, `${NAME}` | `$$` → `$`; a `$` not followed by a name; `%` | an unterminated `${`, an invalid `${name}` |
+| every platform | a leading `~` alone or followed by a separator | | `~name` (another user's home) |
+
+An **undefined variable refuses startup** rather than expanding to nothing, and the expanded path must be
+absolute.
+
+**Host configuration.** Any MCP host that launches stdio servers from a config file works the same way.
+A Windows Devin `config.json` entry where `devin.exe` is not on `PATH`:
 
 ```json
-{ "mcpServers": { "exploremesh": { "command": "aimesh", "args": ["explore", "mcp"] } } }
+{
+  "mcpServers": {
+    "aimesh": {
+      "command": "aimesh",
+      "args": ["mcp", "--adapter", "devin-cli=%LOCALAPPDATA%\\devin\\cli\\bin\\devin.exe"]
+    }
+  }
+}
 ```
 
-The server binds **at startup** to exactly the configuration a no-flag `aimesh explore run` binds to: the
-default panel, the selectable profile set, and the configured adapter set. Nothing on the wire can change
-any of it.
+The same on macOS, with one CLI on `PATH` and one at a per-user location:
+
+```json
+{
+  "mcpServers": {
+    "aimesh": {
+      "command": "aimesh",
+      "args": ["mcp", "--adapter", "claude-code", "--adapter", "devin-cli=~/.local/bin/devin"]
+    }
+  }
+}
+```
+
+aimesh never edits a host's configuration; the host's own agent or the user does. An agent adding this
+entry for itself can locate its own CLI with `where <cli>` (Windows) or `command -v <cli>` (macOS/Linux).
 
 ## Protocol surface
 
@@ -84,7 +152,7 @@ any of it.
 | `notifications/initialized` | Required. Until it arrives, every request except `ping` is refused with `-32002`. It is also what starts the `roots/list` round trip, when the client declared the capability. |
 | `resources/list` | Every artifact a finished run published, addressed by an **opaque run-scoped URI**. One page, no cursor. |
 | `resources/read` | Fetches one published artifact. A URI this server did not publish is `-32002` (the spec's *Resource not found*). |
-| `roots/list` **(server → client)** | Issued after `notifications/initialized` when the client declared `capabilities.roots`, and again on every `notifications/roots/list_changed`. The answer is **intersected** with the server's launch-time roots. |
+| `roots/list` **(server → client)** | Issued after `notifications/initialized` when the client declared `capabilities.roots`, and again on every `notifications/roots/list_changed`. The declared roots only **narrow**: every path a later call declares must also lie inside them. |
 | `notifications/roots/list_changed` | Triggers a **re-fetch**. The notification carries no roots, so acknowledging it without re-asking would leave a withdrawn set in force. |
 | `ping` | Always allowed, including before initialization (it is how a host proves liveness during a slow handshake). |
 | `tools/list` | Accepts **and honors** `cursor`. With the shipped tool count everything comes back in one page with no `nextCursor`; an unrecognized cursor is `-32602`, never silently ignored. |
@@ -93,7 +161,7 @@ any of it.
 | `notifications/progress` | Emitted **only** when the caller supplied `_meta.progressToken`. |
 | `notifications/cancelled` | Correlated by JSON-RPC request id. Cancels the call *and* the run it started. |
 
-**The table above is the `2025-06-18` (LEGACY) method surface.** Both servers are now **dual-era**: they
+**The table above is the `2025-06-18` (LEGACY) method surface.** Both servers are **dual-era**: they
 also implement `2026-07-28`, whose surface is different enough that it gets its own table below.
 
 ### The two eras, and how a request picks one
@@ -257,8 +325,8 @@ through a full run with progress and log notifications interleaved, asserting th
 parses as JSON-RPC 2.0 — exists for **both** servers
 (`exploremesh/internal/surface/mcp/subprocess_test.go`,
 `reviewmesh/internal/surface/mcp/subprocess_test.go`). The reviewmesh one launches with
-`--allow-remediate` on purpose: that launch prints a capability banner *before* serving, so the test
-also proves the banner lands on stderr rather than in a frame.
+`--allow-writes` on purpose: that launch prints a write notice *before* serving, so the test also
+proves the notice lands on stderr rather than in a frame.
 
 ### Conformance
 
@@ -269,7 +337,7 @@ also proves the banner lands on stderr rather than in a frame.
 `logging/setLevel` → `ping`. `go build` pulls none of it; either shipped binary's dependency set is
 unchanged (`GOWORK=off go list -deps ./cmd/...` contains no `modelcontextprotocol` entry).
 
-**Which revision this certifies, and by whose client.** There are now **two** transcripts, and they are
+**Which revision this certifies, and by whose client.** There are **two** transcripts, and they are
 not equally strong. State the difference rather than average it:
 
 | Era | Client that walks it | Where |
@@ -448,8 +516,8 @@ client — is already there and already tested.
 | Tool | Spends? | Purpose |
 |---|---|---|
 | `explore` | **yes** | every mode, selected by the required `mode` parameter |
-| `explore_list` | no | configured adapters, profiles, modes, admission limits |
-| `explore_doctor` | no | static adapter readiness |
+| `explore_list` | no | the adapters this server was launched with and whether each can start, modes, admission limits |
+| `explore_doctor` | no | static readiness of the launched adapters |
 | `explore_run_status` | no | poll a run |
 | `explore_run_result` | no | fetch a run's full result |
 
@@ -477,10 +545,12 @@ Every run-starting tool takes:
 | `purpose` | ✓ | what the panel is asked to explore |
 | `criteria[]` | ✓ | ≥1 non-blank entry. **Never invented** on the caller's behalf: a run without criteria is refused |
 | `priorContext` | | free text |
-| `panel` | | strict `oneOf` — see below. Omitted: the server's default panel |
+| `panel` | ✓ | `{explorers[], collator}` — see below. There is no default panel |
+| `canonicalizers[]` | | exactly two seats, or omitted (the host derives them) |
 | `waitSeconds` | | 1..120, default 25 |
 | `maxParallel` | | ≥1. Bounds how many explorers invoke at once — wall clock only, never cost |
 | `dryRun` | | resolve everything, spend nothing — see below |
+| `verifyReadiness` | | before the run, one bounded one-token call per distinct adapter/model/effort the panel names; any agent that cannot do real work halts the run before the panel is paid for. **Spends**; `dryRun` prices it |
 | `idempotencyKey` | | ≤200 chars. A repeat returns the **existing** run |
 
 **`dryRun: true`** answers with `dryRun: true` and a `shape` block instead of a result: the panel, the
@@ -498,7 +568,9 @@ Two ways it differs from `aimesh review mcp`'s `dryRun`, both structural:
 - **It proves nothing about reachability.** A review's static preflight is free, so its shape can
   promise every adapter answered. exploremesh's first stage is the identity **pre-flight**, which
   *invokes*; the stop sits in front of it. The claim is that nothing left is a configuration
-  question, not that the collator replied.
+  question, not that the collator replied. To find out whether the agents can do real work, pass
+  `verifyReadiness: true`; with `dryRun` its calls appear as a `readiness` stage in `shape.calls` and
+  none is made.
 
 The call's `state` is still `complete` — the *call* finished — so branch on `dryRun`, not on `state`,
 and never read the absent result as "the panel ran and found nothing".
@@ -514,9 +586,8 @@ and never read the absent result as "the panel ran and found nothing".
 | `forecast` | `target`, `unit`, `horizon` (+ optional `conditioningEvent`) |
 
 A parameter belonging to a **different** mode is **refused, not ignored** — passing `artifact` to a
-`map` run fails rather than quietly running a map that never saw it. When the four modes had four
-tools this came free from per-tool decoding; with one tool it is an explicit check, and the error
-names the mode that *does* take the parameter.
+`map` run fails rather than quietly running a map that never saw it. The error names the mode that
+*does* take the parameter.
 
 The requirement is declared in four places on purpose — the input schema (as a `oneOf` discriminated
 union stating both the requires and the forbids), this tool's description, the server's `initialize`
@@ -527,35 +598,32 @@ rule expressed only in the schema can fail to reach the calling model; a test as
 exploration must satisfy, while the axes are what the option set is measured on. Two same-named arrays with
 different meanings are a first-try error generator.
 
-`mode` is required on `explore` rather than defaulted from the profile, because a per-profile default would
-make the same call mean different things on different installs — a difference a machine caller cannot see.
+`mode` is required on `explore` rather than defaulted, because a server-side default would make the same
+call mean different things on different installs — a difference a machine caller cannot see.
 
-### `panel`: select or compose
+### `panel`: every call composes its own
 
 ```jsonc
-// branch A — select a configured profile
-{ "panel": { "profile": "deep", "count": 3 } }
-
-// branch B — compose an ad-hoc panel by identifier
 { "panel": {
     "explorers": [ {"adapter": "claude-code", "model": "sonnet"},
                    {"adapter": "codex-cli",   "model": "gpt-5", "effort": "high"} ],
     "collator":  {"adapter": "claude-code", "model": "opus"} } }
 ```
 
-A strict `oneOf` with `additionalProperties: false` on both branches. Supplying both is refused: it asks
-for two different panels.
+`panel` is **required**, with `additionalProperties: false`. A call without one is refused with `-32602`
+naming the corrected shape; a `profile` or `count` key is an unknown field.
 
-- **Compose, never configure.** Composition resolves **fail-closed** against the adapter set bound at
-  **startup**. A call can select or re-arrange the configured seats; it can never introduce an adapter, a
-  binary path or a launch argument. The refusal names the configured set, so the corrected call follows
-  from the error.
+- **Adapters come from the launch set.** Every seat names an adapter the server was launched with, and that
+  adapter's CLI must be startable now. The refusal names the launched set. A call can never introduce an
+  adapter, a binary path or a launch argument.
+- **Models are passed through verbatim.** `model` is the exact identifier that adapter's CLI accepts for
+  the license it runs under. The calling agent looks it up — typically because the user told it which
+  models to use for which work — and aimesh does not validate or translate it. `verifyReadiness` is how a
+  caller checks an identifier before paying for a run.
 - 2..16 explorers plus exactly one collator. The cap is a spend control and is **never clamped** — a
   request for 20 seats fails; it does not quietly run 16.
 - Duplicate `(adapter, model, effort)` triples are rejected: an identical triple adds no independent
   vantage. A different `effort` *is* a different vantage, so it is part of the seat's identity.
-- `count` takes the top-N by the profile's **preference order** and is never clamped either (requested =
-  executed, or the call fails).
 
 Schemas are advisory to a client, so the server enforces all of this **itself**: arguments are decoded with
 unknown fields rejected, which is what makes `additionalProperties: false` a real boundary rather than a
@@ -574,11 +642,9 @@ There is **no** `summary` vs `full` detail parameter. The result is always compl
 > validate it in the build. Each has a matched pair of tests: one walks every result builder at every
 > state it can produce and judges the payload against the literal declared schema, and a second re-reads
 > each tool's `outputSchema` back off `tools/list` and validates real calls against it — so a payload
-> that matches no branch fails the build rather than reaching a client. The pair exists because the two
-> did drift: five payloads across the two servers matched no branch of the very `oneOf` their tool
-> advertised (on `aimesh explore mcp`, a **cancelled** call's result carried the *running* shape with
-> `state` overwritten, and `explore_run_result` on a **still-running** run omitted the `panel` the running branch
-> requires). Both servers are validated against the same subset validator — literally one package,
+> that matches no branch fails the build rather than reaching a client. The pair exists because a result
+> builder and its declared schema drift apart one rare state at a time (a cancelled call, a still-running
+> run). Both servers are validated against the same subset validator — literally one package,
 > [`meshcore/jsonschema`](../meshcore/jsonschema) — so neither can be held to a looser standard than
 > the other.
 
@@ -608,8 +674,8 @@ declared `outputSchema` **immediately before the frame is written**.
 
 Both servers publish their finished runs' artifacts as MCP **resources**. On `aimesh review mcp` that is what
 makes `output: "patch"` an output mode at all rather than a receipt for something unobtainable: the run
-directory is deliberately withheld from every payload, and stdout is the JSON-RPC transport, so before
-this existed a caller held a run-record-relative file name it could never resolve.
+directory is deliberately withheld from every payload, and stdout is the JSON-RPC transport, so a
+run-record-relative file name alone could never be resolved by the caller.
 
 **The URI is opaque and run-scoped:**
 
@@ -630,12 +696,12 @@ retrievability.
 | `aimesh review mcp` | `patch` — the complete unified diff a `review_remediate` produced. Its digest is `receipt.patchSha256`. |
 | `aimesh explore mcp` | `manifest` plus every artifact the run's own manifest indexes (envelopes, ledger, dropped-explorer raw bodies, …). Requires capture, which is on by default; `--no-capture` leaves nothing to publish. |
 
-**How a patch is collected.** A patch-mode remediation now returns three things that agree: a
+**How a patch is collected.** A patch-mode remediation returns three things that agree: a
 `resource_link` content block, `receipt.patchResource` (the same URI, for a client reading the structured
 payload), and `receipt.patchSha256`. Fetch with `resources/read`, verify against the digest:
 
 ```jsonc
-{ "name": "review_remediate", "arguments": { "fromRun": "run-9f3c…", "output": "patch", "allowWrite": true } }
+{ "name": "review_remediate", "arguments": { "fromRun": "run-9f3c…", "workspace": "/abs/project", "output": "patch" } }
 // ← content: [ {"type":"text", …}, {"type":"resource_link", "uri":"aimesh://run/run-4a1b…/patch", "mimeType":"text/x-diff"} ]
 //   receipt: { patchArtifact: "patches/changes.patch", patchSha256: "sha256:…", patchResource: "aimesh://run/run-4a1b…/patch" }
 
@@ -691,8 +757,8 @@ against every emitted payload in the build (see the note under [Results](#result
   the caveat text. An **empty array is the positive statement** that every seat was verified — which is why
   it is required rather than omitted when empty. A synthesis from an unverifiable model must not read like
   one from a verified model.
-- **`panel`** — `requested` **and** `executed`. A count that was narrowed, a profile that resolved somewhere
-  unexpected, or a seat that dropped mid-run is visible only by comparing the two halves.
+- **`panel`** — `requested` **and** `executed`. A seat that dropped mid-run is visible only by comparing
+  the two halves. `requested.source` is always `"adhoc"`: every call composes its panel.
 - `result` — the mode's own terminal detail, with its honesty pairs intact: a ballot's `decision` label
   beside its counts, a comparison's `disagreedCells`/`rankingWithheld` beside its Pareto frontier, a
   forecast's `computedBy`/`poolingRule` beside its aggregate.
@@ -705,17 +771,18 @@ with the ACP surface, so the two surfaces cannot drift on what a run reported.
 The cross-tool contract the client model reads before choosing a tool: how the tools relate, that the job
 shape exists and `idempotencyKey` is the retry mechanism, that **counts are host-computed and must never be
 restated**, that the governance block and identity caveats must always be surfaced, that a shortlist is a
-ballot and a Pareto frontier has no winner, that the explore tools spend money, and that the server changes
-no configuration and reads no files.
+ballot and a Pareto frontier has no winner, that the explore tools spend money, that every call composes
+its own panel from the launched adapters with model identifiers the caller looks up, and that the server
+reads and changes no configuration. On reviewmesh it also states that `workspace` is an absolute directory
+and the call's root, that `roots` adds directories, who performs writes (`review_doctor`'s `writes`), and
+that `review_remediate` takes `fromRun` plus the workspace that run reviewed.
 
 It is returned by `initialize` on the legacy era and by `server/discover` on the modern one, **byte for
-byte the same string** — parity for free, and one place to change it. It gained a modern-era section: that
-`resultType`, `state` and `task` are three different things and two of them are spelled "complete"; on
-reviewmesh, that trusted roots are launch-established and this revision offers no way for a client to
-narrow them (and that `review_remediate` has only the `fromRun` form); and that **this server emits no
-protocol log notifications on this revision**, naming where in-flight visibility actually lives. Each of
-those three has a mechanism behind it that fails closed without the sentence — the sentence is a
-disclosure, never the enforcement.
+byte the same string** — parity for free, and one place to change it. Its modern-era section says that
+`resultType`, `state` and `task` are three different things and two of them are spelled "complete", and
+that **this server emits no protocol log notifications on this revision**, naming where in-flight
+visibility actually lives. Each sentence has a mechanism behind it that fails closed without it — the
+sentence is a disclosure, never the enforcement.
 
 ## Error model
 
@@ -760,15 +827,21 @@ the field and the accepted values, so the corrected call is derivable rather tha
 | Situation | Carrier |
 |---|---|
 | Unknown tool, unknown method | `-32601` / `-32602` |
-| Unknown field, wrong type, blank required field, out-of-range `count` or `waitSeconds` | `-32602` |
-| Unknown profile, unconfigured adapter, over-cap panel | `-32602` (pre-spend parameter resolution) |
+| Unknown field (including `profile` or `count`), wrong type, blank required field, out-of-range `waitSeconds` | `-32602` |
+| Missing `panel`, a panel missing `author_remediator` (review) or `collator` (explore), over-cap panel, effort on a single-slot review role | `-32602`, naming the corrected shape (pre-spend) |
+| A seat naming an adapter the server was not launched with, or one whose CLI cannot be started now, or any seat on a server launched with no adapter | `-32602`, naming the launched set or `--adapter` |
+| A relative `workspace` or `roots` entry | `-32602` (`scope_call_path_relative`) |
+| A declared path outside the `--root` ceiling, or one that is the filesystem root, a home directory, a system tree or a protected directory | `isError`, `haltClass: M6` (`scope_outside_root_ceiling`, `acp_degenerate_root`, `acp_root_denied`) |
+| `review_remediate` with `output: "apply"` on a server launched without `--allow-writes` | `-32602`, naming `--allow-writes` and `output: "patch"` |
+| `review_remediate` without `workspace` beside `fromRun`, or `apply` without `allowWrite: true` | `-32602`, with a corrected call |
+| `review_remediate` naming a workspace the source run did not review | `isError`, `reasonCode: source_run_workspace_mismatch` |
 | Request before `notifications/initialized` | `-32002` — **legacy era only.** `2026-07-28` has no pre-initialization state to be in, and forbids implementations of that revision to emit `-32002` at all (it meant *resource not found* in earlier revisions). It is deliberately not renumbered: doing so would change wire-visible behavior for the legacy clients that are, during the sunset window, the only clients there are, in order to tidy a path already scheduled for deletion. |
 | `resources/read` for a URI this server does not publish (or a stale content digest) | `-32002` — **on BOTH eras**, and on the modern era that is a **declared deviation**, not conformance. `2026-07-28` forbids implementations of that revision to emit `-32002` at all and names `-32602` as the replacement. The code is shared with the pre-init refusal above by numeric accident: the spec assigned `-32002` to *resource not found* and this transport had already taken it for the handshake case. The two are unambiguous in practice (one occurs only before the handshake, the other only after) and each message names its own case, but the modern-era emission is a real gap — see [Known gaps](#known-gaps). |
 | Modern request missing `_meta.protocolVersion` or `_meta.clientCapabilities` | `-32602`, naming both keys and our supported list |
 | Modern request naming a version we do not implement modernly | `-32022` (`UnsupportedProtocolVersionError`) with `data.supported` + `data.requested` — the one **recognized modern error**, so a probing client stays modern and retries from the list rather than falling back to `initialize` |
 | `ping` / `logging/setLevel` on the modern era | `-32601`, naming the replacement |
 | Modern request on a legacy-latched process (or the reverse) | `-32600` / `-32601`, teaching: start a new process for the other era |
-| Admission refusal (concurrency, lifetime cap) | `isError`, `haltClass: policy`, exit 7 |
+| Admission refusal | `isError`, `haltClass: policy`, exit 7 |
 | Run halt (adapter, config, containment, unparseable output) | `isError`, the halt's own class. **Model identity is never one of these** — it is reported in `identityCaveats` and the run completes normally. |
 | Unknown / expired `runId` | `isError`, `reasonCode: unknown_run_id` |
 | Remediation that COMMITTED but refused a protected-path finding | `isError`, `state: "complete"`, `outcome: "partial_refusal"`, `reasonCode: apply_refused_protected_path` — see [Partial refusal](#partial-refusal-a-protected-path-target-does-not-discard-the-run) |
@@ -798,24 +871,27 @@ return the original run, not a second panel billed to the same person for the sa
 
 ## Security posture
 
-Both servers share the first, third, fourth and last of these; the reviewmesh-specific posture (trusted
-roots and the write primitive) is in [aimesh review mcp](#reviewmesh-mcp).
+Both servers share the first, third, fourth and last of these; the reviewmesh-specific posture (per-call
+scope and the write primitive) is in [aimesh review mcp](#aimesh-review-mcp).
 
-- **No configuration mutation.** There is no setup, repair, adapter-add or model-key tool, and no
-  parameter that reaches configuration. A call selects or composes from what the operator already
-  configured.
+- **No configuration, read or written.** The server reads no saved aimesh configuration, and there is no
+  setup, repair, adapter-add or model-key tool, and no parameter that reaches configuration. Its adapters
+  come from its launch arguments; a call composes from them.
+- **Egress is bounded by the named adapters.** Content a call sends reaches only the adapters the operator
+  named with `--adapter` (or `AIMESH_ADAPTERS`). Naming an adapter is the operator's decision about who may
+  receive content; nothing on the wire adds one.
 - **No filesystem reads.** The artifact under review is supplied inline. There is no path parameter on any
-  tool.
-- **`explore_list` and `explore_doctor` are sanitized.** They report logical identifiers, selectable models, profile shapes
+  explore tool.
+- **`explore_list` and `explore_doctor` are sanitized.** They report adapter identifiers, their availability, modes
   and readiness booleans — and **no binary paths, launch arguments or environment detail**. A tool result
   is inference input for a third party: whatever these return is likely to end up in someone else's model
   provider's logs. The projection types carry no path field at all, so the rule cannot be forgotten by the
   next person to add a field; readiness details composed by meshcore (which legitimately name where a
   binary was found) are redacted to `<path>` on the way out, and the redaction is **visible** rather than
   silent.
-- **`explore_doctor` is static only.** No process is started and nothing is spent, which is what lets it honestly
-  carry `readOnlyHint`. The live probe stays CLI-only (`aimesh explore doctor --probe`) because it starts
-  provider CLIs.
+- **`explore_doctor` is static only.** No model call is made and nothing is spent, which is what lets it
+  honestly carry `readOnlyHint`. A caller that wants to know whether the panel's agents can do real work
+  asks on the run itself with `verifyReadiness: true`.
 - **Run capture is on by default.** Every run writes a run directory under `$EXPLOREMESH_ARTIFACT_DIR`
   (unset: the project-local `.aimesh/explore/runs/` when a `.aimesh/` state directory exists, else a
   subdirectory of the OS temp directory — never a relative path inside the caller's repository), and the
@@ -823,55 +899,78 @@ roots and the write primitive) is in [aimesh review mcp](#reviewmesh-mcp).
   name its own audit record would make the record unfindable from the only handle the caller has. The
   absolute path is never put on the wire. `--no-capture` turns it off.
 - **The transport is not an authorization boundary.** Annotations and hints coordinate with the host's
-  permission layer. What actually holds is the startup binding: the adapter set, the profile set, the
-  panel caps and the spend governor are all fixed before the first frame is read.
+  permission layer. What actually holds is the launch binding: the adapter set, the panel caps and the
+  spend governor are all fixed before the first frame is read.
+
+### `explore_list` and `explore_doctor` payloads
+
+| Tool | Fields |
+|---|---|
+| `explore_list` | `adapters[]` (`name`, `kind` `shell`\|`fake`, `available`, `reason` when not available, `source` `flag`\|`env`, `identityEvidenceCapability`), `modes[]`, `limits`, `note` |
+| `explore_doctor` | `ok` (at least one launched adapter can start), `checks[]` (`adapters` when none was named, else one `adapter: <name>` row each), `protocolMode`, `protocolEra`, `note` |
 
 ## `aimesh review mcp`
 
 ```bash
-aimesh review mcp [--root <dir>]... [--no-default-root] [--allow-broad-root]
-               [--allow-inferred-root] [--allow-remediate]
-               [--protocol dual|legacy] [--framing newline|content-length]
-              
-               [--wait-seconds <n>] [--turn-timeout <dur>]
+aimesh review mcp [--adapter <name>[=<path>]]... [--allow-writes]
+                  [--root <dir>]... [--allow-broad-root]
+                  [--protocol dual|legacy] [--framing newline|content-length]
+                  [--wait-seconds <n>] [--turn-timeout <dur>]
 ```
 
 ```json
-{ "mcpServers": { "reviewmesh": { "command": "aimesh", "args": ["review", "mcp", "--root", "/path/to/project"] } } }
+{ "mcpServers": { "reviewmesh": { "command": "aimesh", "args": ["review", "mcp", "--adapter", "claude-code", "--adapter", "codex-cli"] } } }
 ```
 
 Everything above about the transport, the job shape, the run registry, the error model and the admission
 governor applies unchanged. What follows is what is different — and all of it follows from one fact:
 **this server takes filesystem paths, and one of its tools writes.**
 
-### Trusted roots are mandatory
+### Scope is declared per call
 
-`aimesh explore mcp` reads no files, so it needs no roots. This one does, and the consent model is the ACP
-surface's, reused unchanged (`reviewmesh/internal/surface/acp/roots.go` — one implementation, so the two
-agent surfaces cannot diverge on what a peer process may read):
+`aimesh explore mcp` reads no files, so it needs no scope. This one does. A host can change folders after
+starting its servers, and one server can serve several conversations at once, so there is no single launch
+folder to trust and nothing is inferred from where the process started. Instead **each call declares the
+directories it is about**, and that call is judged against exactly those:
 
-- `--root <dir>` (repeatable) — the launching human's consent, given **before any request exists**.
-- No `--root` → the launch working directory, because an editor spawns its agents in the project the user
-  opened. That inference is only honest when the cwd looks like a project, so a degenerate cwd (`/`, a home
-  directory, a system tree) is **refused** rather than adopted.
-- `--no-default-root` declines the inference: explicit roots only.
-- `--allow-broad-root` is the explicit, recorded opt-in for a `--root` the degenerate rule would refuse. It
-  never waives the non-overridable read denylist.
-- `--allow-inferred-root` is the explicit opt-in that lets an **inferred** launch cwd stand as a trusted
-  root on protocol revisions that removed the client's ability to narrow this server (`2026-07-28` and
-  later). See *Root provenance* below. Like `--allow-broad-root`, it waives nothing else: the degenerate
-  rule still refuses `/`, a home directory, home's parent and the system trees **with the flag set**, so
-  the most it can admit is a plausible project directory — the same consent the CLI already accepts from a
-  human-typed path.
+- **`workspace`** is an **absolute** directory and is the call's root. A relative path is refused
+  (`scope_call_path_relative`).
+- **`roots[]`** adds other absolute directories the call reads — for example the project folder that holds
+  authority documents while the workspace is a temporary copy. Each follows the same rules as the workspace.
+- No declared path may be the filesystem root, a home directory or its parent, a system or shared tree, or a
+  protected directory; the non-overridable read denylist still applies inside every declared path.
+- **`--root <dir>`** (repeatable) is an optional operator **ceiling**: every declared path must lie inside
+  it (`scope_outside_root_ceiling`). `--allow-broad-root` is the explicit, recorded opt-in for a `--root`
+  the degenerate rule would refuse; it never waives the denylist, and a path a call declares can never
+  waive it.
+- A legacy client that declares `capabilities.roots` answers `roots/list`; those roots only **narrow**:
+  every declared path must also lie inside them. A modern client has no `roots/list`, and declares its
+  scope on the call.
+- An `inlineWorkspace` consumes no scope: its content is materialized into a directory this process owns.
+
+The implementation is shared with the ACP surface (`internal/review/surface/acp/roots.go`), so the two
+agent surfaces cannot diverge on what a call may read.
 
 ### Tools (`aimesh review mcp`)
 
 | Tool | Spends? | Writes? | Purpose |
 |---|---|---|---|
 | `review_report` | **yes** | no | run the governed cycle; return the adjudicated findings with per-seat provenance |
-| `review_remediate` | **yes** | **yes** | apply an already-adjudicated accepted set — *listed only when the capability is granted* |
-| `review_list` | no | no | configured adapters, profiles, the write modes (`report`/`patch`/`apply` — reviewmesh's sense of "mode", not exploremesh's exploration modes), the remediation policy (ceiling + whether this server can write), and the admission limits |
-| `review_doctor` | no | no | static adapter readiness |
+| `review_remediate` | **yes** | with `output: "apply"` only | produce the diff for, or apply, an already-adjudicated accepted set — listed on every server |
+| `review_list` | no | no | the launched adapters and their availability, the write modes (`report`/`patch`/`apply` — reviewmesh's sense of "mode", not exploremesh's exploration modes), who performs writes, the ceiling count, and the admission limits |
+| `review_doctor` | no | no | static readiness of the launched adapters, plus who performs writes |
+
+#### `review_list` and `review_doctor` payloads
+
+| Tool | Fields |
+|---|---|
+| `review_list` | `adapters[]` (`name`, `displayName`, `kind` `shell`\|`fake`, `available`, `reason`, `source` `flag`\|`env`, `identityEvidenceCapability`), `modes[]`, `limits`, `remediation` (`writes`, `diffAvailable`, `note`), `roots` (`ceiling`: the number of `--root` directories), `note` |
+| `review_doctor` | `ok`, `checks[]`, `writes`, `diffAvailable`, `rootCeiling`, `verify` (`commands` count, `baseline`, `timeoutSeconds` — never the commands), `protocolMode`, `protocolEra`, `note` |
+
+`writes` is `"aimesh"` when the server was launched with `--allow-writes` (so `output: "apply"` writes the
+workspace) and `"agent"` otherwise (aimesh changes no project content; ask for `output: "patch"` and apply
+the diff yourself). `diffAvailable` is always `true`. No path — adapter binary, ceiling directory or
+workspace — appears in either payload.
 | `review_run_status` | no | no | poll a run |
 | `review_run_result` | no | no | fetch a run's full result (or a remediation's receipt) |
 
@@ -898,23 +997,40 @@ writes a run directory, and it changes no workspace file.
 
 | Field | Required | Notes |
 |---|---|---|
-| `workspace` **XOR** `inlineWorkspace` | ✓ | strict top-level `oneOf`. A path must resolve inside the trusted roots |
-| `profile` **XOR** `panel` | | select a configured profile, or compose an ad-hoc one. Omitted: the configured default |
-| `authority[]` | | the P2 authority manifest — see below |
+| `workspace` **XOR** `inlineWorkspace` | ✓ | strict top-level `oneOf`. `workspace` is an **absolute** directory — see [Scope](#scope-is-declared-per-call) |
+| `panel` | ✓ | `{reviewers[], author_remediator, cross_check?, verifier?}` — see below |
+| `roots[]` | | extra absolute directories the call reads |
+| `authority[]` | | the authority manifest — see below |
 | `waitSeconds` | | 1..120, default 25 |
+| `maxParallel` | | ≥1. Bounds how many reviewer seats invoke at once — wall clock only |
+| `dryRun` | | resolve everything, spend nothing: `status: "planned"` and a `shape` |
+| `verifyReadiness` | | before dispatch, one bounded one-token call per distinct adapter/model; **spends**, and `dryRun` prices it |
 | `idempotencyKey` | | ≤200 chars. A repeat returns the **existing** run |
 
-An ad-hoc `panel` is `{reviewers[1..16], cross_check?, verifier?, author_remediator}` — and
-**`author_remediator` is required**. It is the host-adjudication seat whose judgment becomes the accepted
-set; defaulting it silently would mean composing a panel whose judge the caller never saw. A different
-`effort` is a different vantage, so it is part of a reviewer seat's identity; the single-slot lanes take no
-per-call `effort` (there is no per-role effort in the configuration model, and accepting one would silently
-drop it, so it is refused instead). Naming a lane the target profile does not define is refused for the same
-reason: it would be silently ignored.
+`panel` is **required**:
 
-Compose-not-configure is enforced **server-side**, fail-closed against the adapter set bound at startup: a
-call selects or re-arranges configured identities and can never introduce an adapter, a binary path or a
-launch argument.
+```jsonc
+{ "panel": {
+    "reviewers": [ {"adapter": "claude-code", "model": "sonnet"},
+                   {"adapter": "codex-cli",   "model": "gpt-5", "effort": "high"} ],
+    "author_remediator": {"adapter": "claude-code", "model": "opus"},
+    "cross_check": {"adapter": "codex-cli", "model": "gpt-5"} } }
+```
+
+- **`reviewers[1..16]`** — the blind primary panel. A different `effort` is a different vantage, so it is
+  part of a reviewer seat's identity.
+- **`author_remediator`** — **required**. It is the host-adjudication seat whose judgment becomes the
+  accepted set, and it is never defaulted: a hidden default would mean composing a panel whose judge the
+  caller never saw.
+- **`cross_check`** and **`verifier`** — optional. A run without them does not perform those steps and lists
+  them in the result's `shape.skippedSteps`.
+- A single-slot role seat takes no `effort` (refused rather than silently dropped); put an effort-bearing
+  identifier in its `model` instead.
+- Every seat names an adapter the server was launched with whose CLI can start now, and the exact model
+  identifier that adapter's CLI accepts. aimesh passes the identifier through verbatim; the calling agent
+  looks it up for its adapter and license.
+
+A `profile` key is an unknown field: the server reads no saved profiles.
 
 `authority[]` entries are `{name, path XOR content, mediaType?, expectedHash?, completeness?, ranges?}` —
 the same declaration the CLI takes via `--authority-manifest` and ACP via `_meta.reviewmesh.authority[]`,
@@ -924,7 +1040,7 @@ prompt), and inline `content` is **report-mode only** and excluded from the host
 budget is the same everywhere: **8 documents, 64 KiB embedded per document, 192 KiB total** — and the
 tool schema's `maxItems` is *derived from* the engine's constant rather than restated beside it, with a
 test asserting the two agree, so a caller learns the bound from the declaration instead of from a refusal.
-(It once said `16` against an enforced `8`: fail-closed, but the declaration over-promised.) "Exactly one
+"Exactly one
 of `path`/`content`" is enforced by the server rather than expressed as a schema `oneOf`.
 
 #### Result
@@ -966,83 +1082,75 @@ A finding with `applyable: false` is **reportable and never writable** — it is
 weak-identity seats, or traces only to authority text. That verdict is computed once, by the host, during
 the run that produced it, and the remediation path re-reads it rather than re-deriving it.
 
-### `review_remediate` — the double opt-in
+### `review_remediate` — the diff always, the write on a double opt-in
 
-**Gate 1 — the operator, at launch.** The tool is not merely refused without permission; it is **not
-listed**. A model cannot be talked into calling a tool it was never told exists.
+`review_remediate` is listed on every server, because the **diff is always available**:
+`output: "patch"` produces the complete unified diff of the accepted set (collected as a
+[resource](#fetching-what-a-run-produced-resources)) and changes no project content. An agent that is
+allowed to edit files can apply that diff with its own tools. Writing the workspace from aimesh itself —
+`output: "apply"` — takes two gates.
 
-Permission is a **config-store policy capability**, not a flag that overrides config:
+**Gate 1 — the operator, at launch.** `output: "apply"` is refused with `-32602` unless the server was
+launched with `--allow-writes`; the refusal names the flag and points at `output: "patch"`. The grant is
+reported by `review_doctor` and `review_list` as `writes: "aimesh"` (granted) or `writes: "agent"` (not),
+so a calling agent learns who performs writes before it asks, and a write-capable server also announces
+itself on stderr at launch. The Manager applies no further configured ceiling to this surface: the launch
+grant is the ceiling.
 
-```yaml
-surfaces:
-  defaultModeBySurface:
-    mcp: report            # the shipped ceiling
-  capabilitiesBySurface:
-    mcp: [allowRemediate]  # what RAISES it to apply
-```
-
-`--allow-remediate` grants exactly that capability in the server process's own config snapshot. The
-write-authority ceiling is then computed **from the config** (`config.SurfaceCeiling`), which is the point:
-a flag that reached above the ceiling would make the ceiling a default rather than a ceiling. The Manager
-resolves the run against the same snapshot, so the tool list, the per-call refusal and the write itself
-cannot disagree. A write-capable server also announces itself on stderr at launch.
-
-**Gate 2 — the caller, per call.** Every call must pass `allowWrite: true`, literally. Omitted or `false` is
-a field-addressed teaching error **before any spend**, carrying a corrected example call.
+**Gate 2 — the caller, per call.** Every `apply` must pass `allowWrite: true`, literally. Omitted or `false`
+is a field-addressed teaching error **before any spend**, carrying a corrected example call. `patch` needs
+neither gate.
 
 > **`allowWrite` is not human consent.** The value is supplied by the **calling model**, in the same call it
 > authorizes — and the teaching error above even shows the corrected call with `"allowWrite": true` in it,
 > because refusing to say what a well-formed call looks like would only make the model guess. What the field
 > honestly provides is an **auditable declaration** that this request was a write request, and an **argument
 > a host can show a human** before forwarding the call — a per-call human prompt lives in the MCP host, not
-> here. The enforcement a model cannot supply is the operator's **launch flag**, the **config capability** it
-> grants, and **root confinement** established before any request existed. An out-of-band approval token
+> here. The enforcement a model cannot supply is the operator's **launch flag** and the **scope
+> confinement** every call is judged against. An out-of-band approval token
 > (issued to a human, presented by the call, verified by the server) would be genuine per-call consent; it is
 > a legitimate future design and is deliberately not built here.
 
 #### One form: `fromRun`
 
-> **BREAKING CHANGE.** The full-cycle form — `review_remediate {workspace}`, which reviewed and wrote in
-> one call — **has been removed from the MCP surface.** It is refused with a teaching error naming the
-> two-step path. The CLI is unaffected and keeps its full cycle.
->
-> **Why.** Under `2026-07-28` stdio a cancelled request may receive *no further message at all*. A
-> one-call review-and-write is the only write shape whose caller can therefore be left holding
-> **nothing**: the run it would need in order to find out what happened is a run only that same,
-> cancelled response would have named. `fromRun` closes that with no new parameter, because it is not a
-> key the caller invents — it is a value the caller **already received, in a completed response, before
-> the write request was ever sent**, and cancellation cannot retract a message already delivered. It is
-> also the specification's own prescribed pattern: state spanning requests "**MUST** be referenced by an
-> explicit identifier the client passes on each request" (`basic/index`).
->
-> **The migration is two calls instead of one**: `review_report {workspace}` → `review_remediate
-> {fromRun: <runId>}`. Nothing is lost — the accepted set becomes readable *before* anything is written,
-> which was already the documented preferred path.
->
-> The rule is **era-neutral**: it applies on the legacy revision too, because two write shapes on one
-> surface would be worse than the breaking change.
+`review_remediate` has one form: a completed `review_report` run's `runId` as `fromRun`, plus the
+**absolute `workspace` that run reviewed**. There is no one-call review-and-write on MCP (the CLI keeps its
+full cycle).
+
+**Why two calls.** Under `2026-07-28` stdio a cancelled request may receive *no further message at all*. A
+one-call review-and-write would be a write shape whose caller can be left holding **nothing**. `fromRun` is
+not a key the caller invents — it is a value the caller **already received, in a completed response,
+before the write request was ever sent**, and cancellation cannot retract a message already delivered. It
+is the specification's own prescribed pattern: state spanning requests "**MUST** be referenced by an
+explicit identifier the client passes on each request" (`basic/index`). The rule applies on both eras.
 
 ```jsonc
-// The only write form on this surface.
-{ "fromRun": "run-9f3c…", "output": "patch", "allowWrite": true }
+// The diff, on any server
+{ "fromRun": "run-9f3c…", "workspace": "/abs/project", "output": "patch" }
+// The write, on a server launched with --allow-writes
+{ "fromRun": "run-9f3c…", "workspace": "/abs/project", "output": "apply", "allowWrite": true }
 ```
 
-Adjudication is paid **once**, and the accepted set is readable by a human *before* anything is written —
-the checkpoint the double opt-in only gestures at. There is exactly **one** write path in this server.
+Adjudication is paid **once**, and the accepted set is readable by a human *before* anything is written.
+There is exactly **one** write path in this server.
 
-The accepted set, the panel and the authority manifest all come from the source run.
-`profile`, `panel` and `authority` are therefore meaningless there, and the schema forbids them — so the
-server **refuses** them, naming the parameter, rather than parsing and dropping them. Each names a
-governance input (which models judged, which panel produced the accepted set, which intent it was judged
-against); accepting the call and ignoring the parameter would tell the caller the opposite of what
-happened. Run a fresh `review_report` with the panel and authority you want, then apply *that* run.
-A `workspace` beside `fromRun` is refused for the same reason: the workspace is the source run's, and
-re-naming it would let a write land somewhere the accepted set was never judged against.
+**The workspace is required, and it is checked.** It locates the source run's record, and it must be the
+tree that run judged: a workspace the run did not review is refused with
+`reasonCode: "source_run_workspace_mismatch"` before anything is written. It is also the call's
+[scope](#scope-is-declared-per-call), so the same absolute-path and ceiling rules apply, and `roots` may add
+directories.
+
+The accepted set, the panel and the authority manifest all come from the source run. `panel` and
+`authority` are therefore meaningless there, and the schema forbids them — so the server **refuses** them,
+naming the parameter, rather than parsing and dropping them. Each names a governance input (which panel
+produced the accepted set, which intent it was judged against); accepting the call and ignoring the
+parameter would tell the caller the opposite of what happened. Run a fresh `review_report` with the panel
+and authority you want, then apply *that* run.
 
 #### `select` — selective apply, keyed on the fingerprint
 
 `select: ["sha1:…", …]` narrows the write to the accepted findings you name. Omit it and the whole
-accepted set is applied, exactly as before.
+accepted set is applied.
 
 **The selector is the HOST-COMPUTED `fingerprint`, never a finding's `id`.** Every finding in
 `review_report`'s result carries both. The `id` is model-authored and is renumbered by the run; keying
@@ -1052,9 +1160,9 @@ only way a model changes what a fingerprint names is by proposing a **different 
 
 ```jsonc
 // 1. read the accepted findings and their fingerprints
-{ "workspace": "/abs/path" }                       // → review_report
+{ "workspace": "/abs/path", "panel": { … } }        // → review_report
 // 2. write exactly two of them
-{ "fromRun": "run-9f3c…", "output": "apply", "allowWrite": true,
+{ "fromRun": "run-9f3c…", "workspace": "/abs/path", "output": "apply", "allowWrite": true,
   "select": ["sha1:1a2b…", "sha1:9f8e…"] }         // → review_remediate
 ```
 
@@ -1095,9 +1203,10 @@ as one.
 **A `fromRun` handle outlives the registry.** The in-memory entry is the fast path, not the only one: on a
 miss — an evicted run, or one from before a restart — the server resolves the handle from the source run's
 **own directory** (`decisions/decision-set.json`), which is the same file, written by the same run, that
-ACP reads. The handle is **verified, not trusted**: the `runId` names a directory that must be an immediate
-child of this server's artifact directory both as spelled and after symlink resolution, and must carry a
-decision set whose recorded run id is that directory's own name. Every other outcome — a fabricated id, a
+ACP reads. The handle is **verified, not trusted**: it is looked up only among the run-record locations of
+the named `workspace` (its `.aimesh/` state directory when it has one, else the temp run directory); the
+`runId` must name an immediate child of that location both as spelled and after symlink resolution, and
+must carry a decision set whose recorded run id is that directory's own name. Every other outcome — a fabricated id, a
 path, a traversal, a run that recorded no set (a remediation does not) — is the same
 `reasonCode: "unknown_run_id"`, so a caller learns "not a run of mine" and nothing else.
 
@@ -1114,7 +1223,7 @@ call return the original receipt across a restart too; it was considered and **n
 durable record on a write path is where a wrong record becomes a false success — and an honest halt costs a
 caller a round trip, while a wrong receipt costs it the truth about its own files.
 
-`output: "apply"` needs the ceiling to be `apply`; `output: "patch"` produces the diff artifact and changes
+`output: "apply"` needs `--allow-writes`; `output: "patch"` produces the diff artifact and changes
 nothing. `inlineWorkspace` is refused on this tool — there is nothing real to write to — and a `fromRun`
 naming an inline review halts with `inline_workspace_not_remediable`.
 
@@ -1206,19 +1315,17 @@ ambiguity.
 #### Partial refusal: a protected-path target does not discard the run
 
 **Nothing is ever written to a protected path.** meshcore's write denylist (`.env*`, `.git/`, agent client
-config, `~/.aimesh/**`) is non-overridable and stays that way. What changed is what happens to *the other
-findings*.
+config, `~/.aimesh/**`) is non-overridable. The question is what happens to *the other findings*.
 
-A protected-path target used to **halt** the whole remediation. Nothing was written, which was right — but
-every other accepted finding was discarded with it, and because the halt happens at *authorization* time, a
-caller who did not already know which finding was protected had to pay for a run to discover it. The
-workaround that invites is hand-editing the patch, which abandons containment, rollback and the receipt in
-one step.
+Halting the whole remediation would discard every other accepted finding with it, and because the refusal
+happens at *authorization* time, a caller who did not already know which finding was protected would pay
+for a run to discover it — inviting hand-edits to the patch that abandon containment, rollback and the
+receipt in one step.
 
-So a protected-path target is now a **recorded refusal**: the finding is marked not-applied with
+So a protected-path target is a **recorded refusal**: the finding is marked not-applied with
 `applyRefusalReason: "protected_path"`, the remaining findings are applied, and the refusal is surfaced as a
-first-class fact. That last clause is load-bearing. The objection the halt answered was to a *silent* skip
-letting a run report success — so this refusal is not silent anywhere:
+first-class fact. That last clause is load-bearing: a *silent* skip would let a run report success — so this
+refusal is not silent anywhere:
 
 ```jsonc
 {
@@ -1295,9 +1402,11 @@ The double opt-in and the annotations are **hints that coordinate with the host'
 are *not* an authorization boundary against a confused or hostile client model, and `allowWrite` is supplied
 by that model rather than by a human (see the note under Gate 2). What holds regardless:
 
-- **root confinement** — a path outside the trusted roots is refused before any spend;
+- **the launch grant** — without `--allow-writes` no call can reach `output: "apply"`;
+- **scope confinement** — a path outside what the call declared, or outside the `--root` ceiling, is refused
+  before any spend;
 - **the non-overridable write denylist** — `~/.aimesh/**`, app config dirs, MCP client config, `.git/config`,
-  `.env*`, key-material patterns, enforced at the write layer, inside a trusted root or not;
+  `.env*`, key-material patterns, enforced at the write layer, inside a declared path or not;
 - **the write-path rule** — every applied hunk must trace to evidence in the workspace copy, so a finding
   supported by authority text alone is reportable and never applyable;
 - **the shown-files gate, per hunk** — the host only edits files a reviewer was actually shown, a `fromRun`
@@ -1321,11 +1430,18 @@ See [security.md](security.md#5-remediation-over-mcp-what-the-double-opt-in-does
     "idempotencyKey": "review-2026-07-28" } }
 // ← { runId: "run-9f3c…", state: "complete", counts: {accepted: 3, quarantined: 1}, … }
 
-// 2. read the accepted set, decide, then apply it
+// 2a. on any server: get the diff and apply it with your own tools
 { "name": "review_remediate", "arguments": {
-    "fromRun": "run-9f3c…", "output": "apply", "allowWrite": true } }
+    "fromRun": "run-9f3c…", "workspace": "/path/to/project", "output": "patch" } }
+// ← resource_link aimesh://run/run-4a1b…/patch; receipt: { patchSha256: "sha256:…", committed: false }
+
+// 2b. on a server launched with --allow-writes: let aimesh apply it
+{ "name": "review_remediate", "arguments": {
+    "fromRun": "run-9f3c…", "workspace": "/path/to/project", "output": "apply", "allowWrite": true } }
 // ← receipt: { intended: […], applied: […], files: ["…"], committed: true, patchSha256: "sha256:…" }
 ```
+
+`review_doctor`'s `writes` says which of 2a and 2b this server supports.
 
 ## Known gaps
 
@@ -1333,13 +1449,6 @@ Stated here rather than left for a reader to discover. None of these weakens a g
 every one of them is either a *declaration* that is looser than the enforcement, a bound that is
 deliberate, or coverage that has not been extended to the second server — but each is a real difference
 between what this page describes and what a client will observe.
-
-Three rows that used to live here are gone because the gaps are closed: the **`roots/list` round trip** is
-now live (the transport issues server→client requests; see [Trusted roots](#trusted-roots-are-mandatory)),
-**`resources/*`** is implemented on both servers (see [Fetching what a run produced](#fetching-what-a-run-produced-resources)),
-and **send-time output-schema conformance** now exists as the opt-in `--strict-schema` (see
-[`--strict-schema`](#--strict-schema-the-same-check-opt-in-at-send-time)). What remains of each is the
-narrower, honest residue in the table below.
 
 | Gap | What is true today |
 |---|---|
@@ -1351,9 +1460,9 @@ narrower, honest residue in the table below.
 | `resources/*` paging and change notifications | `resources/list` returns the whole set in one page with no cursor, `resources/templates/list` is declared-and-empty, and neither `subscribe` nor `listChanged` is offered (both are declared `false`). A client learns that a finished run published something by re-listing. The set is small by construction — a handful of artifacts per retained run — but this is a real difference from `tools/list`, which does honor a cursor. |
 | Resource retention follows the run registry | A run's resources are dropped when the run is evicted (bounded by count and TTL, in memory), so a `resource_link` handed out earlier stops resolving at the same moment `review_run_result` stops answering. That is deliberate — a link the server can no longer explain is worse than no link — but it means a patch must be fetched within the retention window. |
 | Send-time schema validation is opt-in | `--strict-schema` / `AIMESH_MCP_STRICT_SCHEMA=1` is **off by default**, because it costs a schema walk per call. With it off, a payload that matched no branch would fail the build rather than the call — still the right trade for a hot path, but still not a runtime guarantee unless the operator asks for one. |
-| Windows | Every MCP path rule inherits the platform matrix in [security.md](security.md#7-platform-matrix--where-each-guarantee-actually-holds). The MCP root intersection's case-folding branch is tested by substitution on any platform; its separator handling is not, and nothing here has run against a real NTFS volume. |
+| Windows | Every MCP path rule inherits the platform matrix in [security.md](security.md#7-platform-matrix--where-each-guarantee-actually-holds). The degenerate-root rule's Windows branch and the `%VAR%` path-expansion grammar are tested by substitution on any platform; separator handling in the per-call scope has not run against a real NTFS volume here. |
 | `waitSeconds` schema `default` | Declared as a literal `25`; it does not track an operator's `--wait-seconds`. The *effective* default is the flag's value. |
-| Run-level call budget | Only the wall-clock bound (`--turn-timeout`) exists. There is no "maximum total provider calls per run" — spend is bounded by concurrency, lifetime run count, panel size and elapsed time. |
+| Run-level call budget | Only the wall-clock bound (`--turn-timeout`) exists. There is no "maximum total provider calls per run" — spend is bounded by `maxParallel`, panel size and elapsed time. |
 | Registry durability, and what it costs `taskId` | In-memory only; runs do not survive the transport closing or the process restarting. See [Run registry](#run-registry). This is also the honest limit on the tasks extension: the extension requires that a server not return a `CreateTaskResult` until the task is durably created, and ours is durable **for the life of the process** and no longer. A `taskId` presented to a restarted server yields `-32602` (unknown task), not a silently-empty one — which is the right refusal, but it is a refusal, and a host that persists task handles across its own restarts will meet it. The durable record of a run is the run directory on disk, not the registry. |
 | The `fromRun` **source-run guard** is in memory, so a second apply reports differently after a restart | `review_remediate {fromRun}` itself survives: the handle is resolved from the source run's own `decisions/decision-set.json` when the registry no longer holds it, so an evicted or pre-restart run applies exactly as it does on ACP. What does **not** survive is the guard that answers a *replay* with the original receipt. Across a restart the second call is refused by the durable base-hash pins instead, as a `stale_decision_set` halt with nothing written — the same guarantee, a different report, and a client must branch on both. An on-disk "already applied" marker would unify them and was deliberately not built: a durable record on a write path is where a wrong record becomes a false success. See [One form: `fromRun`](#one-form-fromrun). |
 | `-32021` for `tasks/*` without the extension, where the extension says `-32003` | A **declared deviation with a MUST on each side**, not an oversight. The tasks extension says servers "**MUST** return this error [`-32003`] for non-declaring clients issuing `tasks/get`, `tasks/update`, and `tasks/cancel` requests." The core base protocol says a server "**MUST** return a `MissingRequiredClientCapabilityError` (`-32021`) whose `data.requiredCapabilities` lists the missing capabilities" when a request needs an undeclared capability — and separately that, of the `-32000..-32019` range `-32003` belongs to, "receivers **MUST NOT** assume any specific meaning for these codes", which makes `-32003` semantically inert to a conforming client. We emit `-32021` with `data.requiredCapabilities`. This is our declared behavior, asserted as such at the test site, and it is not a conformance claim about the extension. |
@@ -1368,44 +1477,49 @@ Every run-forming capability is expressible on all three surfaces with identical
 
 | Capability | CLI | ACP | MCP |
 |---|---|---|---|
-| Profile selection | `--profile` | `_meta.reviewmesh.profile` | `profile` |
-| Ad-hoc panel composition | `--reviewer` ×N | `_meta.reviewmesh.panel[]` | `panel: {reviewers[], …}` |
-| Per-role lane override | `--set role.adapter=`/`role.model=` | *(via the profile)* | `panel: {cross_check, verifier, author_remediator}` |
+| Configuration source | saved configuration (`~/.aimesh`, project `.aimesh/`): profiles, catalog, adapter paths, policy | launch arguments only (`--adapter`, `--allow-writes`, `--root`) | launch arguments only (`--adapter`, `--allow-writes`, `--root`) |
+| Adapters available | configured adapters | adapters named with `--adapter` / `AIMESH_ADAPTERS` | adapters named with `--adapter` / `AIMESH_ADAPTERS` |
+| Panel | `--profile`, or `--reviewer` ×N | `_meta.reviewmesh.panel {reviewers[], author_remediator, cross_check?, verifier?}` (required) | `panel {reviewers[], author_remediator, cross_check?, verifier?}` (required) |
+| Per-role lanes | `--set role.adapter=`/`role.model=` | `panel.{author_remediator, cross_check, verifier}` | `panel.{author_remediator, cross_check, verifier}` |
+| Model identifiers | catalog keys or model arguments | passed verbatim to the adapter | passed verbatim to the adapter |
+| Readiness before spend | `doctor --probe-deep` (CLI) | `_meta.reviewmesh.verifyReadiness` | `verifyReadiness` |
 | Authority documents | `--authority`, `--authority-hash`, `--authority-manifest` | `_meta.reviewmesh.authority[]` | `authority[]` |
-| Output mode | `--report`/`--patch`/`--apply` | `mode` (capped by the surface ceiling) | `review_report` (report) / `review_remediate` `output` |
-| Apply the set you inspected (from-run write) | *(the one-turn full cycle: the human is the caller, is shown the run directory as the run starts, and has no response to lose)* | `session/prompt {mode: "apply", fromRun, select}` — reads the source run's **on-disk** decision set | `review_remediate {fromRun, select}` — the in-memory registry entry, falling back to the same **on-disk** decision set when it is gone |
+| Output mode | `--report`/`--patch`/`--apply` | `mode` (apply needs `--allow-writes` and a writable host) | `review_report` (report) / `review_remediate` `output` (apply needs `--allow-writes`) |
+| Apply the set you inspected (from-run write) | *(the one-turn full cycle: the human is the caller, is shown the run directory as the run starts, and has no response to lose)* | `session/prompt {mode: "apply", fromRun, select}` — reads the source run's **on-disk** decision set | `review_remediate {fromRun, workspace, select}` — the in-memory registry entry, falling back to the same **on-disk** decision set when it is gone |
 | Selective apply | `--select` ×N (narrows the run's own adjudication) | `select[]` (narrows the **stored** set on a `fromRun` turn; the turn's own adjudication otherwise) | `select[]` (narrows the **stored** set) |
-| Workspace | positional path (the human typed it — that *is* the consent) | `workspace` / session `cwd` / `inlineWorkspace`, judged against `--root` | `workspace` / `inlineWorkspace`, judged against `--root` |
+| Workspace | positional path (the human typed it — that *is* the consent) | absolute `workspace` / session `cwd` / `inlineWorkspace`, plus `_meta.reviewmesh.roots[]`, inside the `--root` ceiling | absolute `workspace` / `inlineWorkspace`, plus `roots[]`, inside the `--root` ceiling |
 | Turn budget | *(a foreground process the user can interrupt)* | `--turn-timeout` | `--turn-timeout` |
 | Machine projection | `review --json` | the prompt response `_meta.reviewmesh` | `structuredContent` |
 
-The **write-authority ceiling** is the deliberate per-surface difference: `cli: apply`, `ci: report`,
-`acp: report`, `mcp: report` **+ the `allowRemediate` capability**. The capability exists on every surface;
-only the default exposure differs by risk, and every one of them is config-visible.
+The **write authority** differs by surface on purpose: the CLI surfaces read `surfaces.defaultModeBySurface`
+from saved configuration (`cli: apply`, `ci: report`, raised by the `allowRemediate` capability), while ACP
+and MCP write only when launched with `--allow-writes` — and always supply the diff.
 
 **exploremesh:**
 
 | Capability | CLI | ACP | MCP |
 |---|---|---|---|
 | Mode + mode params | `--mode`, `--artifact`, `--options`/`--criterion`, `--target`/`--unit`/`--horizon` | `_meta.exploremesh.{mode,artifact,options,compareCriteria,target,unit,horizon}` | `explore` (mode + its mode-specific params) |
-| Profile + count | `--profile`, `--count` | `_meta.exploremesh.{profile,count}` | `panel: {profile, count}` |
-| Ad-hoc panel composition | `--explorer` ×N + `--collator` | `_meta.exploremesh.panel {explorers[], collator}` | `panel: {explorers[], collator}` |
+| Configuration source | saved configuration: profiles, adapter locations, ACP instances | launch arguments only (`--adapter`) | launch arguments only (`--adapter`) |
+| Panel | `--profile` + `--count`, or `--explorer` ×N + `--collator` | `_meta.exploremesh.panel {explorers[], collator}` (required) | `panel {explorers[], collator}` (required) |
+| Readiness before spend | `doctor --probe-deep` (CLI) | `_meta.exploremesh.verifyReadiness` | `verifyReadiness` |
 | Prior context | `--prior-context` | `_meta.exploremesh.priorContext` | `priorContext` |
 | Parallelism bound | `--max-parallel` | `_meta.exploremesh.maxParallel` | `maxParallel` |
 | Price it without running it | `--dry-run` | `_meta.exploremesh.dryRun` → `status: "planned"` + `shape` | `dryRun` → `dryRun: true` + `shape` |
 | Run capture | `--dump-run` | `_meta.exploremesh.dumpRun` | on by default (`--no-capture` to disable) |
 
-Only two kinds of per-surface difference are allowed, and both are explicit:
+Only three kinds of per-surface difference are allowed, and all are explicit:
 
 1. **Transport mechanics** — encodings (flags vs `_meta` vs tool params), the job shape and `waitSeconds`
    (MCP only), framing, and error carriers (exit codes / JSON-RPC `-32xxx` / `isError`). The same taxonomy
    payload rides all of them.
-2. **Write-authority policy ceilings** — per-surface mode defaults are deliberate, config-visible policy.
-   exploremesh has no write surface at all, so this reduces to nothing there; for reviewmesh it is the
-   `mcp: report` ceiling plus the `allowRemediate` capability described above.
+2. **Configuration source** — the CLI reads saved configuration; ACP and MCP read only their launch
+   arguments, so a panel is always composed per call and model identifiers are passed through verbatim.
+3. **Write authority** — the CLI's config-visible ceilings versus the agent surfaces' `--allow-writes`
+   launch grant. exploremesh has no write surface at all, so this reduces to nothing there.
 
-The **per-invocation vs launch** split in the last row of each table is not a third kind of difference;
-it is the first one applied consistently. `--verify-cmd` decides what this server EXECUTES. On the CLI the person typing the flag is the operator, so the consent arrives with the
+The **per-invocation vs launch** split for grants such as `--verify-cmd` is not a further kind of
+difference; it is the first one applied consistently. `--verify-cmd` decides what this server EXECUTES. On the CLI the person typing the flag is the operator, so the consent arrives with the
 request. On ACP and MCP the caller is a peer process or a model, so the consent has to **precede** the
 request — otherwise the party the grant protects against is the party issuing it. Same capability, same
 fail-closed semantics, different point in time at which a human agreed to it.
@@ -1429,7 +1543,9 @@ protocol for running a turn, not a configuration surface. The invariant governs 
       {"name": "operational burden", "direction": "lower_is_better", "weight": 1},
       {"name": "runs on one box", "role": "filter"}
     ],
-    "panel": {"profile": "deep", "count": 3},
+    "panel": {"explorers": [{"adapter": "claude-code", "model": "sonnet"},
+                            {"adapter": "codex-cli", "model": "gpt-5"}],
+              "collator": {"adapter": "claude-code", "model": "opus"}},
     "waitSeconds": 25,
     "idempotencyKey": "datastore-compare-2026-07-28"
   } }
@@ -1438,7 +1554,7 @@ protocol for running a turn, not a configuration surface. The invariant governs 
 // ← result (inline if it finished inside 25s, else {runId, state:"running"})
 ```
 
-If it came back `running`, poll `review_run_status` with the `runId`, then `review_run_result`. If a *request* was lost
+If it came back `running`, poll `explore_run_status` with the `runId`, then `explore_run_result`. If a *request* was lost
 (a client-side timeout, a retry), re-issuing the **same** `idempotencyKey` returns that run rather than
 starting a second one. If the *connection* drops the server exits and the run is cancelled with it — the
 idempotency key then names nothing, and the surviving evidence is the run directory on disk.

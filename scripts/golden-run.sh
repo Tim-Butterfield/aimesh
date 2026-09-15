@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# golden-run.sh — reviewmesh "behavior unchanged" golden equivalence gate (aimesh P0.4).
+# golden-run.sh — reviewmesh "behavior unchanged" golden equivalence gate.
 # Runs a deterministic fake-adapter review, normalizes volatile fields, and diffs the key
 # artifacts against a stored baseline (testdata/golden-run/). `GOLDEN_UPDATE=1` (re)captures.
 #

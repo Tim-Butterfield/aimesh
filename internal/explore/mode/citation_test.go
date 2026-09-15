@@ -8,7 +8,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// TestMapCollatorPrompt_TeachesCitationVocabulary pins the C1 prompt contract: the Map collator prompt
+// TestMapCollatorPrompt_TeachesCitationVocabulary pins the citation prompt contract: the Map collator prompt
 // LABELS each primary response with its `envelope#k` alias, lists the citable aliases explicitly, and
 // tells the collator that `sources` must carry those aliases. A prompt that merely said "cite your
 // sources" would give the model nothing to cite — the same lesson the rendered field names came from.

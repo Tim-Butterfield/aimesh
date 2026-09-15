@@ -189,15 +189,15 @@ const (
 // ApplyRefusalProtectedPath is the STABLE MACHINE code for a finding whose target resolves to a
 // PROTECTED PATH (meshcore's non-overridable write denylist: `.env`, `.git/`, agent client config,
 // `.aimesh/`, …). The denylist itself is untouched and non-overridable — nothing is ever written
-// there. What this value records is that ONE such finding no longer discards the whole run: it is
+// there. What this value records is that ONE such finding does not discard the whole run: it is
 // marked not-applied with this reason, the remaining findings are applied, and the refusal is
-// surfaced as a first-class fact on every surface (D8-C; design §13.2/§13.4).
+// surfaced as a first-class fact on every surface.
 //
 // It is deliberately a value in the SAME enum as `authority_only` / `no_workspace_evidence` rather
 // than a new concept — the same field, the same receipt row, the same renderer. What differs is
 // the coarse signal it drives: those two describe findings that were never eligible to be
 // applied and still exit 0; this one describes a finding the model DID target at a path we will
-// not let it touch, so the run must not read as unqualified success (§13.4.3).
+// not let it touch, so the run must not read as unqualified success.
 const ApplyRefusalProtectedPath = "protected_path"
 
 // ApplyRefusal is one finding refused because its target is a protected path. It is keyed on the
@@ -219,7 +219,7 @@ type ApplyRefusal struct {
 
 // ApplySelection is the record of a SELECTIVE APPLY: which host-computed fingerprints a caller
 // asked to narrow the write set to, which of them named a finding in the run's accepted set, and
-// which named nothing (design §13.3, decision D8-A).
+// which named nothing.
 //
 // THE KEY IS THE HOST-COMPUTED FINGERPRINT AND NEVER THE MODEL-AUTHORED `Finding.ID`. That is the
 // entire security content of selective apply. A model-authored identifier is model-controlled, so
@@ -246,7 +246,7 @@ type ApplySelection struct {
 // which means "no narrowing: apply the whole accepted set").
 func (s *ApplySelection) Selective() bool { return s != nil && len(s.Requested) > 0 }
 
-// Apply outcomes — the discriminator carried on every WRITE-PRODUCING result (design §13.4.1).
+// Apply outcomes — the discriminator carried on every WRITE-PRODUCING result.
 // Its absence means "not a write run"; a consumer that ignores it is less informed but never
 // wrong, because the coarse not-clean signal each surface carries (MCP `isError`, the CLI exit
 // code, ACP `stopReason`) is keyed on `counts.refused > 0` and not on this field.
@@ -767,10 +767,10 @@ type RunOutcome struct {
 	// patch/apply run "not cleanly successful" on every surface: the CLI exits 7, ACP answers
 	// `stopReason: "refusal"`, MCP sets `isError: true`. Nothing was written to any of these
 	// paths — the denylist is non-overridable — and every OTHER accepted finding was applied
-	// normally, which is the whole point of recording the refusal instead of halting (D8-C).
+	// normally, which is the whole point of recording the refusal instead of halting.
 	Refusals []ApplyRefusal
 	// Selection is what a narrowing `select` did on this run's FIRST write window — requested,
-	// matched and unmatched host-computed fingerprints (D8-A). nil when no selection was supplied.
+	// matched and unmatched host-computed fingerprints. nil when no selection was supplied.
 	// It rides the outcome so the CLI and the ACP surface report the same three lists the receipt
 	// records, rather than each re-deriving a subset of them.
 	Selection *ApplySelection
@@ -866,6 +866,9 @@ type RunShape struct {
 	// Lanes is every OTHER resolved role (author_remediator, cross_check, verifier), sorted by
 	// role name. A role ABSENT from this list is a call this run will not make.
 	Lanes []ShapeLane `json:"lanes"`
+	// SkippedSteps names the optional steps (cross_check, verifier) this run will not take because
+	// no seat was assigned to them, so a thinner review is never mistaken for a full one.
+	SkippedSteps []string `json:"skippedSteps,omitempty"`
 	// MaxParallel is the requested parallelism bound; 0 runs every seat at once. It changes how
 	// long the run takes and never how much it costs.
 	MaxParallel int `json:"maxParallel"`
@@ -908,6 +911,18 @@ type RunShape struct {
 	// run would be looking at, which is the other half of the same question and the half a
 	// reader cannot infer. See ShapePayload.
 	Payload ShapePayload `json:"payload"`
+}
+
+// SkippedOptionalSteps lists, in execution order, the optional steps a resolved plan does not
+// take: cross_check and verifier run only when a lane is assigned to them.
+func SkippedOptionalSteps(plan RunPlan) []string {
+	var out []string
+	for _, role := range []Role{RoleCrossCheck, RoleVerifier} {
+		if _, ok := plan.Lanes[role]; !ok {
+			out = append(out, string(role))
+		}
+	}
+	return out
 }
 
 // ShapePayload is the workspace content a run would put in front of its reviewers, disclosed

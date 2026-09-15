@@ -48,8 +48,8 @@ packages of the one application, which is also why refactoring across them costs
 
 The dependency direction is one-way and enforced by `make boundary-check` (part of the standard gate,
 which CI runs on every push and pull request): **the domains import meshcore; meshcore imports neither; the two domains never
-import each other.** That last rule used to be enforced by the module graph as well; inside one module
-the static check is the only thing holding it, which is why it is not optional (see
+import each other.** Inside one module the static check is the only thing holding that last rule,
+which is why it is not optional (see
 [CONTRIBUTING.md](CONTRIBUTING.md#the-meshcore-boundary)).
 
 ## Quick start
@@ -59,9 +59,11 @@ Requires **Go 1.26+** .
 Both domains run real model CLIs you have installed and authenticated yourself (Claude Code, Codex,
 Ollama, …); there is no demo adapter. A shell adapter finds its CLI on `PATH` by name and needs no
 configuration to be used. **Most runs are composed in the call itself** — a person at a shell, or an
-agent driving `aimesh` over MCP or ACP, names the panel per run and never touches a config file. A
-saved profile is the optional shortcut that lets a no-flag run mean something; a fresh install ships
-the `default` profile **unconfigured**, and `doctor` says so honestly until you save one.
+agent driving `aimesh` over MCP or ACP, names the panel per run and never touches a config file. On
+the CLI a saved profile is the optional shortcut that lets a no-flag run mean something; a fresh
+install ships the `default` profile **unconfigured**, and `doctor` says so honestly until you save
+one. The MCP and ACP servers need no setup at all — see
+[Pointing an MCP or ACP host at it](#pointing-an-mcp-or-acp-host-at-it).
 
 **1. Install `aimesh`.** There is one binary; `review` and `explore` are subcommands of it. Prebuilt
 archives for macOS and Linux (and an experimental Windows one) are on the
@@ -79,9 +81,9 @@ go install ./cmd/aimesh
 `go env GOBIN`, falling back to `$(go env GOPATH)/bin` when `GOBIN` is unset — print the destination
 with `go env GOBIN GOPATH`.
 
-If you have `make`, `make install` runs that same `go install` and additionally removes the
-superseded `reviewmesh` and `exploremesh` binaries left by earlier versions. That cleanup is its only
-extra behaviour, so skip it freely on a fresh clone.
+If you have `make`, `make install` runs that same `go install` and additionally removes stray
+`reviewmesh` and `exploremesh` binaries from the install directory. That cleanup is its only extra
+behaviour, so skip it freely on a fresh clone.
 
 **Put the install directory on your `PATH`** if it is not already, then confirm with
 `aimesh --version`:
@@ -117,7 +119,7 @@ aimesh explore run "evaluate approach X" --criteria "correctness,risk" --dry-run
 The adapter must be one aimesh defines (a shell recipe, or an ACP instance you added); a model that is
 not a catalog key is handed to the adapter verbatim and reported as `passthrough`. Over MCP the same
 composition is the `panel` argument; over ACP it is `_meta.<domain>.panel` — see
-[docs/mcp.md](docs/mcp.md#panel-select-or-compose) and [docs/acp.md](docs/acp.md). Drop `--dry-run` to run.
+[docs/mcp.md](docs/mcp.md) and [docs/acp.md](docs/acp.md). Drop `--dry-run` to run.
 
 **Before your first run, launch each provider CLI once yourself** and answer whatever it asks (folder
 trust, login, an update nag). An adapter deliberately never answers a first-run prompt on your behalf, so
@@ -169,15 +171,20 @@ aimesh explore run --purpose "evaluate approach X" --criteria "correctness,risk"
 - **explore** — `aimesh explore run|export|list|doctor|setup|acp|mcp` — see **[docs/explore.md](docs/explore.md)**
 - **shared** — `aimesh init`, `aimesh doctor`, `aimesh agents-md`
 
-Configuration is CLI-only: `aimesh review setup` and `aimesh explore setup`. There is no web
-workbench — it was removed rather than kept as a second, parallel way to author the same
-configuration.
+### CLI vs MCP/ACP configuration
+
+- **CLI** — reads saved configuration: `aimesh review setup` and `aimesh explore setup` write profiles,
+  the model catalog and recorded adapter paths. There is no web workbench.
+- **MCP and ACP** — read **no** aimesh configuration. Their adapters, write grant and optional root
+  ceiling come only from the arguments (or environment) the host starts them with, and every call
+  composes its own panel and declares its own absolute paths. A workspace's `.aimesh/` still receives
+  run records, but is never read as configuration.
 
 **Driving it from an agent.** `aimesh agents-md` prints the guide an agent should read before its
 first call — the same document the `agents_md` MCP tool returns, so an agent arriving by either route
-gets identical guidance. It covers composing a panel per call, pricing it with a dry run, and how to
-read agreement, identity and scope honestly. [Pointing an MCP host at it](#pointing-an-mcp-host-at-it)
-below shows the server entry.
+gets identical guidance. It covers host setup, composing a panel per call, pricing it with a dry run,
+and how to read agreement, identity and scope honestly.
+[Pointing an MCP or ACP host at it](#pointing-an-mcp-or-acp-host-at-it) below shows the server entry.
 
 ## Development
 
@@ -196,7 +203,7 @@ Individual targets: `make build-all`, `make test-all`, `make boundary-check` (en
 - **[docs/configuration.md](docs/configuration.md)** — config files, precedence, adapters/models, per-app profiles, surface ceilings, environment variables
 - **[docs/adapters.md](docs/adapters.md)** — the adapter contract, per-provider recipes, and how to add one
 - **[docs/model-identity.md](docs/model-identity.md)** — evidence tiers and identity capture
-- **[docs/acp.md](docs/acp.md)** — the ACP surface in both apps: method mapping, trusted roots, `_meta` contracts
+- **[docs/acp.md](docs/acp.md)** — the ACP surface in both apps: method mapping, launch flags, per-turn scope, `_meta` contracts
 - **[docs/mcp.md](docs/mcp.md)** — the MCP surface in both apps: tools, job shape, error model, surface parity
 - **[docs/prompts.md](docs/prompts.md)** — reviewmesh's prompt and result contracts, and the authority/context block
 - **[docs/security.md](docs/security.md)** — what leaves the machine, containment, remediation gating
@@ -208,19 +215,52 @@ Individual targets: `make build-all`, `make test-all`, `make boundary-check` (en
 
 ## Status
 
-meshcore is intentionally **not published** as a standalone module yet: its only consumers are the two in-repo apps, so its import path stays internal to the monorepo until there is a concrete external consumer and a stable API. Both apps now ship four surfaces: a CLI, an **ACP server** (`aimesh review acp` / `aimesh explore acp`, so an ACP-capable IDE can drive one run over stdio), an **MCP server** (`aimesh review mcp` / `aimesh explore mcp`, so an MCP-speaking agent can drive runs as tools — see **[docs/mcp.md](docs/mcp.md)**). The three run-capable surfaces are held to a **surface-parity invariant**: every run-forming capability is expressible on all of them with identical fail-closed semantics, and the only deliberate differences are transport mechanics and the config-visible per-surface write-authority **ceilings** (`cli: apply`, `ci: report`, `acp: report`, `mcp: report` + the `allowRemediate` capability). A ceiling is the most a surface may *ever* do; it is not the default. **A run that names no mode reports and writes nothing on every surface** — `cli: apply` means `--apply` is permitted there, not that a plain `aimesh review run .` writes.
+meshcore is intentionally **not published** as a standalone module yet: its only consumers are the two in-repo apps, so its import path stays internal to the monorepo until there is a concrete external consumer and a stable API. Both apps ship three surfaces: a CLI, an **ACP server** (`aimesh review acp` / `aimesh explore acp`, so an ACP-capable IDE can drive runs over stdio), and an **MCP server** (`aimesh mcp`, or `aimesh review mcp` / `aimesh explore mcp`, so an MCP-speaking agent can drive runs as tools — see **[docs/mcp.md](docs/mcp.md)**). They are held to a **surface-parity invariant**: every run-forming capability is expressible on all of them with identical fail-closed semantics. The deliberate differences are transport mechanics and the **configuration source** — saved configuration for the CLI, launch arguments for MCP/ACP. On the CLI, write authority is bounded by config-visible per-surface **ceilings** (`cli: apply`, `ci: report`, raised by the `allowRemediate` capability); on MCP/ACP it is the `--allow-writes` launch grant. **A run that names no mode reports and writes nothing on every surface** — `cli: apply` means `--apply` is permitted there, not that a plain `aimesh review run .` writes.
 
-### Pointing an MCP host at it
+### Pointing an MCP or ACP host at it
+
+The MCP and ACP servers need no aimesh setup. Name the adapters they may use in the host's server
+entry: `--adapter <name>` when the CLI is on `PATH`, or `--adapter <name>=<path>` with the host OS's
+variable syntax (`%VAR%` on Windows, `$VAR`/`${VAR}` and a leading `~` elsewhere). The host's agent
+or you edit that file; aimesh never does.
+
+Windows (for example a `config.json` listing MCP servers), with a CLI that is not on `PATH`:
 
 ```json
-{ "mcpServers": { "aimesh": { "command": "aimesh", "args": ["mcp", "--root", "/path/to/project"] } } }
+{
+  "mcpServers": {
+    "aimesh": {
+      "command": "aimesh",
+      "args": ["mcp", "--adapter", "devin-cli=%LOCALAPPDATA%\\devin\\cli\\bin\\devin.exe"]
+    }
+  }
+}
 ```
 
-**Pass `--root` explicitly.** Without it the server adopts its launch working directory only when that directory carries a project marker (`.git`, `go.mod`, `package.json`, …). Hosts vary in where they start a server — some use `/` — so an inferred root is not something to rely on. With no root the server still starts and still serves `inlineWorkspace`; it refuses filesystem paths with `scope_no_roots_configured` until you give it one.
+macOS:
 
-Whatever posture the server ends up in, **`review_doctor` reports it** — trusted roots, their provenance, and every capability grant. Prefer that over the launch banner: the MCP stdio spec permits a host to discard a server's stderr, so a message printed at launch may reach nobody.
+```json
+{
+  "mcpServers": {
+    "aimesh": {
+      "command": "aimesh",
+      "args": ["mcp", "--adapter", "claude-code", "--adapter", "devin-cli=~/.local/bin/devin"]
+    }
+  }
+}
+```
 
-reviewmesh runs an ordered **blind reviewer panel** (1..16 seats, host-computed agreement), judges an artifact against declared **authority documents**, and confines every path to roots a human authorized. exploremesh has named **profiles** (ordered explorers + a collator + a default mode, with `--profile` / `--count` subset selection) and app-owned **exploration modes** selected with `--mode`. Adapter binary paths and user-defined ACP instances are shared between the apps through `~/.aimesh/adapters.yaml`.
+`AIMESH_ADAPTERS` is the environment form. Every call composes its own panel from those adapters and
+declares its own absolute `workspace`; `--root <dir>` optionally bounds what a call may declare.
+Without `--allow-writes` aimesh changes no project content: `review_remediate` with `output: "patch"`
+supplies the diff for the agent to apply. An ACP host uses the same flags with `aimesh review acp` or
+`aimesh explore acp`.
+
+**`review_doctor` and `explore_doctor` report the posture** — which launched adapters can be started,
+and who performs writes (`writes: "aimesh"` or `"agent"`). Prefer them over the launch banner: the MCP
+stdio spec permits a host to discard a server's stderr, so a message printed at launch may reach nobody.
+
+reviewmesh runs an ordered **blind reviewer panel** (1..16 seats, host-computed agreement), judges an artifact against declared **authority documents**, and confines every path to the roots a call declares or a person types. exploremesh has app-owned **exploration modes** selected with `--mode`, and on the CLI, named **profiles** (ordered explorers + a collator + a default mode, with `--profile` / `--count` subset selection). Adapter binary paths and user-defined ACP instances are shared between the apps through `~/.aimesh/adapters.yaml`.
 
 **Stated limitations.** CI is minimal on purpose: one workflow runs `make gate` on every push and pull request, and the release workflow runs it again before cutting artifacts — the same command contributors run locally, so the two cannot drift. Nothing runs on a Windows or macOS runner. Windows support is coded for (drive-letter-agnostic root rules, reparse-point detection, NTFS stream stripping) and there is a `make windows-build` cross-compile target, but **Windows is untested against real CLIs and against a real filesystem**: it is not part of the standard gate, no adapter has been exercised against a real CLI there, and no containment assertion on this page or in [docs/security.md](docs/security.md) has ever been executed on a real NTFS volume. The Windows-conditional code paths are exercised *as branches* on any platform (by substituting the variable that selects them), which tests the decision the code makes — not the answer the filesystem gives it. Two guarantees are genuinely **weaker or absent** there rather than merely untested: the hardlink rule does not fire (Windows cannot report a link count through the API used), and there is no `O_NOFOLLOW` equivalent, so no-follow rests on the reparse-point checks alone. [docs/security.md → Platform matrix](docs/security.md#7-platform-matrix--where-each-guarantee-actually-holds) gives the per-guarantee answer. The per-adapter status legend in [docs/adapters.md](docs/adapters.md#status-legend) says which adapters are confirmed against a real CLI and which are not; [docs/security.md](docs/security.md) states plainly what containment does and does not stop.
 

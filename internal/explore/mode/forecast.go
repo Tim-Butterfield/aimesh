@@ -1,6 +1,6 @@
 package mode
 
-// This file is the FORECAST mode (design §3 Forecast row) — the other FIXED-SPACE mode, and the one
+// This file is the FORECAST mode — the other FIXED-SPACE mode, and the one
 // the design calls "genuinely deterministic":
 //
 //	declare          the USER fixes the target, the unit and the horizon (and any conditioning event)
@@ -20,7 +20,7 @@ package mode
 //     number out of "somewhere in the low hundreds" would be inventing the precision the mode exists to
 //     provide.
 //   - THE COLLATOR NEVER COMPUTES THE AGGREGATE. Pooling happens in internal/pool under a declared,
-//     versioned rule before the collator is prompted. The failure mode this replaces is specific and
+//     versioned rule before the collator is prompted. The failure mode this prevents is specific and
 //     familiar: a model asked to "combine these forecasts" splits the difference in prose, and the number
 //     that comes out is neither anybody's estimate nor any stated rule's output.
 //
@@ -39,11 +39,11 @@ import (
 )
 
 // ForecastRule is the DECLARED aggregation rule this mode contract pins. It is a mode-contract constant
-// rather than a runtime option precisely so it cannot be chosen after the estimates are in (§4's freeze
+// rather than a runtime option precisely so it cannot be chosen after the estimates are in (the freeze
 // discipline, applied to the one number this mode produces).
 const ForecastRule = pool.RuleMedian
 
-// --- the terminal output (design §3 Forecast row) ---
+// --- the terminal output ---
 
 // ForecastOutput is the FIXED, exploremesh-owned terminal output of the Forecast mode: the declared target,
 // the HOST-pooled aggregate + interval + dispersion, every attributed individual estimate, the identified
@@ -75,7 +75,7 @@ type ForecastOutput struct {
 	// number whose assumptions are invisible is a number nobody can audit.
 	Assumptions []AttributedAssumption `json:"assumptions,omitempty"`
 	// Rejected records responses that could not contribute an estimate, with the host's reason. A rejected
-	// estimate is recorded, never silently absent (§4's minority carry-through applied to a pool).
+	// estimate is recorded, never silently absent (the minority carry-through rule applied to a pool).
 	Rejected []RejectedEstimate `json:"rejected,omitempty"`
 	// Claim is the pinned governance claim: how many DISTINCT blind round-1 forecasters this aggregate is
 	// built on, with BOTH denominators, the frozen policy, and the exact contributing envelope refs.
@@ -84,7 +84,7 @@ type ForecastOutput struct {
 	PanelSize   int `json:"panelSize"`
 	Respondents int `json:"respondents"`
 	Abstentions int `json:"abstentions"`
-	// CollatorNarrative is the quarantined MODEL PROSE namespace (§0 F-C).
+	// CollatorNarrative is the quarantined MODEL PROSE namespace.
 	CollatorNarrative []govern.Narrative `json:"collatorNarrative,omitempty"`
 }
 
@@ -95,7 +95,7 @@ type ForecastInterval struct {
 	Sources int     `json:"sources"`
 }
 
-// ForecastMethod names the versioned HOST rules the pooled values were computed under (§9).
+// ForecastMethod names the versioned HOST rules the pooled values were computed under.
 type ForecastMethod struct {
 	Rule            string `json:"rule"`
 	RulesVersion    string `json:"rulesVersion"`
@@ -330,10 +330,10 @@ func (forecastCollator) Collate(in FixedSpaceInput, view FixedSpaceView, narrati
 }
 
 func init() {
-	// Forecast (design §3 Forecast row). Formulation-free, ONE round, no canonicalization policy at all
+	// Forecast. Formulation-free, ONE round, no canonicalization policy at all
 	// (see the file comment). FIXED-space class with the ESTIMATE as the degraded register's key field: the
 	// estimate is a value in a declared unit, so a register of "who estimated what" is a genuine comparison
-	// rather than covert entity resolution (§1).
+	// rather than covert entity resolution.
 	register(ModeSpec{
 		Name:               Forecast,
 		FormulationFree:    true,

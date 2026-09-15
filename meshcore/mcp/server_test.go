@@ -166,24 +166,36 @@ func TestInitialize_EchoesOlderSupportedVersion(t *testing.T) {
 	}
 }
 
-func TestInitialize_UnsupportedVersionIsACleanRefusal(t *testing.T) {
-	c, stop := serve(t, newServer())
-	defer stop()
-	for _, pv := range []any{"1999-01-01", 1, nil} {
+// An unsupported or missing version is negotiated down to the latest supported version, as the MCP
+// lifecycle requires; a client opening with a newer revision (such as 2025-11-25) still connects.
+func TestInitialize_UnsupportedVersionNegotiatesToLatest(t *testing.T) {
+	for _, pv := range []any{"2025-11-25", "1999-01-01", nil} {
+		c, stop := serve(t, newServer())
 		params := map[string]any{}
 		if pv != nil {
 			params["protocolVersion"] = pv
 		}
 		resp, _ := c.call(t, "initialize", params)
-		if resp.Error == nil {
-			t.Fatalf("protocolVersion %v: want a refusal, got result %v", pv, resp.Result)
+		stop()
+		if resp.Error != nil {
+			t.Fatalf("protocolVersion %v: want negotiation, got error %+v", pv, resp.Error)
 		}
-		if resp.Error.Code != mcp.CodeInvalidParams {
-			t.Errorf("protocolVersion %v: code = %d, want %d", pv, resp.Error.Code, mcp.CodeInvalidParams)
+		if got := resp.Result["protocolVersion"]; got != mcp.LatestProtocolVersion {
+			t.Errorf("protocolVersion %v: answered %v, want %s", pv, got, mcp.LatestProtocolVersion)
 		}
-		if !strings.Contains(resp.Error.Message, mcp.LatestProtocolVersion) {
-			t.Errorf("refusal must name the supported versions, got %q", resp.Error.Message)
-		}
+	}
+}
+
+// A protocolVersion that is not a string is malformed and refused.
+func TestInitialize_NonStringVersionIsRefused(t *testing.T) {
+	c, stop := serve(t, newServer())
+	defer stop()
+	resp, _ := c.call(t, "initialize", map[string]any{"protocolVersion": 1})
+	if resp.Error == nil || resp.Error.Code != mcp.CodeInvalidParams {
+		t.Fatalf("want invalid params, got %+v", resp)
+	}
+	if !strings.Contains(resp.Error.Message, mcp.LatestProtocolVersion) {
+		t.Errorf("refusal must name the supported versions, got %q", resp.Error.Message)
 	}
 }
 

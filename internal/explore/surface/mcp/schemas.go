@@ -42,44 +42,31 @@ const (
 )
 
 // slotSchema is one panel seat, named by IDENTIFIER only. There is deliberately no path/args/binary
-// property: those are configuration, and configuration over MCP is a non-goal (design §Non-goals).
+// property: those are configuration, and configuration over MCP is a non-goal.
 const slotSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": ["adapter", "model"],
   "properties": {
-    "adapter": {"type": "string", "description": "A configured adapter identifier, as reported by the list tool. Never a path or a binary name."},
-    "model": {"type": "string", "description": "A model identifier this adapter can select."},
+    "adapter": {"type": "string", "description": "An adapter this server was launched with, as reported by the list tool. Never a path or a binary name."},
+    "model": {"type": "string", "description": "The exact model identifier this adapter's CLI accepts. Look it up for your adapter and the license it runs under; this server passes it through verbatim and does not validate it."},
     "effort": {"type": "string", "description": "Optional reasoning-effort label; a different effort is a genuinely different vantage, so it is part of the seat's identity."}
   }
 }`
 
-// panelSchema is the strict XOR: select a configured profile (optionally narrowed by count), or COMPOSE
-// an ad-hoc panel by identifier. Composition resolves fail-closed against the adapter set this server
-// bound at STARTUP — a call can select or re-arrange the configured seats, and can never introduce an
-// adapter, a path or a launch argument.
+// panelSchema is the required panel: the explorers and the collator one call composes, each from the
+// adapters this server was launched with. A call can never introduce an adapter, a path or a launch
+// argument.
 var panelSchema = fmt.Sprintf(`{
-  "description": "Which explorers run. Either select a configured profile, or compose an ad-hoc panel by identifier. Omit it entirely to run this server's default panel.",
-  "oneOf": [
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "profile": {"type": "string", "description": "A configured profile name (see the list tool). Omitted: the default profile."},
-        "count": {"type": "integer", "minimum": %d, "description": "Run the top-N explorers by the profile's preference order. Out of range fails; it is never clamped."}
-      }
-    },
-    {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["explorers", "collator"],
-      "properties": {
-        "explorers": {"type": "array", "minItems": %d, "maxItems": %d, "items": %s, "description": "The ordered explorer seats. Duplicated (adapter, model, effort) triples are rejected: an identical triple adds no independent vantage."},
-        "collator": %s
-      }
-    }
-  ]
-}`, MinPanelExplorers, MinPanelExplorers, MaxPanelExplorers, slotSchema, slotSchema)
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["explorers", "collator"],
+  "description": "Which explorers run. Required: every exploration composes its own panel from the adapters in the list tool.",
+  "properties": {
+    "explorers": {"type": "array", "minItems": %d, "maxItems": %d, "items": %s, "description": "The ordered explorer seats. Duplicated (adapter, model, effort) triples are rejected: an identical triple adds no independent vantage."},
+    "collator": %s
+  }
+}`, MinPanelExplorers, MaxPanelExplorers, slotSchema, slotSchema)
 
 // canonicalizersSchema is the OPTIONAL explicit canonicalizer pair. `minItems`/`maxItems` are both 2 rather
 // than a free-length array: the merge-agreement rule is defined over exactly two independent proposals, and
@@ -103,6 +90,7 @@ var commonProps = fmt.Sprintf(`
     "waitSeconds": {"type": "integer", "minimum": 1, "maximum": %d, "default": %d, "description": "How long to wait inline for the run to finish. If it finishes in time you get the full result; otherwise you get {runId, state:\"running\"} and poll explore_run_status / fetch explore_run_result."},
     "maxParallel": {"type": "integer", "minimum": 1, "description": "How many explorers may invoke their model CLI AT ONCE. Omitted: the whole panel runs in parallel. Lower it when the machine cannot host that many provider CLIs at once (each is a real subprocess; a local model also loads weights) or to stay under a provider rate limit. It bounds PARALLELISM only — every explorer in the panel still answers, so the result is unchanged and only the wall clock moves."},
     "dryRun": {"type": "boolean", "description": "Resolve everything and spend NOTHING. The panel convenes nobody: the task contract, the round contract, the terminal contract and the canonicalizer derivation all run, then the call stops before the identity pre-flight — an exploration's FIRST model call — and answers with 'dryRun': true and a 'shape' block: the panel, every stage that would be called, the exact model-call total, and the exact round-1 prompt every explorer would receive. Every configuration error a real run would raise is raised here too, for free, including a dual-canonicalizer plan that cannot yield two independent identities. Two things it does NOT do: it makes no claim that any adapter is reachable (proving that means calling it, which is what the pre-flight is), and it writes no run directory (there is no exploration to record)."},
+    "verifyReadiness": {"type": "boolean", "description": "Before the run, ask every distinct adapter/model/effort the panel names whether it can do real work — one bounded one-token call each, which SPENDS. An agent blocked on login, folder trust or an identifier its license cannot use halts the run before the panel is paid for. With dryRun the calls are priced in shape and none is made."},
     "idempotencyKey": {"type": "string", "maxLength": 200, "description": "Optional caller-supplied key. Repeating a call with the same key returns the EXISTING run instead of spending again — use it when retrying."}`,
 	panelSchema, canonicalizersSchema, MaxWaitSeconds, DefaultWaitSeconds)
 
@@ -129,7 +117,7 @@ var commonProps = fmt.Sprintf(`
 var exploreInputSchema = fmt.Sprintf(`{
   "type": "object",
   "additionalProperties": false,
-  "required": ["purpose", "criteria", "mode"],
+  "required": ["purpose", "criteria", "mode", "panel"],
   "properties": {%s,
     "mode": {"type": "string", "enum": [%s], "description": "The exploration mode, and the thing that decides which other parameters are required. map: collate-only synthesis. synthesize: one composed best answer. catalog: enumerate + canonicalize. shortlist: host-tallied ballot over a confirmed candidate universe. ai-collab: mutual challenge between the explorers. challenge: blindly attack a supplied artifact — REQUIRES artifact. compare: evaluate a declared option set on declared axes — REQUIRES options + comparisonAxes. forecast: pool independent numeric estimates — REQUIRES target + unit + horizon. Supplying a parameter that belongs to a DIFFERENT mode is refused, never ignored."},
     "artifact": {"type": "string", "minLength": 1, "description": "REQUIRED by mode=challenge, and rejected for any other mode. The artifact under review — the text the panel attacks. Supplied inline; this server reads no files."},
@@ -213,15 +201,13 @@ const identityCaveatsSchema = `{
 const panelEchoSchema = `{
     "type": "object",
     "required": ["requested", "executed"],
-    "description": "The panel as REQUESTED and as EXECUTED. ALWAYS present, and always both halves: a count that was narrowed, a profile that resolved elsewhere, or a seat that was dropped is only visible by comparing them.",
+    "description": "The panel as REQUESTED and as EXECUTED. ALWAYS present, and always both halves: a seat that was dropped is only visible by comparing them.",
     "properties": {
       "requested": {
         "type": "object",
         "required": ["source"],
         "properties": {
-          "source": {"type": "string", "enum": ["default", "profile", "adhoc"]},
-          "profile": {"type": "string"},
-          "count": {"type": "integer"},
+          "source": {"type": "string", "enum": ["adhoc"]},
           "explorers": {"type": "array", "items": {"type": "object"}},
           "collator": {"type": "object"},
           "canonicalizers": {"type": "array", "items": {"type": "object"}, "description": "Present only when the call named them."}
@@ -382,33 +368,27 @@ var runStatusSchema = fmt.Sprintf(`{
 // convenience.
 const listOutputSchema = `{
   "type": "object",
-  "required": ["adapters", "profiles", "modes", "limits"],
+  "required": ["adapters", "modes", "limits"],
   "properties": {
     "adapters": {
       "type": "array",
+      "description": "The adapters this server was launched with. A panel seat may name only these. An adapter with available: false cannot be used until its CLI can be started; 'reason' says why.",
       "items": {
         "type": "object",
-        "required": ["name", "kind", "configured"],
+        "required": ["name", "kind", "available"],
         "properties": {
           "name": {"type": "string"},
-          "displayName": {"type": "string"},
-          "kind": {"type": "string", "enum": ["shell", "acp", "fake"]},
-          "configured": {"type": "boolean"},
-          "identityEvidenceCapability": {"type": "string", "description": "The adapter's DECLARED evidence tier — not a live verdict. Proving a model's identity still takes a real call."},
-          "specOnly": {"type": "boolean"}
+          "kind": {"type": "string", "enum": ["shell", "fake"]},
+          "available": {"type": "boolean"},
+          "reason": {"type": "string"},
+          "source": {"type": "string", "enum": ["flag", "env"], "description": "Where the operator named the adapter."},
+          "identityEvidenceCapability": {"type": "string", "description": "The adapter's DECLARED evidence tier — not a live verdict. Proving a model's identity still takes a real call."}
         }
       }
     },
-    "profiles": {
-      "type": "object",
-      "required": ["defaultProfile", "profiles"],
-      "properties": {
-        "defaultProfile": {"type": "string"},
-        "profiles": {"type": "array", "items": {"type": "object"}}
-      }
-    },
     "modes": {"type": "array", "items": {"type": "string"}},
-    "limits": {"type": "object", "description": "The admission limits in force on this server."}
+    "limits": {"type": "object", "description": "The admission limits in force on this server."},
+    "note": {"type": "string"}
   }
 }`
 
@@ -576,7 +556,11 @@ How the tools relate:
   A parameter belonging to a different mode is REFUSED, not ignored: passing an artifact to a map
   run fails rather than quietly running a map that never saw it.
 - Runs are JOB-SHAPED. If a run does not finish within waitSeconds you get {runId, state:"running"} — poll explore_run_status, then fetch explore_run_result. Do not re-issue the explore call: pass the same idempotencyKey and you will get the existing run back rather than paying twice.
-- list and doctor are read-only configuration reporting. Call list FIRST if you need to know which adapters, models, profiles or modes exist.
+- list and doctor are read-only reporting. Call list FIRST to see which adapters this server was launched with.
+
+Composing a panel:
+- Every explore call composes its own "panel": at least two explorers and a collator. Each seat names an adapter from list and the exact model identifier that adapter's CLI accepts. Look the identifier up for your adapter and the license it runs under; this server passes it through verbatim and does not validate it.
+- Use verifyReadiness to check that the panel's agents can do real work before a full run, and dryRun to price one.
 
 Rules that matter for how you report a result:
 - COUNTS, RANKINGS AND POOLED NUMBERS ARE COMPUTED BY THE HOST over the blind responses. Report them as given. Never recompute, re-rank or restate them in your own words.
@@ -589,6 +573,6 @@ Reading a result on MCP 2026-07-28 and later:
 - THIS SERVER EMITS NO PROTOCOL LOG NOTIFICATIONS on this revision. The Logging feature is deprecated as of 2026-07-28 and its named migration for stdio servers is stderr, which is where this server's diagnostics go; setting _meta.io.modelcontextprotocol/logLevel is accepted and ignored rather than rejected. In-flight visibility lives on _meta.progressToken (notifications/progress) and on explore_run_status / explore_run_result, which are responses.
 
 What this server will not do:
-- It never changes configuration. A call SELECTS or COMPOSES from the adapters the operator already configured; it can never introduce an adapter, a binary path or a launch argument.
+- It never changes configuration, and it reads none: its adapters come from its launch arguments, and a call can never introduce an adapter, a binary path or a launch argument.
 - It reads no files. An artifact under review is supplied inline.
 - A failed run comes back as a tool result with isError set and a machine-readable {exitCode, haltClass, reasonCode} payload. Read reasonCode, not the message text.`

@@ -268,8 +268,8 @@ func TestLatch_UnparseableParamsDoNotLatch(t *testing.T) {
 func TestLatch_ARefusedInitializeDoesNotLatchEither(t *testing.T) {
 	c, stop := serve(t, newServer())
 	defer stop()
-	if resp, _ := c.call(t, "initialize", map[string]any{"protocolVersion": "1999-01-01"}); resp.Error == nil {
-		t.Fatal("an unsupported initialize was accepted")
+	if resp, _ := c.call(t, "initialize", map[string]any{"protocolVersion": 1}); resp.Error == nil {
+		t.Fatal("a malformed initialize was accepted")
 	}
 	// The symmetric assertion to the modern one: a handshake that failed must not strand a modern
 	// client either.

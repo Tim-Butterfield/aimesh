@@ -6,18 +6,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
+	"github.com/Tim-Butterfield/aimesh/internal/review/surface/acp"
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 	"github.com/Tim-Butterfield/aimesh/meshcore/audit"
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
+	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
 // These tests drive the server over a hand-rolled JSON-RPC client. The TRANSPORT's conformance
@@ -101,9 +105,35 @@ type toolResult struct {
 	rpc        *rpcErr
 }
 
+// defaultPanel is the panel a review_report call carries when a test does not name one: every run
+// composes its own seats, and most tests are about something other than the panel. A test about the
+// panel itself names one — or sends "panel": nil to omit it.
+func defaultPanel() map[string]any {
+	seat := map[string]any{"adapter": "fake", "model": "m1"}
+	return map[string]any{"reviewers": []any{seat}, "author_remediator": seat}
+}
+
+// withPanel returns args with the default panel added to a review_report call that names none. A
+// "panel" key set to nil is removed instead, so a test can send a call with no panel at all.
+func withPanel(name string, args map[string]any) map[string]any {
+	if name != "review_report" {
+		return args
+	}
+	out := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		out[k] = v
+	}
+	if p, has := out["panel"]; !has {
+		out["panel"] = defaultPanel()
+	} else if p == nil {
+		delete(out, "panel")
+	}
+	return out
+}
+
 func (c *client) tool(t *testing.T, name string, args map[string]any) toolResult {
 	t.Helper()
-	resp, _ := c.call(t, "tools/call", map[string]any{"name": name, "arguments": args})
+	resp, _ := c.call(t, "tools/call", map[string]any{"name": name, "arguments": withPanel(name, args)})
 	if resp.Error != nil {
 		return toolResult{rpc: resp.Error}
 	}
@@ -195,16 +225,13 @@ func (f *fakeReviewer) Remediate(ctx context.Context, r run.RemediateRequest) (r
 	}, nil
 }
 
-// ReadDecisionSet / RunHandle are the ON-DISK half of the from-run seam. This fake holds no artifact
-// directory and records nothing, so it answers as an agent that produced no such run — which is the
-// right answer for every test in this file, all of which drive the REGISTRY path. The on-disk path
-// is proven against a real run.Manager in fromrun_test.go, because a fake that "resolved" a
-// handle would be asserting the very thing under test.
-func (f *fakeReviewer) ReadDecisionSet(handle string) (*run.StoredDecisionSet, string, error) {
-	return nil, "", fault.New(fault.Usage, "no decision set: "+handle).WithReason(run.ReasonRunHandleUnknown)
+// ReadDecisionSetByID is the ON-DISK half of the from-run seam. This fake holds no run records, so it
+// answers as an agent that produced no such run — which is the right answer for every test in this
+// file, all of which drive the REGISTRY path. The on-disk path is proven against a real run.Manager in
+// fromrun_test.go, because a fake that "resolved" a handle would be asserting the very thing under test.
+func (f *fakeReviewer) ReadDecisionSetByID(workspace, runID string) (*run.StoredDecisionSet, string, error) {
+	return nil, "", fault.New(fault.Usage, "no decision set: "+runID).WithReason(run.ReasonRunHandleUnknown)
 }
-
-func (f *fakeReviewer) RunHandle(runID string) string { return runID }
 
 func (f *fakeReviewer) counts() (int, int) {
 	f.mu.Lock()
@@ -253,32 +280,10 @@ type fakeConfig struct{}
 
 func (fakeConfig) Adapters() []mcp.AdapterFact {
 	return []mcp.AdapterFact{
-		{Name: "fake", DisplayName: "Fake", Kind: "fake", Configured: true},
-		{Name: "claude-code", DisplayName: "Claude Code", Kind: "shell", Configured: true, IdentityEvidenceCapability: "envelope"},
+		{Name: "fake", DisplayName: "Fake", Kind: "fake", Available: true, Source: "flag"},
+		{Name: "claude-code", DisplayName: "Claude Code", Kind: "shell", Available: true, Source: "flag", IdentityEvidenceCapability: "envelope"},
 	}
 }
-
-func (fakeConfig) Profiles() []mcp.ProfileFact {
-	return []mcp.ProfileFact{{
-		Name: "default", IsDefault: true,
-		Reviewers: []mcp.SeatFact{{Adapter: "fake", Model: "m1"}, {Adapter: "fake", Model: "m2"}},
-		Lanes: []mcp.SeatFact{
-			{Role: "author_remediator", Adapter: "fake", Model: "m1"},
-			{Role: "reviewer", Adapter: "fake", Model: "m1"},
-			{Role: "cross_check", Adapter: "claude-code", Model: "cc"},
-		},
-	}}
-}
-
-func (fakeConfig) Catalog() []mcp.CatalogFact {
-	return []mcp.CatalogFact{
-		{Key: "m1", Adapters: []mcp.CatalogBind{{Adapter: "fake", ModelArg: "m1"}}},
-		{Key: "cc-opus-high", Provider: "anthropic", CanonicalModel: "opus",
-			Adapters: []mcp.CatalogBind{{Adapter: "claude-code", ModelArg: "opus", Effort: "high"}}},
-	}
-}
-
-func (fakeConfig) DefaultProfile() string { return "default" }
 
 func (fakeConfig) Readiness() (bool, []mcp.ReadinessCheck) {
 	return true, []mcp.ReadinessCheck{
@@ -299,11 +304,23 @@ func workspaceFixture(t *testing.T) string {
 func newServer(t *testing.T, rv mcp.Reviewer, tune ...func(*mcp.Server)) *mcp.Server {
 	t.Helper()
 	t.Setenv("AIMESH_HOME", t.TempDir())
+	t.Setenv(fake.EnvVar, "1")
+	// claude-code is launched at an executable this test owns, so its availability is real and needs no
+	// CLI on the machine running the tests.
+	cc := filepath.Join(t.TempDir(), "claude")
+	if runtime.GOOS == "windows" {
+		cc += ".exe"
+	}
+	if err := os.WriteFile(cc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
 	s := &mcp.Server{
 		Manager: rv, Config: fakeConfig{},
-		Adapters:      []string{"fake", "claude-code"},
-		PolicyCeiling: review.ModeReport,
-		Diagnostics:   io.Discard,
+		Adapters: launchflags.NewSet(
+			launchflags.Adapter{Name: "fake", Source: launchflags.SourceFlag},
+			launchflags.Adapter{Name: "claude-code", Path: cc, Source: launchflags.SourceFlag},
+		),
+		Diagnostics: io.Discard,
 	}
 	for _, f := range tune {
 		f(s)
@@ -352,35 +369,22 @@ func toolNames(t *testing.T, c *client) map[string]map[string]any {
 
 // --- DOUBLE OPT-IN, gate one: the tool is not even advertised ---
 
-func TestToolsList_RemediateIsNotAdvertisedWithoutTheCapability(t *testing.T) {
-	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots = []string{ws} }))
+// review_remediate is listed on every server: output=patch supplies the diff without any write grant.
+// What --allow-writes changes is whether output=apply is accepted (see withheld_test.go).
+func TestToolsList_RemediateIsAlwaysAdvertised(t *testing.T) {
+	c := serve(t, newServer(t, &fakeReviewer{}))
 	tools := toolNames(t, c)
-	if _, listed := tools["review_remediate"]; listed {
-		t.Fatal("review_remediate must not be listed on a server without the allowRemediate capability")
-	}
-	for _, want := range []string{"review_report", "review_list", "review_doctor", "review_run_status", "review_run_result"} {
+	for _, want := range []string{"review_report", "review_remediate", "review_list", "review_doctor", "review_run_status", "review_run_result"} {
 		if _, ok := tools[want]; !ok {
 			t.Fatalf("tool %q is missing from tools/list", want)
 		}
-	}
-	// And calling it anyway is REFUSED, not a silent no-op — see
-	// TestRemediate_AnUngrantedToolSaysWhichGateIsMissing for what the refusal must say. It is
-	// deliberately not the generic "unknown tool": a withheld grant and a nonexistent name need
-	// opposite responses from a caller.
-	res := c.tool(t, "review_remediate", map[string]any{"fromRun": "x", "output": "apply", "allowWrite": true})
-	if res.rpc == nil {
-		t.Fatalf("calling an unlisted tool = %+v, want a protocol error", res)
-	}
-	if !strings.Contains(res.rpc.Message, "--allow-remediate") {
-		t.Fatalf("the refusal must name the operator act that would grant it: %q", res.rpc.Message)
 	}
 }
 
 func TestToolsList_AnnotationsMarkTheWriteToolDestructive(t *testing.T) {
 	ws := workspaceFixture(t)
 	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) {
-		s.Roots, s.AllowRemediate = []string{ws}, true
+		s.Ceiling, s.AllowWrites = []string{ws}, true
 	}))
 	tools := toolNames(t, c)
 	rem, ok := tools["review_remediate"]
@@ -440,7 +444,7 @@ func TestToolsList_AnnotationsMarkTheWriteToolDestructive(t *testing.T) {
 func TestRemediate_AllowWriteOmittedIsATeachingErrorBeforeAnySpend(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	res := c.tool(t, "review_remediate", map[string]any{"fromRun": "run-x", "output": "apply"})
 	if res.rpc == nil {
 		t.Fatalf("omitting allowWrite must be refused, got %+v", res)
@@ -458,19 +462,19 @@ func TestRemediate_AllowWriteOmittedIsATeachingErrorBeforeAnySpend(t *testing.T)
 	}
 }
 
-// --- trusted roots ---
+// --- per-call scope ---
 
-func TestReport_PathOutsideTheTrustedRootsIsRefusedPreSpend(t *testing.T) {
+func TestReport_PathOutsideTheCeilingIsRefusedPreSpend(t *testing.T) {
 	ws := workspaceFixture(t)
 	outside := t.TempDir()
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	res := c.tool(t, "review_report", map[string]any{"workspace": outside})
 	if !res.isError {
-		t.Fatalf("a path outside the trusted roots must be an isError result, got %+v", res)
+		t.Fatalf("a path outside the --root ceiling must be an isError result, got %+v", res)
 	}
-	if got, _ := res.structured["reasonCode"].(string); got != "scope_outside_root" {
-		t.Fatalf("reasonCode = %q, want scope_outside_root", got)
+	if got, _ := res.structured["reasonCode"].(string); got != acp.ReasonOutsideCeiling {
+		t.Fatalf("reasonCode = %q, want %s", got, acp.ReasonOutsideCeiling)
 	}
 	if hc, _ := res.structured["haltClass"].(string); hc != "M6" {
 		t.Fatalf("haltClass = %q, want M6", hc)
@@ -484,15 +488,21 @@ func TestReport_PathOutsideTheTrustedRootsIsRefusedPreSpend(t *testing.T) {
 	}
 }
 
-func TestReport_NoTrustedRootsRefusesEveryPath(t *testing.T) {
+// With no --root ceiling, a call reviews the absolute workspace it declares — no setup is needed — and
+// a broad path such as the filesystem root is still refused.
+func TestReport_WithNoCeilingACallReviewsTheWorkspaceItDeclares(t *testing.T) {
+	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv)) // deliberately no roots
-	res := c.tool(t, "review_report", map[string]any{"workspace": t.TempDir()})
-	if !res.isError {
-		t.Fatal("a server with no trusted roots must refuse every path (fail closed)")
+	c := serve(t, newServer(t, rv)) // deliberately no ceiling
+	if res := c.tool(t, "review_report", map[string]any{"workspace": ws}); res.isError || res.rpc != nil {
+		t.Fatalf("a declared absolute workspace must be reviewable with no ceiling: %+v %+v", res.structured, res.rpc)
 	}
-	if runs, _ := rv.counts(); runs != 0 {
-		t.Fatalf("nothing may be spent, got %d run(s)", runs)
+	fsRoot := filepath.VolumeName(ws) + string(filepath.Separator)
+	if res := c.tool(t, "review_report", map[string]any{"workspace": fsRoot}); !res.isError {
+		t.Fatalf("the filesystem root must be refused as a workspace, got %+v", res)
+	}
+	if runs, _ := rv.counts(); runs != 1 {
+		t.Fatalf("only the declared workspace may have spent: %d run(s)", runs)
 	}
 }
 
@@ -500,7 +510,7 @@ func TestReport_NoTrustedRootsRefusesEveryPath(t *testing.T) {
 
 func TestReport_GovernanceFieldsAreAlwaysInStructuredContent(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	res := c.tool(t, "review_report", map[string]any{"workspace": ws})
 	if res.isError || res.rpc != nil {
 		t.Fatalf("report failed: %+v", res)
@@ -536,8 +546,8 @@ func TestReport_GovernanceFieldsAreAlwaysInStructuredContent(t *testing.T) {
 	if exec, _ := panel["executed"].([]any); len(exec) != 3 {
 		t.Fatalf("executed roster = %v, want 3 seats", panel["executed"])
 	}
-	if req, _ := panel["requested"].(map[string]any); req["source"] != "default" {
-		t.Fatalf("requested = %v, want source default", panel["requested"])
+	if req, _ := panel["requested"].(map[string]any); req["source"] != "adhoc" {
+		t.Fatalf("requested = %v, want source adhoc", panel["requested"])
 	}
 	// The identity caveat and the withheld file reach the caller, and the text channel says so.
 	if cav, _ := res.structured["identityCaveats"].([]any); len(cav) != 1 {
@@ -555,7 +565,7 @@ func TestReport_HaltRidesIsErrorWithTheTaxonomy(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{runErr: fault.New(fault.Model, "adapter reported a different model").
 		WithHalt("E").WithReason("model_identity_mismatch")}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	res := c.tool(t, "review_report", map[string]any{"workspace": ws})
 	if res.rpc != nil {
 		t.Fatalf("a domain halt must NOT be a JSON-RPC error: %+v", res.rpc)
@@ -595,10 +605,10 @@ func reportRun(t *testing.T, c *client, ws string) string {
 func TestRemediate_FromRunAppliesTheAcceptedSetAndIsIdempotent(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
-	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true})
+	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	if res.isError || res.rpc != nil {
 		t.Fatalf("remediate failed: %+v %+v", res.structured, res.rpc)
 	}
@@ -637,7 +647,7 @@ func TestRemediate_FromRunAppliesTheAcceptedSetAndIsIdempotent(t *testing.T) {
 
 	// IDEMPOTENCY: replaying the same source run returns the ORIGINAL receipt, without a second
 	// application — even though this call carries no idempotency key at all.
-	res2 := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true})
+	res2 := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	if res2.isError || res2.rpc != nil {
 		t.Fatalf("replay failed: %+v", res2)
 	}
@@ -652,8 +662,8 @@ func TestRemediate_FromRunAppliesTheAcceptedSetAndIsIdempotent(t *testing.T) {
 
 func TestRemediate_UnknownRunIsAnIsErrorResult(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
-	res := c.tool(t, "review_remediate", map[string]any{"fromRun": "run-nope", "output": "patch", "allowWrite": true})
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
+	res := c.tool(t, "review_remediate", map[string]any{"fromRun": "run-nope", "workspace": ws, "output": "patch"})
 	if res.rpc != nil {
 		t.Fatalf("an unknown run must not be a protocol error: %+v", res.rpc)
 	}
@@ -670,7 +680,7 @@ func TestRemediate_UnknownRunIsAnIsErrorResult(t *testing.T) {
 func TestInlineWorkspace_ReviewableButNeverRemediable(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	res := c.tool(t, "review_report", map[string]any{
 		"inlineWorkspace": map[string]any{"sample.go": "package sample\n"},
 	})
@@ -686,7 +696,7 @@ func TestInlineWorkspace_ReviewableButNeverRemediable(t *testing.T) {
 	runID, _ := res.structured["runId"].(string)
 
 	// FAIL CLOSED: applying an inline run is refused, with the reason named.
-	got := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true})
+	got := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	if !got.isError {
 		t.Fatalf("remediating an inline run must fail closed, got %+v", got)
 	}
@@ -700,7 +710,7 @@ func TestInlineWorkspace_ReviewableButNeverRemediable(t *testing.T) {
 
 func TestRemediate_InlineWorkspaceParameterIsRefused(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	res := c.tool(t, "review_remediate", map[string]any{
 		"inlineWorkspace": map[string]any{"a.go": "package a\n"}, "output": "apply", "allowWrite": true,
 	})
@@ -714,7 +724,7 @@ func TestRemediate_InlineWorkspaceParameterIsRefused(t *testing.T) {
 func TestPanel_TeachingErrors(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	cases := []struct {
 		name string
 		args map[string]any
@@ -728,47 +738,37 @@ func TestPanel_TeachingErrors(t *testing.T) {
 			want: "author_remediator",
 		},
 		{
-			name: "profile and panel are mutually exclusive",
-			args: map[string]any{"workspace": ws, "profile": "default", "panel": map[string]any{
-				"reviewers":         []any{map[string]any{"adapter": "fake", "model": "m1"}},
-				"author_remediator": map[string]any{"adapter": "fake", "model": "m1"},
-			}},
-			want: "never both",
+			name: "a panel is required",
+			args: map[string]any{"workspace": ws, "panel": nil},
+			want: "`panel` is required",
 		},
 		{
-			name: "an unconfigured adapter cannot be introduced",
+			name: "a panel needs a reviewer",
 			args: map[string]any{"workspace": ws, "panel": map[string]any{
-				"reviewers":         []any{map[string]any{"adapter": "not-configured", "model": "m1"}},
 				"author_remediator": map[string]any{"adapter": "fake", "model": "m1"},
 			}},
-			want: "not configured on this server",
+			want: "panel.reviewers",
 		},
 		{
-			name: "an unknown profile names the configured ones",
-			args: map[string]any{"workspace": ws, "profile": "nope"},
-			want: "unknown profile",
+			name: "an adapter the server was not launched with cannot be introduced",
+			args: map[string]any{"workspace": ws, "panel": map[string]any{
+				"reviewers":         []any{map[string]any{"adapter": "not-launched", "model": "m1"}},
+				"author_remediator": map[string]any{"adapter": "fake", "model": "m1"},
+			}},
+			want: "was not launched with",
 		},
 		{
-			name: "a misspelled field is not silently ignored",
-			args: map[string]any{"workspace": ws, "profil": "default"},
+			name: "profile is not a parameter",
+			args: map[string]any{"workspace": ws, "profile": "default"},
 			want: "unknown field",
 		},
 		{
-			name: "a lane the profile does not define cannot be created",
-			args: map[string]any{"workspace": ws, "panel": map[string]any{
-				"reviewers":         []any{map[string]any{"adapter": "fake", "model": "m1"}},
-				"author_remediator": map[string]any{"adapter": "fake", "model": "m1"},
-				"verifier":          map[string]any{"adapter": "fake", "model": "m1"},
-			}},
-			want: "does not define",
-		},
-		{
-			name: "per-role effort is not settable per call",
+			name: "per-role effort is refused",
 			args: map[string]any{"workspace": ws, "panel": map[string]any{
 				"reviewers":         []any{map[string]any{"adapter": "fake", "model": "m1"}},
 				"author_remediator": map[string]any{"adapter": "fake", "model": "m1", "effort": "deep"},
 			}},
-			want: "effort is not settable per call",
+			want: "effort is not accepted",
 		},
 	}
 	for _, tc := range cases {
@@ -790,7 +790,7 @@ func TestPanel_TeachingErrors(t *testing.T) {
 func TestPanel_AdHocSelectionReachesTheManagerAndIsEchoed(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	res := c.tool(t, "review_report", map[string]any{"workspace": ws, "panel": map[string]any{
 		"reviewers": []any{
 			map[string]any{"adapter": "fake", "model": "m1"},
@@ -808,8 +808,8 @@ func TestPanel_AdHocSelectionReachesTheManagerAndIsEchoed(t *testing.T) {
 	if len(got.ReviewerPanel) != 2 || got.ReviewerPanel[1].Effort != "deep" {
 		t.Fatalf("the composed panel did not reach the manager: %+v", got.ReviewerPanel)
 	}
-	if got.AdapterOverride[review.RoleCrossCheck] != "claude-code" {
-		t.Fatalf("the cross_check seat did not reach the manager: %+v", got.AdapterOverride)
+	if seat := got.ComposedRoles[review.RoleCrossCheck]; seat.Adapter != "claude-code" || seat.Model != "cc" {
+		t.Fatalf("the cross_check seat did not reach the manager: %+v", got.ComposedRoles)
 	}
 	if got.Surface != "mcp" {
 		t.Fatalf("surface = %q, want mcp (the policy ceiling is keyed on it)", got.Surface)
@@ -832,7 +832,7 @@ func TestPanel_AdHocSelectionReachesTheManagerAndIsEchoed(t *testing.T) {
 func TestReport_IdempotencyKeyReturnsTheOriginalRun(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	first := c.tool(t, "review_report", map[string]any{"workspace": ws, "idempotencyKey": "k1"})
 	second := c.tool(t, "review_report", map[string]any{"workspace": ws, "idempotencyKey": "k1"})
 	if runs, _ := rv.counts(); runs != 1 {
@@ -845,26 +845,27 @@ func TestReport_IdempotencyKeyReturnsTheOriginalRun(t *testing.T) {
 
 // --- the sanitized projections ---
 
-func TestList_ReportsNoPathsAndStatesTheRemediationPolicy(t *testing.T) {
+func TestList_ReportsNoPathsAndStatesWhoWrites(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	res := c.tool(t, "review_list", map[string]any{})
 	if res.isError || res.rpc != nil {
 		t.Fatalf("list failed: %+v", res)
 	}
 	rem, _ := res.structured["remediation"].(map[string]any)
-	if allowed, _ := rem["allowed"].(bool); allowed {
-		t.Fatalf("remediation.allowed = true on a server without the capability: %+v", rem)
+	if rem["writes"] != "agent" {
+		t.Fatalf("remediation.writes = %v, want agent on a server launched without --allow-writes", rem["writes"])
 	}
-	if rem["ceiling"] != "report" {
-		t.Fatalf("remediation.ceiling = %v, want report", rem["ceiling"])
+	if d, _ := rem["diffAvailable"].(bool); !d {
+		t.Fatalf("remediation.diffAvailable = %v, want true", rem["diffAvailable"])
 	}
-	if rem["capability"] != "allowRemediate" {
-		t.Fatalf("list must NAME the capability an operator would grant, got %v", rem["capability"])
+	adapters, _ := res.structured["adapters"].([]any)
+	if len(adapters) != 2 {
+		t.Fatalf("adapters = %v, want the two this server was launched with", adapters)
 	}
 	roots, _ := res.structured["roots"].(map[string]any)
-	if cnt, _ := roots["count"].(float64); int(cnt) != 1 {
-		t.Fatalf("roots.count = %v, want 1", roots["count"])
+	if cnt, _ := roots["ceiling"].(float64); int(cnt) != 1 {
+		t.Fatalf("roots.ceiling = %v, want 1", roots["ceiling"])
 	}
 	blob, _ := json.Marshal(res.structured)
 	if strings.Contains(string(blob), ws) {
@@ -874,13 +875,11 @@ func TestList_ReportsNoPathsAndStatesTheRemediationPolicy(t *testing.T) {
 
 func TestDoctor_SanitizesPathsOutOfReadinessDetail(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	res := c.tool(t, "review_doctor", map[string]any{})
 	checks, _ := res.structured["checks"].([]any)
-	// Two rows: the adapter readiness check this test stages, and the root-confinement disclosure the
-	// surface always appends (D6 — a security-relevant setting must be visible somewhere a
-	// host cannot discard, and stderr at launch is not that place).
-	if len(checks) != 2 {
+	// One row: the adapter readiness check this test stages.
+	if len(checks) != 1 {
 		t.Fatalf("checks = %v", res.structured["checks"])
 	}
 	detail, _ := checks[0].(map[string]any)["detail"].(string)
@@ -898,7 +897,7 @@ func TestDoctor_SanitizesPathsOutOfReadinessDetail(t *testing.T) {
 func TestRunResult_ReReadsWithoutRerunning(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	runID := reportRun(t, c, ws)
 	status := c.tool(t, "review_run_status", map[string]any{"runId": runID})
 	if st, _ := status.structured["state"].(string); st != "complete" {
@@ -928,7 +927,7 @@ func TestClientRoots_IntersectNeverUnion(t *testing.T) {
 	// The client narrows the server's root to a subdirectory.
 	rv := &fakeReviewer{}
 	c := serve(t, newServer(t, rv, func(s *mcp.Server) {
-		s.Roots, s.ClientRoots = []string{parent}, []string{sub}
+		s.Ceiling, s.ClientRoots = []string{parent}, []string{sub}
 	}))
 	if res := c.tool(t, "review_report", map[string]any{"workspace": sub}); res.isError {
 		t.Fatalf("a path inside the intersection must be accepted: %+v", res.structured)
@@ -941,7 +940,7 @@ func TestClientRoots_IntersectNeverUnion(t *testing.T) {
 	// so every path is refused.
 	rv2 := &fakeReviewer{}
 	c2 := serve(t, newServer(t, rv2, func(s *mcp.Server) {
-		s.Roots, s.ClientRoots = []string{parent}, []string{unrelated}
+		s.Ceiling, s.ClientRoots = []string{parent}, []string{unrelated}
 	}))
 	for _, p := range []string{parent, sub, unrelated} {
 		if res := c2.tool(t, "review_report", map[string]any{"workspace": p}); !res.isError {
@@ -982,7 +981,7 @@ func (b *blockingReviewer) Remediate(ctx context.Context, r run.RemediateRequest
 func TestRemediate_CancelledCallStillPublishesTheReceipt(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &blockingReviewer{entered: make(chan struct{})}
-	s := newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true })
+	s := newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true })
 	c := serve(t, s)
 	runID := reportRun(t, c, ws)
 
@@ -991,7 +990,7 @@ func TestRemediate_CancelledCallStillPublishesTheReceipt(t *testing.T) {
 	callID := c.id
 	c.send("tools/call", callID, map[string]any{
 		"name":      "review_remediate",
-		"arguments": map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true, "waitSeconds": 60},
+		"arguments": map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true, "waitSeconds": 60},
 	})
 	<-rv.entered
 	c.notify("notifications/cancelled", map[string]any{"requestId": callID, "reason": "user stopped"})
@@ -1111,7 +1110,7 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 	ws := workspaceFixture(t)
 	outside := t.TempDir()
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	schemas := declaredOutputSchemas(t, c)
 
 	check := func(t *testing.T, tool string, res toolResult) {
@@ -1140,7 +1139,7 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 		{"run_status on a finished run", "review_run_status", map[string]any{"runId": runID}},
 		{"run_result on a finished review", "review_run_result", map[string]any{"runId": runID}},
 		{"run_result on an unknown run", "review_run_result", map[string]any{"runId": "run-nope"}},
-		{"a remediation receipt", "review_remediate", map[string]any{"fromRun": runID, "output": "patch", "allowWrite": true}},
+		{"a remediation receipt", "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "patch", "allowWrite": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) { check(t, tc.tool, c.tool(t, tc.tool, tc.args)) })
 	}
@@ -1148,7 +1147,7 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 	// The remediation's own run, fetched through run_result: THE payload that must NOT be declared
 	// under the review schema, which it could not possibly satisfy.
 	remID := func() string {
-		res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "patch", "allowWrite": true})
+		res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "patch", "allowWrite": true})
 		id, _ := res.structured["runId"].(string)
 		return id
 	}()
@@ -1158,7 +1157,7 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 
 	// And a run that is genuinely still running: the `running` reply, and run_result mid-flight.
 	slow := &slowReviewer{entered: make(chan struct{}), release: make(chan struct{})}
-	c2 := serve(t, newServer(t, slow, func(s *mcp.Server) { s.Roots, s.WaitSeconds = []string{ws}, 1 }))
+	c2 := serve(t, newServer(t, slow, func(s *mcp.Server) { s.Ceiling, s.WaitSeconds = []string{ws}, 1 }))
 	schemas2 := declaredOutputSchemas(t, c2)
 	running := c2.tool(t, "review_report", map[string]any{"workspace": ws})
 	if st, _ := running.structured["state"].(string); st != "running" {
@@ -1187,13 +1186,13 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 func TestProgress_StopsWhenTheCallHasBeenAnswered(t *testing.T) {
 	ws := workspaceFixture(t)
 	slow := &slowReviewer{entered: make(chan struct{}), release: make(chan struct{})}
-	c := serve(t, newServer(t, slow, func(s *mcp.Server) { s.Roots, s.WaitSeconds = []string{ws}, 1 }))
+	c := serve(t, newServer(t, slow, func(s *mcp.Server) { s.Ceiling, s.WaitSeconds = []string{ws}, 1 }))
 
 	c.id++
 	callID := c.id
 	c.send("tools/call", callID, map[string]any{
 		"name":      "review_report",
-		"arguments": map[string]any{"workspace": ws},
+		"arguments": map[string]any{"workspace": ws, "panel": defaultPanel()},
 		"_meta":     map[string]any{"progressToken": "p1"},
 	})
 
@@ -1268,14 +1267,13 @@ func TestProgress_StopsWhenTheCallHasBeenAnswered(t *testing.T) {
 
 // --- review_remediate: the fromRun branch refuses what it cannot honour ---
 
-// TestRemediate_FromRunRefusesRunFormingParameters covers the silent-ignore. The schema forbids
-// profile/panel/authority on the fromRun branch, but the decoder embeds runArgs wholesale, so they
-// parsed and were dropped — and each names a governance input (which models judged, which panel,
-// which intent). Accepting the call would tell the caller the opposite of what happened.
+// TestRemediate_FromRunRefusesRunFormingParameters: the schema forbids panel/authority on
+// review_remediate, but the decoder embeds runArgs wholesale, so the server refuses them by name — each
+// names a governance input (which panel judged, which intent) that the source run already settled.
 func TestRemediate_FromRunRefusesRunFormingParameters(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
 	cases := []struct {
@@ -1283,16 +1281,17 @@ func TestRemediate_FromRunRefusesRunFormingParameters(t *testing.T) {
 		add  map[string]any
 		want string
 	}{
-		{"profile", map[string]any{"profile": "default"}, "`profile`"},
 		{"panel", map[string]any{"panel": map[string]any{
 			"reviewers":         []any{map[string]any{"adapter": "fake", "model": "m1"}},
 			"author_remediator": map[string]any{"adapter": "fake", "model": "m1"},
 		}}, "`panel`"},
 		{"authority", map[string]any{"authority": []any{map[string]any{"name": "spec.md", "path": "spec.md"}}}, "`authority`"},
+		{"dryRun", map[string]any{"dryRun": true}, "`dryRun`"},
+		{"verifyReadiness", map[string]any{"verifyReadiness": true}, "`verifyReadiness`"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			args := map[string]any{"fromRun": runID, "output": "patch", "allowWrite": true}
+			args := map[string]any{"fromRun": runID, "workspace": ws, "output": "patch", "allowWrite": true}
 			for k, v := range tc.add {
 				args[k] = v
 			}
@@ -1309,12 +1308,11 @@ func TestRemediate_FromRunRefusesRunFormingParameters(t *testing.T) {
 		})
 	}
 
-	// The full-cycle `workspace` branch does not exist on this surface (D5): a review-and-write in one
-	// call is the one write shape whose caller can be left holding no handle when its response is
-	// cancelled. The branch is refused, and the refusal TEACHES the two-step path rather than merely
-	// rejecting.
+	// There is no one-call review-and-write on this surface: it is the one write shape whose caller can
+	// be left holding no handle when its response is cancelled. The call is refused, and the refusal
+	// TEACHES the two-step path rather than merely rejecting.
 	gone := c.tool(t, "review_remediate", map[string]any{
-		"workspace": ws, "output": "patch", "allowWrite": true, "profile": "default",
+		"workspace": ws, "output": "patch",
 	})
 	if gone.rpc == nil {
 		t.Fatalf("the full-cycle `workspace` branch must be refused on MCP, got %+v", gone)
@@ -1335,7 +1333,7 @@ func TestRemediate_FromRunRefusesRunFormingParameters(t *testing.T) {
 func TestAdmission_ThereIsNoLifetimeRunCap(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	reportRun(t, c, ws)
 	res := c.tool(t, "review_report", map[string]any{"workspace": ws})
 	if res.isError {

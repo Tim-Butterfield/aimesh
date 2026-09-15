@@ -148,7 +148,7 @@ func TestPreviewArgs_MatchesRecipes(t *testing.T) {
 		{"claude-code", "opus", "medium",
 			[]string{"claude", "-p", "--permission-mode", "plan", "--disallowedTools", "Edit Write NotebookEdit", "--output-format", "json", "--model", "opus", "--effort", "medium", "<", "<prompt>"}},
 		{"devin-cli", "claude-opus-4-8-medium", "",
-			[]string{"devin", "--model", "claude-opus-4-8-medium", "-p", "<prompt>"}},
+			[]string{"devin", "--model", "claude-opus-4-8-medium", "--respect-workspace-trust", "false", "-p", "<prompt>"}},
 		{"agy-cli", "Gemini 3.1 Pro (High)", "",
 			[]string{"agy", "--model", "Gemini 3.1 Pro (High)", "-p", "<prompt>"}},
 		{"ollama", "qwen2.5-coder:14b", "",

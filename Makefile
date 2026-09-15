@@ -18,7 +18,7 @@ build: build-all
 
 # install the single aimesh binary into GOBIN (or GOPATH/bin), and REMOVE any reviewmesh /
 # exploremesh left behind by an older install. Leaving them on PATH is not harmless: a stale binary
-# still answers, reads state from `.reviewmesh`/`.exploremesh` locations this build no longer writes,
+# still answers, reads state from `.reviewmesh`/`.exploremesh` locations this build does not write,
 # and reports success — so the user would be running a tool that silently disagrees with their config.
 # The removals are named as they happen rather than done quietly.
 install:
@@ -53,17 +53,17 @@ test-all:
 		case "$$dir" in "$(REPO_ROOT)"*) echo "== test $$dir =="; (cd "$$dir" && go test ./... -count=1) || exit 1 ;; esac; \
 	done
 
-# Import-boundary + denylist gate (aimesh refactor P0.3). Fails on reverse/app-crossing
+# Import-boundary + denylist gate. Fails on reverse/app-crossing
 # imports, HTTP in meshcore, or denylisted app vocabulary in meshcore exported identifiers.
 boundary-check:
 	@go run ./scripts/boundarycheck
 
-# reviewmesh "behavior unchanged" golden equivalence gate (aimesh P0.4).
+# reviewmesh "behavior unchanged" golden equivalence gate.
 # GOLDEN_UPDATE=1 make golden-run  — (re)capture the baseline.
 golden-run:
 	@bash scripts/golden-run.sh
 
-# exploremesh "behavior unchanged" golden equivalence gate (aimesh C20): a fake-only profile run
+# exploremesh "behavior unchanged" golden equivalence gate: a fake-only profile run
 # through `map` (the formulation-free default) and `shortlist` (the count/ballot-bearing governance
 # path), diffed against testdata/golden-run-exploremesh/.
 # GOLDEN_UPDATE=1 make golden-run-exploremesh  — (re)capture the baseline.

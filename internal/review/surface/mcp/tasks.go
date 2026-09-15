@@ -7,8 +7,7 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the `io.modelcontextprotocol/tasks` PROJECTION over this server's run registry
-// (migration design §12, product decision D7).
+// This file is the `io.modelcontextprotocol/tasks` PROJECTION over this server's run registry.
 //
 // THE WHOLE DESIGN IS ONE LINE: `taskId == runId`. No second identifier is minted, no second
 // execution model exists, and nothing here drives a lifecycle. A task is a READ of a `*record` —
@@ -25,8 +24,8 @@ import (
 // resilience. A task ID is a durable handle."). A task id from a restarted server is answered
 // `-32602`, which is the honest answer and not a silently-empty task. docs/mcp.md says so.
 //
-// The JOB SHAPE IS NOT REPLACED. A client that does not declare the extension sees exactly the
-// behavior it saw before this file existed: `waitSeconds` → `{runId, state:"running"}` →
+// The JOB SHAPE IS NOT REPLACED. A client that does not declare the extension sees the job shape
+// alone: `waitSeconds` → `{runId, state:"running"}` →
 // `review_run_status` / `review_run_result`. That is our decision (the extension is opt-in per client, so a modern
 // client that does not opt in still needs it), not a specification requirement.
 
@@ -81,8 +80,7 @@ func (t taskProvider) resolveTask(taskID string) (*record, *int64, bool) {
 	return rec, &ms, true
 }
 
-// Task projects one run as a task. See the state table in the migration design §12.4 — the row that
-// matters most is the one it is easiest to get wrong.
+// Task projects one run as a task. The mapping that matters most is the one it is easiest to get wrong.
 func (t taskProvider) Task(taskID string) (proto.TaskView, bool) {
 	rec, ttl, ok := t.resolveTask(taskID)
 	if !ok {

@@ -7,11 +7,10 @@ import (
 	"testing"
 )
 
-// A file dropped from the payload used to vanish without a word, while a hardlinked file got a
-// caveat for the same class of reason. docs/security.md argues against exactly that — "a reviewer
-// cannot object to a file it was never shown" — and the argument has grown teeth: `.claude/` and
-// `.cursor/` now hold rules and prompts that ARE source, so a user can reasonably ask for a review
-// of them and never learn it did not happen.
+// A file dropped from the payload is recorded, just as a hardlinked file gets a caveat for the same
+// class of reason: "a reviewer cannot object to a file it was never shown", and `.claude/` and
+// `.cursor/` hold rules and prompts that ARE source, so a user can reasonably ask for a review of them
+// and must learn when it did not happen.
 
 func TestCollect_AnExcludedFileIsRecordedNotSilent(t *testing.T) {
 	root := t.TempDir()

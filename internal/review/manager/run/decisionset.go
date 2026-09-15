@@ -46,6 +46,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 	"github.com/Tim-Butterfield/aimesh/meshcore/audit"
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
+	"github.com/Tim-Butterfield/aimesh/meshcore/localstate"
 )
 
 // DecisionSetArtifact is the run-relative path a report run records its decision set at. It sits
@@ -100,10 +101,12 @@ type StoredDecisionSet struct {
 	// Inline marks a workspace the run's own process materialized and deletes when the run ends
 	// (an ACP `inlineWorkspace`, MCP's inline branch). Such a set is never remediable.
 	Inline bool `json:"inline,omitempty"`
-	// Profile and Panel are carried so the remediation resolves the SAME configuration the report
-	// run used (it selects the author_remediator lane). No reviewer seat is executed from them.
-	Profile string            `json:"profile,omitempty"`
-	Panel   []review.SeatSpec `json:"panel,omitempty"`
+	// Profile, Panel and Roles are carried so the remediation resolves the SAME configuration the
+	// report run used (they select the author_remediator lane). Roles holds a call-composed run's
+	// single-slot role seats. No reviewer seat is executed from any of them.
+	Profile string                          `json:"profile,omitempty"`
+	Panel   []review.SeatSpec               `json:"panel,omitempty"`
+	Roles   map[review.Role]review.SeatSpec `json:"roles,omitempty"`
 	// Findings and Decisions are the adjudicated set, index-aligned exactly as RunOutcome carries
 	// them. Nothing here is re-judged; the write path reconciles them BY FINDING ID.
 	Findings  []review.Finding  `json:"findings"`
@@ -243,6 +246,7 @@ func (m *Manager) recordDecisionSet(run *audit.Run, req Request, plan review.Run
 		Inline:        req.WorkspaceEphemeral,
 		Profile:       req.Profile,
 		Panel:         req.ReviewerPanel,
+		Roles:         req.ComposedRoles,
 		Findings:      out.Findings,
 		Decisions:     out.Decisions,
 		Shown:         append([]string(nil), out.ShownFiles...),
@@ -304,7 +308,64 @@ func acceptedTargetFiles(out review.RunOutcome) []string {
 // The handle is VERIFIED against this agent's own artifact directory rather than trusted as a path;
 // see the file comment for the order of the checks and why every failure answers alike.
 func (m *Manager) ReadDecisionSet(handle string) (*StoredDecisionSet, string, error) {
-	dir, err := m.resolveRunDir(handle)
+	return m.readDecisionSetIn(m.ArtifactDir, handle)
+}
+
+// ReadDecisionSetFor resolves a run handle (a run directory path) produced for a run over workspace.
+// It checks, in order, each location that workspace's runs can live in — its own project state
+// directory, then the temp run directory — applying ReadDecisionSet's checks against each.
+func (m *Manager) ReadDecisionSetFor(workspace, handle string) (*StoredDecisionSet, string, error) {
+	var lastErr error = unknownRunHandle(handle)
+	for _, base := range m.runBases(workspace) {
+		set, dir, err := m.readDecisionSetIn(base, handle)
+		if err == nil {
+			return set, dir, nil
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
+}
+
+// ReadDecisionSetByID resolves an opaque run ID for a run over workspace, trying each location that
+// workspace's runs can live in.
+func (m *Manager) ReadDecisionSetByID(workspace, runID string) (*StoredDecisionSet, string, error) {
+	id := strings.TrimSpace(runID)
+	var lastErr error = unknownRunHandle(runID)
+	for _, base := range m.runBases(workspace) {
+		if base == "" || id == "" {
+			continue
+		}
+		set, dir, err := m.readDecisionSetIn(base, filepath.Join(base, id))
+		if err == nil {
+			return set, dir, nil
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
+}
+
+// runBases lists the artifact directories a workspace's runs can live in, most specific first.
+func (m *Manager) runBases(workspace string) []string {
+	bases := []string{m.artifactDirFor(workspace)}
+	if temp := localstate.TempRunDir(reviewComponent); temp != bases[0] {
+		bases = append(bases, temp)
+	}
+	return bases
+}
+
+// artifactDirFor is the artifact directory for a run over workspace: ArtifactDirFor's answer when the
+// Manager serves many workspaces, else the fixed ArtifactDir.
+func (m *Manager) artifactDirFor(workspace string) string {
+	if m.ArtifactDirFor != nil && strings.TrimSpace(workspace) != "" {
+		if d := m.ArtifactDirFor(workspace); d != "" {
+			return d
+		}
+	}
+	return m.ArtifactDir
+}
+
+func (m *Manager) readDecisionSetIn(base, handle string) (*StoredDecisionSet, string, error) {
+	dir, err := resolveRunDirIn(base, handle)
 	if err != nil {
 		return nil, "", err
 	}
@@ -366,9 +427,10 @@ func validateRunID(id string) error {
 	return nil
 }
 
-// resolveRunDir turns a peer-supplied handle into the canonical run directory it names, or refuses.
-func (m *Manager) resolveRunDir(handle string) (string, error) {
-	base, h := strings.TrimSpace(m.ArtifactDir), strings.TrimSpace(handle)
+// resolveRunDirIn turns a peer-supplied handle into the canonical run directory it names under base,
+// or refuses.
+func resolveRunDirIn(artifactDir, handle string) (string, error) {
+	base, h := strings.TrimSpace(artifactDir), strings.TrimSpace(handle)
 	if base == "" || h == "" {
 		return "", unknownRunHandle(handle)
 	}

@@ -13,8 +13,8 @@ import (
 // still poll `explore_run_status` and fetch `explore_run_result` — and, just as importantly, that the run has an identity
 // (its run id) which the on-disk record is keyed by.
 //
-// It is no longer a spend governor. See the note on the retention constants for why the admission
-// bounds were removed and where the concurrency decision moved to.
+// It is not a spend governor. See the note on the retention constants for why there are no admission
+// bounds and where the concurrency decision lives.
 
 // Run states, as they appear on the wire.
 const (
@@ -26,15 +26,14 @@ const (
 
 // There is deliberately NO ADMISSION GOVERNOR — neither a lifetime run cap nor an in-flight one.
 //
-// The lifetime cap was never the spend ceiling its name implied: stopping and starting the server
-// cleared the counter, so its guarantee lasted exactly as long as the process did.
+// A lifetime cap would not be a spend ceiling: stopping and starting the server clears any counter, so
+// its guarantee would last exactly as long as the process did.
 //
-// The in-flight cap did hold, but it was the wrong shape. What it really bounded was how many
-// provider CLI subprocesses this machine hosts at once — a fact about the operator's hardware
-// (memory, process budget, whether the model is local and loads weights) and their provider rate
-// limits. A launch-time constant chosen by exploremesh is a guess about all of those. That number is
-// now stated PER INVOCATION as `maxParallel`, by the caller who knows it, and it bounds the seats of
-// their own run rather than admission to the server.
+// An in-flight cap would bound how many provider CLI subprocesses this machine hosts at once — a fact
+// about the operator's hardware (memory, process budget, whether the model is local and loads weights)
+// and their provider rate limits, which a launch-time constant chosen by exploremesh can only guess.
+// That number is stated PER INVOCATION as `maxParallel`, by the caller who knows it, and it bounds the
+// seats of their own run rather than admission to the server.
 //
 // So the registry bounds only RETENTION, which is about this process's memory and nothing else.
 const (
@@ -141,7 +140,7 @@ func (rg *registry) existing(key string) *record {
 	return nil
 }
 
-// admit registers a new run. It no longer refuses: there is no admission governor (see the note on
+// admit registers a new run. It does not refuse: there is no admission governor (see the note on
 // retention above), so the error return is kept only because callers treat admission as fallible and
 // a future bound would land here.
 func (rg *registry) admit(id, tool, modeName, key string, cancel func()) (*record, error) {

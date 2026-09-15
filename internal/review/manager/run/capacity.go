@@ -23,8 +23,8 @@ package run
 // and why, and lets the denominator speak. The findings that survive came from the seats that ran;
 // that is exactly as true as it was before, over a smaller number.
 //
-// WHY THE FLOOR IS NOT A THRESHOLD. An earlier shape of this refused to degrade below N answering
-// seats. There is no N that can be justified from anything: the honest denominator is however many
+// WHY THE FLOOR IS NOT A THRESHOLD. There is no minimum of N answering seats, because no N can be
+// justified from anything: the honest denominator is however many
 // answered, reported plainly, and the panel echo already accounts for every requested seat by name.
 // A threshold would be a number we made up standing where a fact belongs.
 

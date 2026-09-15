@@ -3,7 +3,7 @@ package pipeline
 // This file holds the per-run state carrier + the two stages every round shares: the identity PRE-FLIGHT
 // that runs before the fan-out, and the fan-out itself (used by the blind round 1 and by every later round,
 // so a later round cannot accidentally acquire different drop/halt/identity semantics). It also builds the
-// PER MODE-CLASS degraded terminal artifact (design §1).
+// PER MODE-CLASS degraded terminal artifact.
 
 import (
 	"context"
@@ -40,7 +40,7 @@ type runner struct {
 }
 
 // panelIdentities returns the plan's explorer identities in stable attribution order — the membership the
-// panel is FROZEN on (design §1).
+// panel is FROZEN on.
 func panelIdentities(p roster.Plan) []schema.ExplorerIdentity {
 	out := make([]schema.ExplorerIdentity, 0, len(p.Explorers))
 	for _, e := range p.Explorers {
@@ -49,7 +49,7 @@ func panelIdentities(p roster.Plan) []schema.ExplorerIdentity {
 	return out
 }
 
-// preflightRoles probes every GOVERNED role BEFORE the explorer fan-out (design §1): the collator, and each
+// preflightRoles probes every GOVERNED role BEFORE the explorer fan-out: the collator, and each
 // canonicalizer a canonicalizing mode will use. A role that cannot be invoked fails here, costing one cheap
 // call per role instead of a whole panel. It also PINS each role's resolved model in the identity ledger, so
 // the same-identity invariant has a baseline to compare later calls against.
@@ -116,11 +116,11 @@ func (r *runner) preflightRoles() error {
 // bounded, and each outcome becomes an envelope, a drop, or a halt. It is shared by the blind round 1 and by
 // every later round so their semantics cannot diverge; roundIndex only affects the drop reason prefix and the
 // same-identity role label (an explorer is pinned across the rounds it participates in). `phase` is the
-// adapter-facing phase label — PhaseExplore for a research round, PhaseBallot for a ballot round (design §4):
+// adapter-facing phase label — PhaseExplore for a research round, PhaseBallot for a ballot round:
 // soliciting a preference is a governance act, and a recording must be able to tell it from a research call.
 //
-// A returned halt means the run must stop: a proven explorer identity mismatch (§6.2) or a mid-exploration
-// model swap (§1). Envelopes/drops gathered before the halt are still returned, so the audit record is
+// A returned halt means the run must stop: a proven explorer identity mismatch or a mid-exploration
+// model swap. Envelopes/drops gathered before the halt are still returned, so the audit record is
 // complete.
 func (r *runner) fanout(roundIndex int, phase string, payload schema.ExplorerTaskPayload, payloadHash string) ([]schema.Envelope, []Dropped, error) {
 	outs := make([]explorerOutcome, len(r.plan.Explorers))
@@ -157,7 +157,7 @@ func (r *runner) fanout(roundIndex int, phase string, payload schema.ExplorerTas
 	var drops []Dropped
 	var halt error
 	for i, o := range outs {
-		// SAME-IDENTITY invariant per explorer, across the rounds it participates in (§1).
+		// SAME-IDENTITY invariant per explorer, across the rounds it participates in.
 		if ierr := r.ids.observe("explorer["+identityString(r.plan.Explorers[i].Identity())+"]", o.resolvedModel); ierr != nil && halt == nil {
 			halt = ierr
 		}
@@ -179,7 +179,7 @@ func (r *runner) fanout(roundIndex int, phase string, payload schema.ExplorerTas
 	return envs, drops, halt
 }
 
-// degrade builds the PER MODE-CLASS degraded terminal artifact from the BLIND round-1 envelopes (design §1).
+// degrade builds the PER MODE-CLASS degraded terminal artifact from the BLIND round-1 envelopes.
 // For an EMERGENT-space mode that is the raw attributed envelopes + a mechanical typed-claim index labeled
 // `uncollated — no entity resolution performed`; for a FIXED-space mode it is a real host register keyed on
 // the mode's declared key field. It returns nil when there are no envelopes to carry (nothing was paid for

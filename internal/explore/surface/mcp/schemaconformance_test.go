@@ -15,19 +15,13 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// This file is the check that was missing.
-//
 // Every tool here DECLARES an `outputSchema`, and the run-result one is a strict `oneOf` on `state`
 // precisely so that the governance-bearing fields can be `required` on the branch where a result
-// exists. But nothing validated an emitted `structuredContent` against the schema its own tool
-// advertised — so the declaration and the payload drifted, silently, in two places:
+// exists. A declaration and a payload that are not checked against each other drift silently — for
+// example a CANCELLED payload that satisfies no branch, or a still-RUNNING `run_result` without the panel
+// echo the running branch requires.
 //
-//  1. a CANCELLED call returned the *running* shape with `state` overwritten to "cancelled", which
-//     satisfied no branch: not `running` (the const said otherwise), not `complete`, and not the halt
-//     branch (no `exitCode`/`haltClass`/`reasonCode`);
-//  2. `run_result` on a still-RUNNING exploration omitted the panel echo the running branch requires.
-//
-// The fix is the branches and the payloads; THIS is the part that keeps them together. It walks every
+// This file keeps them together. It walks every
 // result builder in the package, at every state each can produce, and validates the payload against the
 // literal schema the tool declares. A new state, a new field, or a branch someone loosens to make a
 // payload fit now has to survive this table.
@@ -221,10 +215,9 @@ func TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema(t *testing.T) {
 	})
 }
 
-// TestTheDriftTheSchemaNowCatches reconstructs the two payloads as they were emitted BEFORE this fix
-// and asserts the declared schema rejects each one. Without it the table above proves only that the
-// current payloads pass — which a schema loose enough to accept anything would also achieve. These two
-// are the regression itself, kept executable.
+// TestTheDriftTheSchemaNowCatches builds two mis-shaped payloads and asserts the declared schema rejects
+// each one. Without it the table above proves only that the current payloads pass — which a schema loose
+// enough to accept anything would also achieve.
 func TestTheDriftTheSchemaNowCatches(t *testing.T) {
 	result, err := jsonschema.Compile([]byte(runResultSchema))
 	if err != nil {

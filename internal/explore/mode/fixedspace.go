@@ -1,6 +1,6 @@
 package mode
 
-// This file holds the FIXED-SPACE terminal contract (design §0 F-B, §3 Compare + Forecast rows) — the
+// This file holds the FIXED-SPACE terminal contract (compare and forecast) — the
 // third and last terminal seam, alongside the plain CollatorContract and the CanonicalizingContract.
 //
 // It exists because the fixed-space modes invert the usual order of operations. In every other mode the
@@ -17,7 +17,7 @@ package mode
 //	Collate        the terminal output is assembled from the host view + that prose
 //
 // There is no method here through which a model could return a number that reaches the result. That is the
-// point: §0 F-C says a machine governance field carries host-produced values only, and in a fixed-space
+// point: a machine governance field carries host-produced values only, and in a fixed-space
 // mode that rule can be enforced by the shape of the contract rather than by a review of the prompt.
 
 import (
@@ -40,7 +40,7 @@ type FixedSpaceInput struct {
 	Rounds  []round.Round
 	Panel   govern.Panel
 	// FormulationHash is the hash of the byte-identical payload every explorer received — pinned on each
-	// emitted claim, so a count is always tied to the exact question that produced it (§0 F-A).
+	// emitted claim, so a count is always tied to the exact question that produced it.
 	FormulationHash string
 }
 
@@ -53,7 +53,7 @@ type FixedSpaceView struct {
 	Claims []govern.Claim
 }
 
-// FixedSpaceContract is a mode's app-owned FIXED-SPACE terminal behavior (design §3 Compare/Forecast rows).
+// FixedSpaceContract is a mode's app-owned FIXED-SPACE terminal behavior.
 // The pipeline resolves it from ModeSpec.FixedSpace and drives the four steps in the order documented at
 // the top of this file. It is mutually exclusive with Collator and Canonicalizing — a mode sets exactly one.
 type FixedSpaceContract interface {
@@ -65,8 +65,8 @@ type FixedSpaceContract interface {
 	// implements it by showing the host's numbers and asking for narrative — never for a recomputation, a
 	// re-ranking or a "corrected" aggregate.
 	CollatorPrompt(in FixedSpaceInput, view FixedSpaceView) (string, error)
-	// ParseNarrative lifts the collator's raw output into the quarantined collatorNarrative namespace (§0
-	// F-C), attributed to the collator identity. It returns ONLY prose: there is no path from these bytes
+	// ParseNarrative lifts the collator's raw output into the quarantined collatorNarrative namespace,
+	// attributed to the collator identity. It returns ONLY prose: there is no path from these bytes
 	// into a governance value.
 	ParseNarrative(raw []byte, by schema.ExplorerIdentity) ([]govern.Narrative, error)
 	// Collate assembles the terminal ModeOutput from the host view + the parsed narrative. It is a pure view

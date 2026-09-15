@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
@@ -18,14 +21,14 @@ import (
 
 // noRemediation is the FROM-RUN half of Reviewer, stubbed to REFUSE.
 //
-// A write turn carrying `fromRun` no longer runs a review cycle: it resolves the handle and applies
+// A write turn carrying `fromRun` does not run a review cycle: it resolves the handle and applies
 // the decision set that run recorded. Most fakes here are about dispatch, mode gating, sessions or
 // authority and never reach a write, so they embed this. Refusing rather than quietly succeeding is
 // the fail-closed default — a stub that answered "sure, applied" would let a from-run assertion pass
 // without a decision set ever being read.
 type noRemediation struct{}
 
-func (noRemediation) ReadDecisionSet(string) (*run.StoredDecisionSet, string, error) {
+func (noRemediation) ReadDecisionSetFor(string, string) (*run.StoredDecisionSet, string, error) {
 	return nil, "", fault.New(fault.Usage, "this fake resolves no run handles").
 		WithReason(run.ReasonRunHandleUnknown)
 }
@@ -89,28 +92,87 @@ func serve(t *testing.T, mgr Reviewer, lines ...string) []map[string]any {
 	return serveStore(t, mgr, nil, lines...)
 }
 
-// harnessRoots are the trusted roots the GENERIC harness servers below are launched with.
-// These tests are about dispatch, sessions and mode gating — not confinement — so the harness
-// stands in for an operator who ran `aimesh review acp --root <os-temp> --root <package-dir>`:
-// every workspace they name is a `t.TempDir()` under the OS temp dir, and one test exercises
-// the process-cwd fallback. Confinement itself is proven in scope_test.go, where each server
-// is built with ONE narrow root and the requested path is deliberately outside it.
-func harnessRoots(t *testing.T) []string {
+// harnessAdapters is the launch set the harness servers use: the internal fake adapter, and
+// claude-code launched at an executable the test owns, so its availability needs no CLI on the
+// machine running the tests.
+func harnessAdapters(t *testing.T) launchflags.Set {
 	t.Helper()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
+	cc := filepath.Join(t.TempDir(), "claude")
+	if runtime.GOOS == "windows" {
+		cc += ".exe"
 	}
-	return []string{os.TempDir(), wd}
+	if err := os.WriteFile(cc, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	return launchflags.NewSet(
+		launchflags.Adapter{Name: launchflags.FakeAdapter, Source: launchflags.SourceFlag},
+		launchflags.Adapter{Name: "claude-code", Path: cc, Source: launchflags.SourceFlag},
+	)
+}
+
+// defaultPanel is the panel a review turn carries when a test does not name one: every review turn
+// composes its own seats, and most tests here are about something other than the panel.
+func defaultPanel() map[string]any {
+	seat := map[string]any{"adapter": "fake", "model": "m1"}
+	return map[string]any{"reviewers": []any{seat}, "author_remediator": seat}
+}
+
+// withDefaultPanel adds the default panel to a `review` or `session/prompt` line that forms a run and
+// names no panel. A line that carries `fromRun`, names `_meta.reviewmesh.panel` (even as null), or is
+// not a JSON request is returned unchanged.
+func withDefaultPanel(line string) string {
+	var req map[string]any
+	if json.Unmarshal([]byte(line), &req) != nil {
+		return line
+	}
+	if m, _ := req["method"].(string); m != "review" && m != "session/prompt" {
+		return line
+	}
+	params, ok := req["params"].(map[string]any)
+	if !ok {
+		return line
+	}
+	if fr, _ := params["fromRun"].(string); strings.TrimSpace(fr) != "" {
+		return line
+	}
+	metaV, has := params["_meta"]
+	if !has {
+		metaV = map[string]any{}
+	}
+	meta, ok := metaV.(map[string]any)
+	if !ok {
+		return line
+	}
+	rmV, has := meta["reviewmesh"]
+	if !has {
+		rmV = map[string]any{}
+	}
+	rm, ok := rmV.(map[string]any)
+	if !ok {
+		return line
+	}
+	if _, named := rm["panel"]; named {
+		return line
+	}
+	rm["panel"] = defaultPanel()
+	meta["reviewmesh"] = rm
+	params["_meta"] = meta
+	b, err := json.Marshal(req)
+	if err != nil {
+		return line
+	}
+	return string(b)
 }
 
 // wsPlaceholder is the literal that tests write for "some workspace path". runServer swaps it
-// for a real directory inside a trusted root, because a path is no longer self-authorizing:
-// the server judges it against the roots it was launched with.
+// for a real absolute directory, because a turn's workspace must exist and be absolute.
 const wsPlaceholder = `"/ws"`
 
-// runServer feeds lines to srv and decodes the response frames, substituting wsPlaceholder
-// with a real directory first.
+// runServer feeds lines to srv and decodes the response frames, substituting wsPlaceholder with a
+// real directory and adding the default panel to run-forming lines that name none.
+// fromRunHandle matches a slash-rooted literal `fromRun` handle in a test line.
+var fromRunHandle = regexp.MustCompile(`"fromRun":"/([^"]*)"`)
+
 func runServer(t *testing.T, srv *Server, lines ...string) []map[string]any {
 	t.Helper()
 	dir := t.TempDir()
@@ -122,7 +184,14 @@ func runServer(t *testing.T, srv *Server, lines ...string) []map[string]any {
 	ws := strconv.Quote(dir)
 	subst := make([]string, len(lines))
 	for i, l := range lines {
-		subst[i] = strings.ReplaceAll(l, wsPlaceholder, ws)
+		l = strings.ReplaceAll(l, wsPlaceholder, ws)
+		// A literal handle like "/runs/prior-report-run" is absolute only on Unix; a real host's runDir is
+		// absolute on its own platform, so the harness roots it under this test's temp directory.
+		l = fromRunHandle.ReplaceAllStringFunc(l, func(m string) string {
+			rel := fromRunHandle.FindStringSubmatch(m)[1]
+			return `"fromRun":` + strconv.Quote(filepath.Join(dir, filepath.FromSlash(rel)))
+		})
+		subst[i] = withDefaultPanel(l)
 	}
 	var out bytes.Buffer
 	if err := srv.Serve(strings.NewReader(strings.Join(subst, "\n")+"\n"), &out); err != nil {
@@ -145,22 +214,21 @@ func runServer(t *testing.T, srv *Server, lines ...string) []map[string]any {
 func serveStore(t *testing.T, mgr Reviewer, store SessionStore, lines ...string) []map[string]any {
 	t.Helper()
 	return runServer(t, &Server{Manager: mgr, Caps: review.SurfaceCaps{FileRead: true, FileWrite: true},
-		Sessions: store, Roots: harnessRoots(t)}, lines...)
+		Sessions: store, Adapters: harnessAdapters(t)}, lines...)
 }
 
-// serveCaps runs the server with explicit host caps + degrade policy (for mode-gating tests),
-// and no config policy ceiling.
+// serveCaps runs a server launched with --allow-writes, with explicit host caps and degrade policy
+// (for mode-gating tests).
 func serveCaps(t *testing.T, mgr Reviewer, caps review.SurfaceCaps, degrade bool, lines ...string) []map[string]any {
 	t.Helper()
-	return servePolicy(t, mgr, caps, "", degrade, lines...)
+	return serveWrites(t, mgr, caps, true, degrade, lines...)
 }
 
-// servePolicy is serveCaps with an explicit CONFIG policy ceiling (Surfaces.DefaultModeBySurface
-// for the ACP surface) — the ceiling that is independent of what the host can do.
-func servePolicy(t *testing.T, mgr Reviewer, caps review.SurfaceCaps, policy review.Mode, degrade bool, lines ...string) []map[string]any {
+// serveWrites is serveCaps with the --allow-writes grant stated explicitly.
+func serveWrites(t *testing.T, mgr Reviewer, caps review.SurfaceCaps, allowWrites, degrade bool, lines ...string) []map[string]any {
 	t.Helper()
 	return runServer(t, &Server{Manager: mgr, Caps: caps, DegradeWhenModeUnavailable: degrade,
-		PolicyCeiling: policy, Roots: harnessRoots(t)}, lines...)
+		AllowWrites: allowWrites, Adapters: harnessAdapters(t)}, lines...)
 }
 
 // recordReviewer captures the mode + workspace the Manager was actually called with — on BOTH
@@ -185,7 +253,7 @@ func (r *recordReviewer) RunContext(ctx context.Context, req run.Request) (revie
 	return review.RunOutcome{Status: "stable", Mode: req.Mode, RunDir: "/tmp/run-x"}, nil
 }
 
-func (r *recordReviewer) ReadDecisionSet(handle string) (*run.StoredDecisionSet, string, error) {
+func (r *recordReviewer) ReadDecisionSetFor(_, handle string) (*run.StoredDecisionSet, string, error) {
 	return stubDecisionSet(handle, r.source), "/artifacts/" + filepath.Base(handle), nil
 }
 
@@ -208,7 +276,7 @@ func (f *fakeRemediator) RunContext(_ context.Context, req run.Request) (review.
 	return review.RunOutcome{Status: "stable", Mode: req.Mode, RunDir: "/tmp/run-x"}, nil
 }
 
-func (f *fakeRemediator) ReadDecisionSet(handle string) (*run.StoredDecisionSet, string, error) {
+func (f *fakeRemediator) ReadDecisionSetFor(_, handle string) (*run.StoredDecisionSet, string, error) {
 	return stubDecisionSet(handle, f.source), "/artifacts/" + filepath.Base(handle), nil
 }
 
@@ -268,17 +336,18 @@ func TestModeGating_UnknownModeRejected(t *testing.T) {
 	}
 }
 
-// A host with neither write nor diff capability caps patch down to report.
-func TestModeGating_NoDiffHost_PatchDegradesToReport(t *testing.T) {
+// A patch turn is always permitted: it changes no project content, so neither the write grant nor
+// the host's capabilities gate it.
+func TestModeGating_PatchIsAlwaysPermitted(t *testing.T) {
 	rec := &recordReviewer{}
-	r := serveCaps(t, rec, review.SurfaceCaps{FileRead: true}, true,
+	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true}, false, true,
 		`{"jsonrpc":"2.0","id":1,"method":"review","params":{"workspace":"/ws","mode":"patch"}}`)
 	res := result(t, r[0])
-	if res["mode"] != "report" {
-		t.Errorf("effective mode = %v, want report", res["mode"])
+	if res["mode"] != "patch" || res["modeDegraded"] != nil {
+		t.Errorf("a patch turn must run as patch with no grant, got %v", res)
 	}
-	if rec.mode != review.ModeReport {
-		t.Errorf("Manager received mode %q, want report", rec.mode)
+	if rec.mode != review.ModePatch {
+		t.Errorf("Manager received mode %q, want patch", rec.mode)
 	}
 }
 
@@ -450,86 +519,89 @@ func TestPermissionGate_DenyWriteFailsWhenDegradeDisabled(t *testing.T) {
 	}
 }
 
-// The CONFIG policy ceiling for the ACP surface caps a fully write-capable connection: the
-// shipped seed is `acp: report`, so a host that advertises write capability (or advertises no
-// `fs` capabilities at all) and asks for `apply` runs in REPORT mode. The degradation is
-// explicit — a `mode_degraded` warn plus modeDegraded/requestedMode in the result — never a
-// silent downgrade, and the Manager is invoked with the capped mode so no live write can occur.
-func TestPolicyCeiling_ReportCapsApplyOnWriteCapableHost(t *testing.T) {
+// Without --allow-writes, an apply turn on a fully write-capable host is REFUSED before any run, with a
+// message naming the grant and the patch turn that supplies the diff instead.
+func TestWriteGrant_ApplyWithoutGrantIsRefused(t *testing.T) {
 	rec := &recordReviewer{}
-	r := servePolicy(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
-		review.ModeReport, true,
+	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
+		false, true,
 		`{"jsonrpc":"2.0","id":1,"method":"session/new"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":"/ws","mode":"apply"}}`)
-	rm := promptMeta(t, r[len(r)-1])
-	if rm["mode"] != "report" {
-		t.Errorf("effective mode = %v, want report (config policy ceiling)", rm["mode"])
+	e := rpcErr(t, r[len(r)-1])
+	if e["code"] != float64(codeInvalidParams) {
+		t.Fatalf("code = %v, want %d — an apply without --allow-writes is refused, never degraded", e["code"], codeInvalidParams)
 	}
-	if rm["modeDegraded"] != true || rm["requestedMode"] != "apply" {
-		t.Errorf("expected modeDegraded=true requestedMode=apply, got %v", rm)
+	if data, _ := e["data"].(map[string]any); data["reasonCode"] != ReasonWritesNotGranted {
+		t.Errorf("reasonCode = %v, want %s", data["reasonCode"], ReasonWritesNotGranted)
 	}
-	if rec.mode != review.ModeReport {
-		t.Errorf("Manager received mode %q, want report", rec.mode)
+	if msg, _ := e["message"].(string); !strings.Contains(msg, "--allow-writes") || !strings.Contains(msg, "patch") {
+		t.Errorf("the refusal must name --allow-writes and the patch turn: %q", msg)
 	}
-	var warned bool
-	for _, resp := range r {
-		if resp["method"] != "session/update" {
-			continue
-		}
-		upd, _ := resp["params"].(map[string]any)["update"].(map[string]any)
-		meta, _ := upd["_meta"].(map[string]any)
-		if em, _ := meta["reviewmesh"].(map[string]any); em["eventType"] == "mode_degraded" && em["level"] == "warn" {
-			warned = true
-		}
-	}
-	if !warned {
-		t.Error("a policy-capped apply must emit a mode_degraded warn session/update")
+	if rec.mode != "" {
+		t.Errorf("the Manager must not run on a refused apply, got mode %q", rec.mode)
 	}
 }
 
-// With degradation disabled, the same policy-capped apply is refused with a usage error
-// BEFORE any run (no spend), not silently downgraded.
-func TestPolicyCeiling_ReportFailsApplyWhenDegradeDisabled(t *testing.T) {
+// An omitted mode is report on the compatibility `review` method too, even when writes are granted.
+func TestWriteGrant_OmittedModeIsReport(t *testing.T) {
 	rec := &recordReviewer{}
-	r := servePolicy(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
-		review.ModeReport, false,
+	serveWrites(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
+		true, true,
+		`{"jsonrpc":"2.0","id":1,"method":"review","params":{"workspace":"/ws"}}`)
+	if rec.mode != review.ModeReport {
+		t.Errorf("Manager received mode %q, want report for an omitted mode", rec.mode)
+	}
+}
+
+// With degradation disabled, the same apply is refused with a usage error that names the grant,
+// BEFORE any run (no spend), not silently downgraded.
+func TestWriteGrant_ApplyWithoutGrantFailsWhenDegradeDisabled(t *testing.T) {
+	rec := &recordReviewer{}
+	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
+		false, false,
 		`{"jsonrpc":"2.0","id":1,"method":"session/new"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":"/ws","mode":"apply"}}`)
 	e := rpcErr(t, r[len(r)-1])
 	if e["code"].(float64) != codeInvalidParams {
 		t.Errorf("error code = %v, want %d (invalid params)", e["code"], codeInvalidParams)
 	}
+	if msg, _ := e["message"].(string); !strings.Contains(msg, "--allow-writes") {
+		t.Errorf("message = %q, want it to name --allow-writes", msg)
+	}
 	if rec.mode != "" {
-		t.Errorf("Manager must not run when the policy-capped mode is rejected; got %q", rec.mode)
+		t.Errorf("Manager must not run when the capped mode is rejected; got %q", rec.mode)
 	}
 }
 
-// A user who widens the policy (`surfaces.defaultModeBySurface.acp: apply`) gets apply — the
-// ceiling is config-visible policy, not a hard-coded refusal.
-func TestPolicyCeiling_WidenedToApplyIsHonored(t *testing.T) {
+// With --allow-writes, an apply turn carrying a run handle is honored unchanged, and the turn
+// discloses that aimesh performs the write.
+func TestWriteGrant_GrantHonorsApply(t *testing.T) {
 	rec := &recordReviewer{}
-	r := servePolicy(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
-		review.ModeApply, true,
+	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
+		true, true,
 		`{"jsonrpc":"2.0","id":1,"method":"session/new"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":"/ws","fromRun":"/runs/prior-report-run","mode":"apply"}}`)
 	rm := promptMeta(t, r[len(r)-1])
 	if rm["mode"] != "apply" || rm["modeDegraded"] != nil {
-		t.Errorf("a widened policy must honor apply unchanged, got %v", rm)
+		t.Errorf("a granted apply must run unchanged, got %v", rm)
+	}
+	if rm["writes"] != "aimesh" || rm["diffAvailable"] != true {
+		t.Errorf("the turn must disclose writes=aimesh and diffAvailable=true, got %v", rm)
 	}
 	if rec.mode != review.ModeApply {
 		t.Errorf("Manager received mode %q, want apply", rec.mode)
 	}
 }
 
-// A widened policy never WIDENS past what the connection can do: the narrowest of
-// capability / permission / policy always wins.
-func TestPolicyCeiling_NeverWidensBeyondHostCapability(t *testing.T) {
+// The grant never WIDENS past what the host can do: the narrowest of grant / capability /
+// permission always wins.
+func TestWriteGrant_NeverWidensBeyondHostCapability(t *testing.T) {
 	rec := &recordReviewer{}
-	r := servePolicy(t, rec, review.SurfaceCaps{FileRead: true, DiffContext: true},
-		review.ModeApply, true,
+	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true, DiffContext: true},
+		true, true,
 		`{"jsonrpc":"2.0","id":1,"method":"review","params":{"workspace":"/ws","mode":"apply"}}`)
 	if res := result(t, r[0]); res["mode"] != "patch" {
-		t.Errorf("effective mode = %v, want patch (read-only host beats a widened policy)", res["mode"])
+		t.Errorf("effective mode = %v, want patch (a read-only host beats the write grant)", res["mode"])
 	}
 	if rec.mode != review.ModePatch {
 		t.Errorf("Manager received mode %q, want patch", rec.mode)
@@ -595,6 +667,23 @@ func TestInitialize(t *testing.T) {
 	}
 	if res["capabilities"] != nil || res["serverInfo"] != nil {
 		t.Errorf("ACP v1 initialize must not carry top-level capabilities/serverInfo, got %v", res)
+	}
+}
+
+// initialize discloses who performs writes before the first prompt: `agent` without --allow-writes,
+// `aimesh` with it — and the diff is available either way.
+func TestInitialize_DisclosesWhoWrites(t *testing.T) {
+	line := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`
+	for _, tc := range []struct {
+		allow bool
+		want  string
+	}{{false, "agent"}, {true, "aimesh"}} {
+		r := serveWrites(t, fakeReviewer{}, review.SurfaceCaps{FileRead: true, FileWrite: true}, tc.allow, true, line)
+		meta, _ := result(t, r[0])["_meta"].(map[string]any)
+		rm, _ := meta["reviewmesh"].(map[string]any)
+		if rm["writes"] != tc.want || rm["diffAvailable"] != true {
+			t.Errorf("allowWrites=%v: initialize _meta.reviewmesh = %v, want writes=%s diffAvailable=true", tc.allow, rm, tc.want)
+		}
 	}
 }
 
@@ -886,16 +975,53 @@ func TestACP_SessionPrompt_ExplicitWorkspaceOverridesCwd(t *testing.T) {
 	}
 }
 
-// With no cwd stored, a prompt that omits `workspace` falls back to the process working
-// directory (not an error).
-func TestACP_SessionPrompt_GetwdFallbackWhenNoCwd(t *testing.T) {
+// With no cwd stored, a prompt that omits `workspace` is refused: nothing is inferred from where
+// the agent process started.
+func TestACP_SessionPrompt_NoWorkspaceAndNoCwdIsRefused(t *testing.T) {
 	rec := &recordReviewer{}
-	serve(t, rec,
+	r := serve(t, rec,
 		`{"jsonrpc":"2.0","id":1,"method":"session/new"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-0001","mode":"report"}}`)
-	wd, _ := os.Getwd()
-	if rec.ws != wd {
-		t.Errorf("a no-cwd prompt should fall back to os.Getwd() %q, got %q", wd, rec.ws)
+	e := rpcErr(t, r[len(r)-1])
+	if e["code"].(float64) != codeInvalidParams {
+		t.Errorf("code = %v, want %d", e["code"], codeInvalidParams)
+	}
+	if msg, _ := e["message"].(string); !strings.Contains(msg, "workspace is required") {
+		t.Errorf("message = %q, want \"workspace is required\"", msg)
+	}
+	if rec.ws != "" {
+		t.Errorf("the Manager ran with %q; a turn with no declared workspace must not run", rec.ws)
+	}
+}
+
+// A prompt workspace must be absolute: this agent shares no working directory with its host.
+func TestACP_SessionPrompt_RelativeWorkspaceIsRefused(t *testing.T) {
+	rec := &recordReviewer{}
+	r := serve(t, rec,
+		`{"jsonrpc":"2.0","id":1,"method":"session/new"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":"project","mode":"report"}}`)
+	e := rpcErr(t, r[len(r)-1])
+	data, _ := e["data"].(map[string]any)
+	if data["reasonCode"] != ReasonCallPathRelative {
+		t.Errorf("data = %v, want reasonCode %q", e["data"], ReasonCallPathRelative)
+	}
+	if rec.ws != "" {
+		t.Errorf("the Manager ran with %q; a relative workspace must be refused", rec.ws)
+	}
+}
+
+// A relative session cwd is refused when the session is created, so no session can fall back to it.
+func TestACP_SessionNew_RelativeCwdIsRefused(t *testing.T) {
+	rec := &recordReviewer{}
+	r := serve(t, rec,
+		`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"project"}}`)
+	e := rpcErr(t, r[len(r)-1])
+	data, _ := e["data"].(map[string]any)
+	if data["reasonCode"] != ReasonCallPathRelative {
+		t.Errorf("data = %v, want reasonCode %q", e["data"], ReasonCallPathRelative)
+	}
+	if rec.ws != "" {
+		t.Errorf("the Manager ran with %q; a relative session cwd must be refused", rec.ws)
 	}
 }
 
@@ -1118,15 +1244,14 @@ func TestCancelInFlightReview(t *testing.T) {
 func itoa(n int) string { return strconv.Itoa(n) }
 
 func TestServe_EOFWithBlockedReviewDoesNotHang(t *testing.T) {
-	// A real, trusted workspace: the review must actually START (and block) for this test to
-	// mean anything — a request refused pre-spend would never reach the in-flight state.
+	// A real workspace and a launched adapter: the review must actually START (and block) for this
+	// test to mean anything — a request refused pre-spend would never reach the in-flight state.
 	ws := t.TempDir()
-	srv := &Server{Manager: fakeReviewer{block: true}, Roots: []string{ws}}
+	srv := &Server{Manager: fakeReviewer{block: true}, Adapters: harnessAdapters(t)}
+	line := withDefaultPanel(`{"jsonrpc":"2.0","id":1,"method":"review","params":{"workspace":` + strconv.Quote(ws) + `}}`)
 	done := make(chan error, 1)
 	go func() {
-		done <- srv.Serve(
-			strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"review","params":{"workspace":`+strconv.Quote(ws)+`}}`+"\n"),
-			&bytes.Buffer{})
+		done <- srv.Serve(strings.NewReader(line+"\n"), &bytes.Buffer{})
 	}()
 	select {
 	case <-done: // cancelAll on return unblocked the in-flight review

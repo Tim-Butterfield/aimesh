@@ -68,11 +68,11 @@ func TestReviewReport_CarriesTheCallersTraceContextToTheManager(t *testing.T) {
 		// revision's `_meta` contract — and nothing reaches the run record.
 		ws := workspaceFixture(t)
 		rv := &tracingReviewer{}
-		s := newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} })
+		s := newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} })
 		c := serve(t, s)
 		res, _ := c.call(t, "tools/call", map[string]any{
 			"name":      "review_report",
-			"arguments": map[string]any{"workspace": ws},
+			"arguments": map[string]any{"workspace": ws, "panel": defaultPanel()},
 			"_meta":     map[string]any{"traceparent": parent},
 		})
 		if res.Error != nil {
@@ -103,7 +103,7 @@ func modernTraceServer(t *testing.T) (*tracingReviewer, string, *modernRawClient
 	t.Helper()
 	ws := workspaceFixture(t)
 	rv := &tracingReviewer{}
-	s := newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} })
+	s := newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} })
 
 	sr, cw := io.Pipe()
 	cr, sw := io.Pipe()
@@ -132,7 +132,7 @@ func (c *modernRawClient) modernCall(t *testing.T, id int, tool string, args, ex
 	}
 	b, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": "tools/call",
-		"params": map[string]any{"name": tool, "arguments": args, "_meta": meta},
+		"params": map[string]any{"name": tool, "arguments": withPanel(tool, args), "_meta": meta},
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

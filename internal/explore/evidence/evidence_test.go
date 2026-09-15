@@ -1,6 +1,6 @@
 package evidence
 
-// Tests for the DERIVED evidence export (design §9). Four of them are the contract:
+// Tests for the DERIVED evidence export. Four of them are the contract:
 //
 //	a captured run exports, and the integrity gates pass
 //	rebuild-and-compare: exporting the same directory twice is identical, in content AND in bytes
@@ -170,7 +170,7 @@ func TestExport_CapturedRunExportsWithIntegrityGates(t *testing.T) {
 	}
 }
 
-// TestExport_RebuildAndCompare is §9's derivability invariant: exporting the same run directory twice yields
+// TestExport_RebuildAndCompare is the derivability invariant: exporting the same run directory twice yields
 // identical CONTENT and identical BYTES. It is the property that makes the database honest — it says the
 // export is a pure function of the append-only run directory, which stays the system of record.
 func TestExport_RebuildAndCompare(t *testing.T) {
@@ -245,7 +245,7 @@ func firstDiff(a, b string) string {
 	return fmt.Sprintf("one dump is longer than the other (%d vs %d lines)", len(la), len(lb))
 }
 
-// TestExport_DoctoredBallotIsRejected is §9's named invariant: a ballot row referencing a canonical ID that
+// TestExport_DoctoredBallotIsRejected is the named governance invariant: a ballot row referencing a canonical ID that
 // is ABSENT from the confirmed revision must be a CONSTRAINT VIOLATION, not a silent pass. The run directory
 // is doctored exactly the way a tampered or corrupted record would be, and the export must refuse it.
 func TestExport_DoctoredBallotIsRejected(t *testing.T) {
@@ -282,7 +282,7 @@ func TestExport_DoctoredBallotIsRejected(t *testing.T) {
 	}
 }
 
-// TestExport_LineageIsRecursiveCTETraversable pins the one variable-depth structure (§9): a recursive CTE
+// TestExport_LineageIsRecursiveCTETraversable pins the one variable-depth structure: a recursive CTE
 // over lineage_edges walks from a BLIND round-1 envelope through the mention it produced, the canonical
 // entity that mention was mapped to, and out to the decision entry the entity was tallied as.
 func TestExport_LineageIsRecursiveCTETraversable(t *testing.T) {

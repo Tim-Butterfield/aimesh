@@ -15,10 +15,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 )
 
-// The TURN BUDGET. Until this shipped, an ACP prompt could run until the host gave up — and on a
-// stdio agent that means a panel of model CLIs still spending with nobody waiting for them, which
-// is precisely the surface-parity gap the MCP design recorded (every other aimesh agent surface has
-// bounded a turn since it shipped).
+// The TURN BUDGET. Without it an ACP prompt could run until the host gave up — and on a stdio agent
+// that means a panel of model CLIs still spending with nobody waiting for them. Every aimesh agent
+// surface bounds a turn.
 //
 // The budget is enforced by cancelling the run's context, so a timeout takes the SAME path a host
 // cancellation takes: the manager sees ctx.Done at its own boundaries, and the no-write-after-cancel
@@ -42,7 +41,7 @@ func TestTurnTimeout_CancelsARunThatOutlivesIt(t *testing.T) {
 	rv := &blockingReviewer{entered: make(chan struct{}), err: make(chan error, 1)}
 	srv := &Server{
 		Manager: rv, Caps: review.SurfaceCaps{FileRead: true},
-		Roots: harnessRoots(t), TurnTimeout: 40 * time.Millisecond,
+		Adapters: harnessAdapters(t), TurnTimeout: 40 * time.Millisecond,
 	}
 	// A real pipe rather than the shared string-reader harness: the harness's input EOFs
 	// immediately, and EOF cancels every in-flight run by design — which would mask the very thing
@@ -60,7 +59,7 @@ func TestTurnTimeout_CancelsARunThatOutlivesIt(t *testing.T) {
 		<-served
 	})
 	frames := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}` + "\n" +
-		`{"jsonrpc":"2.0","id":2,"method":"review","params":{"workspace":` + strconv.Quote(t.TempDir()) + `,"mode":"report"}}` + "\n"
+		withDefaultPanel(`{"jsonrpc":"2.0","id":2,"method":"review","params":{"workspace":`+strconv.Quote(t.TempDir())+`,"mode":"report"}}`) + "\n"
 	if _, err := io.WriteString(inw, frames); err != nil {
 		t.Fatalf("write frames: %v", err)
 	}
@@ -120,8 +119,7 @@ func TestTurnBudget_DefaultsRatherThanDisabling(t *testing.T) {
 	}
 }
 
-// The flag is documented where an operator looks for it. The review guide moved to docs/review.md when
-// the app modules collapsed into one: it is no longer a module README, because there is no module.
+// The flag is documented where an operator looks for it: the review guide, docs/review.md.
 func TestTurnTimeout_IsDocumentedInTheReadme(t *testing.T) {
 	b, err := os.ReadFile("../../../../docs/review.md")
 	if err != nil {

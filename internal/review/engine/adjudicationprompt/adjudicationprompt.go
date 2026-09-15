@@ -14,7 +14,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// FileSnippet is one WHOLE workspace file shown to the host. The collector no longer clips a file
+// FileSnippet is one WHOLE workspace file shown to the host. The collector does not clip a file
 // or stops early (see workspace.Snippet), so the host adjudicates against the same complete files
 // the reviewers saw.
 type FileSnippet struct {

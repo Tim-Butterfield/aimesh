@@ -78,7 +78,7 @@ func TestCLIDryRun_DisclosesWhatTheRunWouldCarry(t *testing.T) {
 	// Nothing is clipped or truncated any more, so the disclosure must not hedge as though it
 	// might be: the payload is the whole workspace minus containment, and it says so.
 	if strings.Contains(out, "cut the walk short") || strings.Contains(out, "truncated") {
-		t.Errorf("the disclosure hedges about a budget that no longer exists:\n%s", out)
+		t.Errorf("the disclosure hedges about a budget that does not exist:\n%s", out)
 	}
 }
 

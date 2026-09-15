@@ -1,6 +1,6 @@
 package evidence
 
-// This file holds the DERIVED EVIDENCE SCHEMA (design §9): a RELATIONAL CORE plus exactly ONE
+// This file holds the DERIVED EVIDENCE SCHEMA: a RELATIONAL CORE plus exactly ONE
 // variable-depth structure (`lineage_edges`). Both halves of that sentence were decisions:
 //
 //   - RELATIONAL, NOT A PROPERTY GRAPH. Rounds, envelopes, mentions, canonical entities, ballots, decisions
@@ -11,13 +11,13 @@ package evidence
 //     result traces back through the rounds to the blind responses it came from. That is a recursive-CTE
 //     traversal, and it is the only one.
 //
-// Two schema rules follow from §9 and are applied without exception below:
+// Two schema rules follow from the derived-export contract and are applied without exception below:
 //
 //   - GOVERNANCE VALUES ARE REAL TYPED COLUMNS. A claim's k, its denominators, its label, its rules version
 //     and its pinned hashes are columns — because the reason to export at all is to make governance SQL
 //     runnable, and `json_extract(payload, '$.kOfPanel.k')` is not that. JSON appears in exactly two places,
 //     both ORIGINAL PAYLOADS the export does not interpret: an envelope's response and the declared task.
-//   - FK INTEGRITY ENFORCES GOVERNANCE INVARIANTS. The load-bearing one, named explicitly in §9: a
+//   - FK INTEGRITY ENFORCES GOVERNANCE INVARIANTS. The load-bearing one: a
 //     `ballot_entries` row references `canonical_entities` AT THE CONFIRMED REVISION, so a ballot naming a
 //     candidate that is not in the confirmed universe is a CONSTRAINT VIOLATION at export time — not a
 //     silent pass, and not a check some reader has to remember to run.
@@ -325,7 +325,7 @@ CREATE TABLE contested_mapping_entities (
   FOREIGN KEY (exploration_id, seq) REFERENCES contested_mappings(exploration_id, seq)
 ) STRICT;
 
--- Criteria carry their ORIGIN + AGGREGATION METHOD (§4) and, for a fixed-space comparison, the DIRECTION,
+-- Criteria carry their ORIGIN + AGGREGATION METHOD and, for a fixed-space comparison, the DIRECTION,
 -- ROLE and user WEIGHT that decide the host's Pareto rule — all as typed columns.
 CREATE TABLE criteria (
   exploration_id     TEXT NOT NULL,
@@ -409,7 +409,7 @@ CREATE TABLE ballots (
   FOREIGN KEY (exploration_id, envelope_ref) REFERENCES envelopes(exploration_id, envelope_ref)
 ) STRICT;
 
--- THE governance invariant §9 names: a ballot entry referencing a canonical ID that is absent from the
+-- THE governance invariant: a ballot entry referencing a canonical ID that is absent from the
 -- CONFIRMED revision is a foreign-key violation, and the export fails rather than silently accepting it.
 CREATE TABLE ballot_entries (
   exploration_id     TEXT NOT NULL,
@@ -441,7 +441,7 @@ CREATE TABLE decision_entries (
 ) STRICT;
 
 -- Every emitted governance claim, with its query id/version, params, pinned hashes, rules version, value and
--- both denominators as REAL COLUMNS (§9). partition_revision_hash carries the fixed-space "no partition"
+-- both denominators as REAL COLUMNS. partition_revision_hash carries the fixed-space "no partition"
 -- statement verbatim for a Compare/Forecast run — an honest sentence rather than an empty string.
 CREATE TABLE governance_claims (
   exploration_id          TEXT NOT NULL,
@@ -470,7 +470,7 @@ CREATE TABLE governance_claims (
   FOREIGN KEY (exploration_id) REFERENCES explorations(exploration_id)
 ) STRICT;
 
--- "the EXACT contributing source IDs" (§9), as rows rather than as a list inside a blob.
+-- "the EXACT contributing source IDs", as rows rather than as a list inside a blob.
 CREATE TABLE governance_claim_sources (
   exploration_id TEXT NOT NULL,
   claim_id       TEXT NOT NULL,
@@ -480,7 +480,7 @@ CREATE TABLE governance_claim_sources (
   FOREIGN KEY (exploration_id, envelope_ref) REFERENCES envelopes(exploration_id, envelope_ref)
 ) STRICT;
 
--- The quarantined model-prose namespace (§0 F-C). It is a separate table for the same reason it is a
+-- The quarantined model-prose namespace. It is a separate table for the same reason it is a
 -- separate field: so no query that reads a governance value can accidentally read a model's words.
 CREATE TABLE collator_narrative (
   exploration_id TEXT NOT NULL,

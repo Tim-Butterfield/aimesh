@@ -9,8 +9,7 @@ import (
 
 // --- aimesh mcp ---------------------------------------------------------------------------------
 
-// The composed server is the entry a host config points at, so the root must dispatch it at all.
-// Before this it answered `unknown command "mcp"` while both domains had their own.
+// The composed server is the entry a host config points at, so the root must dispatch it.
 func TestMCP_IsAShippedRootCommand(t *testing.T) {
 	_, out, _ := run(t, "--help")
 	if !strings.Contains(out, "  mcp ") && !strings.Contains(out, "  mcp\n") {
@@ -37,16 +36,15 @@ func TestMCP_OnlyIsValidatedNotDefaulted(t *testing.T) {
 
 // A domain-specific flag whose domain is NOT served is refused, never ignored.
 //
-// This is the case that matters most: --allow-remediate is a capability grant. Accepting it quietly
+// This is the case that matters most: --allow-writes is a capability grant. Accepting it quietly
 // under `--only explore` would leave an operator believing they had enabled a write on a server that
 // does not even carry the tool.
 func TestMCP_AFlagWhoseDomainIsNotServedIsRefused(t *testing.T) {
 	cases := []struct{ only, flag string }{
-		{"explore", "--allow-remediate"},
-		// A bool, so it needs no value — the table drives flags positionally and a value-taking flag
+		{"explore", "--allow-writes"},
+		// Bools, so they need no value — the table drives flags positionally and a value-taking flag
 		// would fail on the argument rather than on the domain rule this test is about.
 		{"explore", "--verify-baseline"},
-		{"explore", "--no-default-root"},
 		{"review", "--no-capture"},
 	}
 	for _, c := range cases {
@@ -68,9 +66,9 @@ func TestMCP_AFlagWhoseDomainIsNotServedIsRefused(t *testing.T) {
 func TestMCP_AFlagIsAcceptedWhenItsDomainIsServed(t *testing.T) {
 	// --only review with a review flag must get PAST flag validation. It then fails or serves on its
 	// own merits, which this test does not drive; what it must not be is a usage error about the flag.
-	_, _, errb := run(t, "mcp", "--only", "review", "--allow-remediate", "--help")
+	_, _, errb := run(t, "mcp", "--only", "review", "--allow-writes", "--help")
 	if strings.Contains(errb, "would do nothing") {
-		t.Errorf("--allow-remediate is review's own flag and --only review serves review: %q", errb)
+		t.Errorf("--allow-writes is review's own flag and --only review serves review: %q", errb)
 	}
 }
 

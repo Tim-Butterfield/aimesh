@@ -7,10 +7,6 @@ package run
 // resolver into an existence oracle over every absolute path a peer cared to name. These tests hold
 // the resolution to both halves: it accepts only a run this agent produced, and it answers every
 // failure alike.
-//
-// AGAINST THE OLD CODE they do not compile: there was no on-disk decision set and no reader for one.
-// The behavioural claim they encode — that a handle is verified rather than trusted — had no
-// implementation to be true of.
 
 import (
 	"context"
@@ -225,9 +221,6 @@ func TestBindWorkspace_NoDurableKeyStillBinds(t *testing.T) {
 // cannot form a handle itself, so RunHandle spells one for it. What it must NOT do is extend any
 // trust: the joined path faces the same four checks, so an id that is really a traversal, an
 // absolute path or a nested path is refused exactly as the same string handed in as a handle is.
-//
-// AGAINST THE OLD CODE this does not compile: there was no RunHandle, and MCP's `fromRun` therefore
-// had no way to name a run directory at all.
 func TestRunHandle_IsASpellingNotABypass(t *testing.T) {
 	m, runDir, _ := decisionSetFixture(t)
 	id := filepath.Base(runDir)
@@ -270,9 +263,6 @@ func TestRunHandle_IsASpellingNotABypass(t *testing.T) {
 // exists supplies the run id, and the run's directory is named for it — which is the whole reason
 // MCP's `review_remediate {fromRun}` can read a set it recorded: the only handle a client holds is
 // the directory's own name.
-//
-// AGAINST THE OLD CODE this fails: the id was generated inside RunContext from the start time, so a
-// caller-supplied one was ignored and the two names had nothing to do with each other.
 func TestRunID_NamesTheRunDirectory(t *testing.T) {
 	m := syntheticAdjManager(t, fake.Empty)
 	ws, _ := makeWorkspace(t)
@@ -296,8 +286,6 @@ func TestRunID_NamesTheRunDirectory(t *testing.T) {
 // the artifact directory. It is server-generated today, so this cannot fire for any client — which is
 // exactly why it is asserted rather than assumed: a guard that is only true by the current caller's
 // good behaviour is one caller away from being false.
-//
-// AGAINST THE OLD CODE this does not compile: there was no such field and no such check.
 func TestValidateRunID_RefusesAnythingThatIsNotASingleName(t *testing.T) {
 	for _, bad := range []string{".", "..", "a/b", "/abs", `a\b`, "../escape", "x/"} {
 		err := validateRunID(bad)

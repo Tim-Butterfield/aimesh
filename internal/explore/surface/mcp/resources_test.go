@@ -14,9 +14,9 @@ import (
 // `resources/*` on the exploration server, driven by the OFFICIAL SDK client.
 //
 // exploremesh writes a run record for every MCP run precisely so its governance claims stay checkable
-// after the fact — and until now that record was reachable only from the machine that owns it. This
-// surface reports no host path (deliberately), so a client that wanted the manifest behind a synthesis,
-// or the raw envelopes behind a count, had no route to either.
+// after the fact, and MCP resources make that record reachable beyond the machine that owns it. This
+// surface reports no host path (deliberately), so resources are the client's route to the manifest
+// behind a synthesis or the raw envelopes behind a count.
 //
 // The set published is taken from the run's OWN MANIFEST, so what a client can fetch is exactly what the
 // capture layer recorded — including each artifact's digest, which is re-verified on every read.

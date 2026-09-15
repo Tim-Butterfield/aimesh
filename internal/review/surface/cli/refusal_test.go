@@ -14,15 +14,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// The CLI half of the partial-refusal contract (design §13.4.3).
+// The CLI half of the partial-refusal contract.
 //
 // A run that applied seven findings and refused one is not a success, and the CLI's ONLY
 // machine-readable channel for saying so is its exit code — CI scripts key on it and on nothing
-// else. Exit 0 would violate D8-C's load-bearing clause on the surface where violating it is
+// else. Exit 0 would violate the partial-refusal contract on the surface where violating it is
 // cheapest, so a completed apply carrying a protected-path refusal exits 7.
-//
-// AGAINST THE OLD CODE EVERY TEST HERE FAILS AT ITS FIRST ASSERTION, because the run halted:
-// exit 6 (containment), a halt record on disk, and nothing applied.
 
 // refusalWorkspace is an ordinary project that also contains a protected file, which is what a
 // real repository looks like.
@@ -62,7 +59,7 @@ func TestReview_Apply_ProtectedPathRefusal_Exit7(t *testing.T) {
 	if !strings.Contains(out, ".env") {
 		t.Errorf("the refusal must NAME the refused path — a count with no path is not actionable:\n%s", out)
 	}
-	// The valid finding was still applied. This is what D8-C exists for: one
+	// The valid finding was still applied. This is what the partial-refusal contract exists for: one
 	// out-of-bounds target must not discard the whole paid run.
 	if !strings.Contains(readFile(t, filepath.Join(ws, "main.go")), "reviewmesh[") {
 		t.Error("the ordinary finding was not applied — a protected-path refusal must not discard the rest of the run")

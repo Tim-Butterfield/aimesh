@@ -1,7 +1,7 @@
 package govern
 
-// This file is the HOST ARITHMETIC of the FIXED-SPACE modes (design §0 F-B, §3 Compare + Forecast rows,
-// §4): the options×criteria matrix with PER-CELL agreement, the filter gate, the Pareto frontier, the
+// This file is the HOST ARITHMETIC of the FIXED-SPACE modes (compare and forecast):
+// the options×criteria matrix with PER-CELL agreement, the filter gate, the Pareto frontier, the
 // optional weighted scalar ranking, and the governance claims all four pin themselves to.
 //
 // It lives in this package for the same reason the ballot tally does: every number here is a deterministic
@@ -10,7 +10,7 @@ package govern
 //
 //   - THERE IS NO PARTITION. The option set and the criteria were declared by the user before any explorer
 //     spoke, so matching "Postgres" to "Postgres" is a string comparison over a universe the host handed
-//     out — not the entity-resolution judgment §0 F-B keeps visible and contestable. Emitting an empty
+//     out — not the entity-resolution judgment that must stay visible and contestable. Emitting an empty
 //     partitionRevisionHash would imply there was a partition and it happened to be blank, so a fixed-space
 //     claim carries FixedSpaceNoPartition instead: a sentence saying plainly that no entity resolution was
 //     performed, and why it was not needed.
@@ -32,7 +32,7 @@ import (
 
 // The versioned HOST rules of the fixed-space path. Every one of them is stamped onto the value it
 // produced, so a matrix read later is interpretable under the rules that built it rather than under
-// whatever this file does today (§4/§9).
+// whatever this file does today.
 const (
 	// FixedSpaceRulesVersion versions the fixed-space arithmetic as a whole.
 	FixedSpaceRulesVersion = "exploremesh-fixed-space-rules@v1"
@@ -145,7 +145,7 @@ type CompareCell struct {
 func (c CompareCell) Disagrees() bool { return c.Agreement == AgreementSplit }
 
 // MissingEvidence is one cell the panel could not fill, with the host's reason and any explorer notes that
-// named it. It is a first-class part of the result (§3 Compare row: "explicit missing-evidence").
+// named it. It is a first-class part of the result ("explicit missing-evidence").
 type MissingEvidence struct {
 	Option    string `json:"option"`
 	Criterion string `json:"criterion"`
@@ -200,7 +200,7 @@ type ScalarEntry struct {
 	Score  float64 `json:"score"`
 }
 
-// CompareMatrix is the whole host-computed comparison (design §3 Compare row): the declared space, every
+// CompareMatrix is the whole host-computed comparison: the declared space, every
 // cell, the gate outcome, the frontier, the optional weighted ranking, the explicit missing evidence, and
 // the claims. It is assembled by BuildMatrix and rendered by the mode as a pure view — nothing downstream
 // recomputes any of it.
@@ -225,7 +225,7 @@ type CompareMatrix struct {
 	ReportedMissingEvidence []AttributedNote `json:"reportedMissingEvidence,omitempty"`
 	// Unrecognized are evaluations naming an option or criterion OUTSIDE the declared space. They are
 	// recorded, never re-attached to the nearest declared name: guessing what an explorer meant would be
-	// exactly the entity resolution this mode does not do (§0 F-B).
+	// exactly the entity resolution this mode does not do.
 	Unrecognized []AttributedEvaluation `json:"unrecognized,omitempty"`
 	// ScalarRanking is nil unless the user weighted every scored dimension; RankingWithheld then says why.
 	ScalarRanking   []ScalarEntry `json:"scalarRanking,omitempty"`
@@ -261,8 +261,8 @@ type MatrixInput struct {
 	FormulationHash string
 }
 
-// BuildMatrix computes the whole comparison from the recorded blind round-1 evaluations (design §3 Compare
-// row). The order of operations is the contract: place evaluations into DECLARED cells → compute per-cell
+// BuildMatrix computes the whole comparison from the recorded blind round-1 evaluations.
+// The order of operations is the contract: place evaluations into DECLARED cells → compute per-cell
 // agreement + claims → apply the FILTER GATE → compute the Pareto frontier over the scored dimensions →
 // compute the weighted ranking ONLY if the user declared weights.
 func BuildMatrix(in MatrixInput) (CompareMatrix, error) {
@@ -291,7 +291,7 @@ func BuildMatrix(in MatrixInput) (CompareMatrix, error) {
 	}
 	byCell := map[cellKey][]AttributedEvaluation{}
 	for _, ev := range in.Evaluations {
-		// ANTI-ECHO (§0 F-A): only the immutable blind round-1 artifacts feed a cell. A fixed-space mode has
+		// ANTI-ECHO: only the immutable blind round-1 artifacts feed a cell. A fixed-space mode has
 		// one round, so this filter is belt-and-braces — and it is exactly the kind of invariant that must
 		// not depend on the mode contract remembering to be single-round.
 		if !in.Baseline.Contains(ev.EnvelopeRef) {
@@ -569,7 +569,7 @@ func paretoFrontier(options []string, dims []schema.CompareCriterion, points map
 }
 
 // scalarRanking computes the OPTIONAL weighted ranking, and returns the honest refusal when it may not.
-// §3 is explicit: no scalar ranking unless the user supplied weights. A single number over several criteria
+// The rule is explicit: no scalar ranking unless the user supplied weights. A single number over several criteria
 // IS a weighting, so producing one from unweighted criteria would be the host quietly declaring what
 // matters most — which is the user's call and nobody else's.
 func scalarRanking(options []string, dims []schema.CompareCriterion, points map[cellKey]float64) ([]ScalarEntry, string) {
@@ -634,7 +634,7 @@ func scalarRanking(options []string, dims []schema.CompareCriterion, points map[
 	return out, ""
 }
 
-// --- Forecast (design §3 Forecast row) ---
+// --- Forecast ---
 
 // EstimateClaimInput is everything a pooled-estimate claim needs. The pooled NUMBERS live on the mode's
 // output (computed in internal/pool); the claim counts SOURCES, like every other claim in this package —

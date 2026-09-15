@@ -1,6 +1,6 @@
 package acp_test
 
-// ACP surface tests for the ADJUDICATIVE modes (design §3/§4): the ARTIFACT input a reviewing mode
+// ACP surface tests for the ADJUDICATIVE modes: the ARTIFACT input a reviewing mode
 // needs, and the GOVERNANCE SUMMARY echoed back in the PromptResponse `_meta.exploremesh` — including the
 // withheld/contested signal, which is the part a driver would otherwise present as a settled result.
 
@@ -76,7 +76,7 @@ func TestServer_ArtifactViaMeta_RequiredByChallenge(t *testing.T) {
 	resp, err := client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "review the shutdown path"}},
-		"_meta":     map[string]any{"exploremesh": map[string]any{"criteria": []string{"correctness"}, "mode": "challenge"}},
+		"_meta":     map[string]any{"exploremesh": map[string]any{"panel": testPanel(), "criteria": []string{"correctness"}, "mode": "challenge"}},
 	})
 	if err != nil {
 		t.Fatalf("session/prompt: %v", err)
@@ -96,7 +96,7 @@ func TestServer_ArtifactViaMeta_RequiredByChallenge(t *testing.T) {
 	resp, err = client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "review the shutdown path"}},
-		"_meta": map[string]any{"exploremesh": map[string]any{
+		"_meta": map[string]any{"exploremesh": map[string]any{"panel": testPanel(),
 			"criteria": []string{"correctness"}, "mode": "challenge", "artifact": artifact,
 		}},
 	})
@@ -128,7 +128,7 @@ func TestServer_GovernanceSummaryInMeta(t *testing.T) {
 	resp, err := client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "review it"}},
-		"_meta": map[string]any{"exploremesh": map[string]any{
+		"_meta": map[string]any{"exploremesh": map[string]any{"panel": testPanel(),
 			"criteria": []string{"correctness"}, "mode": "challenge", "artifact": "some artifact",
 		}},
 	})
@@ -199,7 +199,7 @@ func TestServer_AdjudicativeModesAreSelectable(t *testing.T) {
 	resp, err := client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "pick a datastore"}},
-		"_meta":     map[string]any{"exploremesh": map[string]any{"criteria": []string{"latency"}, "mode": "shortlist"}},
+		"_meta":     map[string]any{"exploremesh": map[string]any{"panel": testPanel(), "criteria": []string{"latency"}, "mode": "shortlist"}},
 	})
 	if err != nil || resp.Error != nil {
 		t.Fatalf("shortlist prompt: err=%v rpc=%+v", err, resp.Error)
@@ -211,7 +211,7 @@ func TestServer_AdjudicativeModesAreSelectable(t *testing.T) {
 	resp, err = client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "plan the migration"}},
-		"_meta":     map[string]any{"exploremesh": map[string]any{"criteria": []string{"reversible"}, "mode": "ai-collab"}},
+		"_meta":     map[string]any{"exploremesh": map[string]any{"panel": testPanel(), "criteria": []string{"reversible"}, "mode": "ai-collab"}},
 	})
 	if err != nil || resp.Error != nil {
 		t.Fatalf("ai-collab prompt: err=%v rpc=%+v", err, resp.Error)
@@ -220,7 +220,7 @@ func TestServer_AdjudicativeModesAreSelectable(t *testing.T) {
 	resp, err = client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "x"}},
-		"_meta":     map[string]any{"exploremesh": map[string]any{"criteria": []string{"c"}, "mode": "bogus"}},
+		"_meta":     map[string]any{"exploremesh": map[string]any{"panel": testPanel(), "criteria": []string{"c"}, "mode": "bogus"}},
 	})
 	if err != nil {
 		t.Fatalf("session/prompt: %v", err)

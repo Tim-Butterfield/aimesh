@@ -1,8 +1,8 @@
-// Package pool is exploremesh's HOST-SIDE ESTIMATE POOLING (design §3 Forecast row, §4): the
+// Package pool is exploremesh's HOST-SIDE ESTIMATE POOLING: the
 // declared, versioned rule that turns a panel of independent numeric estimates into one aggregate, an
 // interval, a dispersion picture and an identified outlier set. Nothing here calls a model and nothing
-// here reads prose — it is pure arithmetic over recorded, attributed estimates, which is exactly what §0
-// F-C requires of a machine governance value.
+// here reads prose — it is pure arithmetic over recorded, attributed estimates, which is exactly what a machine
+// governance value requires.
 //
 // Three properties are deliberate:
 //
@@ -27,7 +27,7 @@ import (
 )
 
 // RulesVersion is the version of the HOST pooling rules implemented here (aggregation, interval,
-// dispersion, outlier identification). Every pooled result pins it (§4/§9).
+// dispersion, outlier identification). Every pooled result pins it.
 const RulesVersion = "host-forecast-pooling@v1"
 
 // OutlierRuleVersion is the versioned outlier rule: the MODIFIED Z-SCORE over the median absolute
@@ -109,7 +109,7 @@ type Outlier struct {
 
 // Pooled is the terminal pooling result: the aggregate, the interval, the dispersion, the identified
 // outliers, and every contributing estimate. The versions are on the value, not in a comment, so a
-// persisted result is self-describing (§9).
+// persisted result is self-describing.
 type Pooled struct {
 	Rule                Rule    `json:"rule"`
 	RulesVersion        string  `json:"rulesVersion"`
@@ -126,8 +126,7 @@ type Pooled struct {
 	Estimates       []Estimate `json:"estimates"`
 }
 
-// Pool computes the pooled result over the recorded estimates under the declared rule (design §3 Forecast
-// row). It REFUSES an empty panel rather than returning a zero aggregate: an aggregate over no estimates is
+// Pool computes the pooled result over the recorded estimates under the declared rule. It REFUSES an empty panel rather than returning a zero aggregate: an aggregate over no estimates is
 // not a forecast, and a 0 that looks like one is worse than an error.
 //
 // Estimates are sorted by value for the order statistics but the returned Estimates keep the ATTRIBUTION

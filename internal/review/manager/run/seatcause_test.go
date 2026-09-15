@@ -26,9 +26,9 @@ func (f failingSeat) Invoke(context.Context, model.Call) (model.Result, error) {
 }
 
 // TestPanelHalt_EverySeatRecordsItsOwnCause: a panel whose seats fail for different reasons records
-// BOTH, each with its own signal. Before this, the run-level Failure carried the first-by-index seat
-// and the other seat's cause existed only inside the run directory — so an operator fixed one blocker,
-// paid for the whole panel again, and met the next one.
+// BOTH, each with its own signal. The run-level Failure carries only the first-by-index seat; if the
+// other seat's cause existed only inside the run directory, an operator would fix one blocker, pay for
+// the whole panel again, and meet the next one.
 func TestPanelHalt_EverySeatRecordsItsOwnCause(t *testing.T) {
 	m := panelManager(t,
 		seatFake{name: "seat-a", title: "a", file: "a.go"},

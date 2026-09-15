@@ -1,25 +1,25 @@
-// Package govern is exploremesh's HOST-SIDE GOVERNANCE ARITHMETIC (design §0 F-A/F-C, §1, §4): the
+// Package govern is exploremesh's HOST-SIDE GOVERNANCE ARITHMETIC: the
 // frozen panel + dual denominators, the immutable blind round-1 baseline every independence count is
 // computed over, and the structured governance CLAIM that pins a count to the exact inputs it was computed
 // from. Nothing here calls a model; everything here is a deterministic host rule over persisted artifacts —
-// which is precisely what §0 F-C requires of a machine governance field.
+// which is precisely what a machine governance field requires.
 //
 // Three invariants are enforced BY CONSTRUCTION rather than by convention:
 //
-//   - ANTI-ECHO (§0 F-A). Independence-based counts are computed ONLY over the immutable BLIND round-1
+//   - ANTI-ECHO. Independence-based counts are computed ONLY over the immutable BLIND round-1
 //     artifacts. The only way to obtain the evidence base a count accepts is NewBlindBaseline, which REFUSES
 //     any round that is not blind round 1; its internals are unexported, so a later round's envelopes cannot
 //     be laundered into a count even deliberately. Post-mediation rounds may add depth, severity and
 //     refinement — they can never raise a count, because their envelope refs are not in the baseline.
-//   - DUAL DENOMINATORS (§1). A count is never a bare k. Every claim carries BOTH `k of M panel` and
+//   - DUAL DENOMINATORS. A count is never a bare k. Every claim carries BOTH `k of M panel` and
 //     `k of (M − non-respondents) respondents`, plus the distinct selected / dispatched / eligible /
 //     supporting / valid-non-supporting / technical-absence / deliberate-abstention
 //     tallies — because "3 of 5" means something different when 2 explorers never answered.
-//   - WITHHOLDING (§4). A claim over a CONTESTED mapping is computed over BOTH plausible partitions and
+//   - WITHHOLDING. A claim over a CONTESTED mapping is computed over BOTH plausible partitions and
 //     emitted as a range with the definitive `corroborated` label WITHHELD. There is no code path that
 //     produces LabelCorroborated for a contested subject.
 //
-// Honest labeling (§0 F-B): a Claim has no field for model prose and Rendering() never says "consensus". All
+// Honest labeling: a Claim has no field for model prose and Rendering() never says "consensus". All
 // model narrative lives in the separate Narrative namespace carried alongside, never inside, the claims.
 package govern
 
@@ -38,17 +38,17 @@ import (
 
 // RulesVersion is the version of the HOST governance rules implemented here (counting, denominators,
 // labeling, withholding). Every emitted claim pins it, so a claim read later is interpretable under the
-// rules that produced it rather than under whatever the code does today (§4/§9).
+// rules that produced it rather than under whatever the code does today.
 const RulesVersion = "exploremesh-governance-rules@v1"
 
-// CorroborationQuery is the versioned query id recorded on a corroboration claim (§9: a governance claim
+// CorroborationQuery is the versioned query id recorded on a corroboration claim (a governance claim
 // persists its query id/version alongside its params and value).
 const CorroborationQuery = "corroboration-over-blind-round-1@v1"
 
-// --- Frozen panel + dual denominators (design §1) ---
+// --- Frozen panel + dual denominators ---
 
 // TieRule is the frozen policy for a tie. It must be frozen + hashed BEFORE any judgment is solicited,
-// otherwise a rule can be chosen after seeing which candidate it favors (§4).
+// otherwise a rule can be chosen after seeing which candidate it favors.
 type TieRule string
 
 const (
@@ -66,7 +66,7 @@ const (
 )
 
 // CountingPolicy is the quorum / tie / missing-response policy, frozen and hashed before any judgment is
-// solicited (design §4). It is host-authored configuration, never model output.
+// solicited. It is host-authored configuration, never model output.
 type CountingPolicy struct {
 	RulesVersion    string                `json:"rulesVersion"`
 	Quorum          int                   `json:"quorum"`
@@ -108,7 +108,7 @@ func (p CountingPolicy) Hash() string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Basis names which denominator a Denominator is (design §1: both are always reported).
+// Basis names which denominator a Denominator is (both are always reported).
 type Basis string
 
 const (
@@ -126,8 +126,8 @@ type Denominator struct {
 // String renders "2 of 3 panel" / "2 of 2 respondents".
 func (d Denominator) String() string { return fmt.Sprintf("%d of %d %s", d.K, d.M, d.Basis) }
 
-// Outcome is the per-run participation tally recorded AFTER the calls, layered onto the frozen panel
-// (design §1). The categories are kept DISTINCT because they mean different things: a technical absence is
+// Outcome is the per-run participation tally recorded AFTER the calls, layered onto the frozen panel.
+// The categories are kept DISTINCT because they mean different things: a technical absence is
 // an infrastructure failure and a deliberate abstention is a position — collapsing them into "missing"
 // hides both. There is no identity category: a seat is never excluded for what its identity evidence
 // said (see ../../../docs/model-identity.md).
@@ -138,7 +138,7 @@ type Outcome struct {
 	DeliberateAbstention int `json:"deliberateAbstention"`
 }
 
-// Panel is the FROZEN panel (design §1): membership fixed at the start of the exploration, the counting
+// Panel is the FROZEN panel: membership fixed at the start of the exploration, the counting
 // policy hashed before any judgment is solicited, and the participation outcome recorded afterwards. Freeze
 // produces it; WithOutcome layers the tallies on without touching the frozen fields.
 type Panel struct {
@@ -150,7 +150,7 @@ type Panel struct {
 }
 
 // Freeze fixes panel membership and hashes the counting policy — called BEFORE any explorer call, so no
-// judgment can influence either (design §1/§4). It rejects an empty panel and an invalid policy.
+// judgment can influence either. It rejects an empty panel and an invalid policy.
 func Freeze(members []schema.ExplorerIdentity, p CountingPolicy) (Panel, error) {
 	if len(members) == 0 {
 		return Panel{}, fmt.Errorf("freeze panel: no members")
@@ -182,7 +182,7 @@ func (p Panel) Respondents() int {
 	return m
 }
 
-// Denominators returns BOTH denominators for a count of k (design §1) — never one without the other.
+// Denominators returns BOTH denominators for a count of k — never one without the other.
 func (p Panel) Denominators(k int) (panel, respondents Denominator) {
 	return Denominator{K: k, M: p.Selected, Basis: BasisPanel},
 		Denominator{K: k, M: p.Respondents(), Basis: BasisRespondents}
@@ -192,7 +192,7 @@ func (p Panel) Denominators(k int) (panel, respondents Denominator) {
 // still reported (it is real arithmetic) but never labeled definitively — see label().
 func (p Panel) QuorumMet() bool { return p.Respondents() >= p.Policy.Quorum }
 
-// --- The immutable blind round-1 baseline (design §0 F-A: the anti-echo invariant) ---
+// --- The immutable blind round-1 baseline (the anti-echo invariant) ---
 
 // BlindBaseline is the ONLY evidence base an independence count may be computed over: the immutable BLIND
 // round-1 artifacts. Its fields are unexported and its only constructor rejects any other round, so the
@@ -204,14 +204,14 @@ type BlindBaseline struct {
 }
 
 // NewBlindBaseline builds the baseline from a recorded round. It REFUSES anything that is not blind round 1:
-// a later round is contaminated by the mediated view of its peers (§0 F-A), so counting over it would be
+// a later round is contaminated by the mediated view of its peers, so counting over it would be
 // counting an echo as independent support.
 func NewBlindBaseline(r round.Round) (BlindBaseline, error) {
 	if r.Index() != 1 {
-		return BlindBaseline{}, fmt.Errorf("blind baseline: round %d is not round 1 — independence counts are computed ONLY over the immutable blind round-1 artifacts (design §0 F-A)", r.Index())
+		return BlindBaseline{}, fmt.Errorf("blind baseline: round %d is not round 1 — independence counts are computed ONLY over the immutable blind round-1 artifacts", r.Index())
 	}
 	if !r.Blind() {
-		return BlindBaseline{}, fmt.Errorf("blind baseline: round 1 is recorded as NON-blind — independence counts require a blind round (design §0 F-A)")
+		return BlindBaseline{}, fmt.Errorf("blind baseline: round 1 is recorded as NON-blind — independence counts require a blind round")
 	}
 	b := BlindBaseline{roundID: r.ID(), refs: map[string]schema.ExplorerIdentity{}}
 	for _, env := range r.Envelopes() {
@@ -233,10 +233,10 @@ func (b BlindBaseline) Size() int { return len(b.refs) }
 // later round's nomination out of a count.
 func (b BlindBaseline) Contains(envelopeRef string) bool { _, ok := b.refs[envelopeRef]; return ok }
 
-// --- Structured governance claims (design §0 F-C, §4, §9) ---
+// --- Structured governance claims ---
 
 // Label is a claim's honest verdict. There is deliberately NO "consensus" label: an emergent-space count is
-// salience under a shared framing at a specific partition, never independent consensus (§0 F-B).
+// salience under a shared framing at a specific partition, never independent consensus.
 type Label string
 
 const (
@@ -245,13 +245,13 @@ const (
 	// LabelSingleSource: exactly one distinct blind round-1 source — carried minority, salience not support.
 	LabelSingleSource Label = "single_source"
 	// LabelWithheldContested: the partition the count rides on is CONTESTED, so the definitive label is
-	// WITHHELD and a sensitivity range is emitted instead (§4).
+	// WITHHELD and a sensitivity range is emitted instead.
 	LabelWithheldContested Label = "withheld_contested_partition"
 	// LabelWithheldBelowQuorum: the respondents denominator is below the FROZEN quorum.
 	LabelWithheldBelowQuorum Label = "withheld_below_quorum"
 	// LabelRanked: a candidate's placement in a HOST-TALLIED ballot over the confirmed universe, under
 	// decision inputs frozen before the ballot was solicited. It is deliberately a SEPARATE label from
-	// corroborated: `voted` and `emergent` measure different things (§4), and a reader must never have to
+	// corroborated: `voted` and `emergent` measure different things, and a reader must never have to
 	// infer which one a claim carries.
 	LabelRanked Label = "ranked"
 	// LabelWithheldTie: the frozen tie rule (TieWithhold) applies — candidates are tied across the
@@ -264,7 +264,7 @@ func (l Label) Definitive() bool {
 	return l == LabelCorroborated || l == LabelSingleSource || l == LabelRanked
 }
 
-// Sensitivity is a claim's CONDITIONAL result over a contested partition (design §4): the count computed over
+// Sensitivity is a claim's CONDITIONAL result over a contested partition: the count computed over
 // BOTH plausible partitions, as a range, with the contested entities named. Its presence is what withholds
 // the definitive label.
 type Sensitivity struct {
@@ -277,7 +277,7 @@ type Sensitivity struct {
 	Note                  string   `json:"note"`
 }
 
-// Claim is ONE structured governance claim (design §0 F-C, §4, §9): a host-computed value pinned to every
+// Claim is ONE structured governance claim: a host-computed value pinned to every
 // input it depends on — the formulation bytes, the partition revision, the rules + policy versions, the panel
 // and respondent denominators, and the EXACT contributing source IDs. It carries no model prose by design:
 // every field is host-produced, so nothing in a claim can be asserted by a model.
@@ -296,14 +296,14 @@ type Claim struct {
 	// claim that is ALWAYS the immutable blind round 1 (the anti-echo invariant makes any other value
 	// impossible to obtain). For a `ballot-over-confirmed-universe@v1` claim it is the BALLOT round: a ballot
 	// is its own evidence, cast deliberately and non-blind, and pretending it was a blind-round measurement
-	// would conflate `voted` with `emergent` — the exact conflation §4 forbids.
+	// would conflate `voted` with `emergent` — a conflation the governance rules forbid.
 	BaselineRoundID       string       `json:"baselineRoundId"`
 	ContributingSourceIDs []string     `json:"contributingSourceIds"`
 	Label                 Label        `json:"label"`
 	Sensitivity           *Sensitivity `json:"sensitivity,omitempty"`
 }
 
-// Rendering is the ONLY sanctioned human phrasing of a claim (design §0 F-B: "no emergent-space count is ever
+// Rendering is the ONLY sanctioned human phrasing of a claim ("no emergent-space count is ever
 // rendered as independent consensus"). It states what is actually reconstructable — k of M panel members
 // independently produced this under formulation H at partition P — and, for a withheld claim, the range and
 // the reason instead of a verdict.
@@ -343,7 +343,7 @@ func (c Claim) Rendering() string {
 	case c.Label == LabelSingleSource:
 		return base + " — SINGLE SOURCE (carried minority: salience, not corroboration)"
 	default:
-		// Deliberately never the phrase "independent consensus" (§0 F-B): what the artifacts support is that k
+		// Deliberately never the phrase "independent consensus": what the artifacts support is that k
 		// blind round-1 responses named this entity under one framing at one partition — salience, not agreement
 		// on merit, and not a consensus claim.
 		return base + " — corroborated by that many independent blind round-1 " + corroborationNoun(c.Query) + " (salience under a shared framing; not a consensus claim)"
@@ -395,7 +395,7 @@ type CountInput struct {
 	FormulationHash string
 }
 
-// Corroboration counts the DISTINCT blind round-1 source explorers behind one canonical entity (design §4:
+// Corroboration counts the DISTINCT blind round-1 source explorers behind one canonical entity (
 // `emergent` = host-counted references across independently-structured blind round-1 responses — salience,
 // not merit) and returns it as a structured Claim.
 //
@@ -442,7 +442,7 @@ func Corroboration(in CountInput) (Claim, error) {
 	return claim, nil
 }
 
-// sensitivity computes the CONDITIONAL result when the subject's mapping is contested (design §4): the count
+// sensitivity computes the CONDITIONAL result when the subject's mapping is contested: the count
 // over the ALTERNATIVE partition alongside the held one, as a range. Returns nil when no contested mapping
 // affects the subject — the only case in which a definitive label is permitted.
 func sensitivity(in CountInput, held int) *Sensitivity {
@@ -505,7 +505,7 @@ func countBaselineSources(b BlindBaseline, ae canon.AlternativeEntity) int {
 }
 
 // label applies the labeling rule: a contested partition or a below-quorum panel WITHHOLDS the definitive
-// label (§4); otherwise >=2 distinct blind sources is corroborated and 1 is a carried single source.
+// label; otherwise >=2 distinct blind sources is corroborated and 1 is a carried single source.
 func label(k int, s *Sensitivity, p Panel) Label {
 	switch {
 	case s != nil:
@@ -519,9 +519,9 @@ func label(k int, s *Sensitivity, p Panel) Label {
 	}
 }
 
-// --- The append-only claim ledger + the collatorNarrative split (design §0 F-C, §4, §9) ---
+// --- The append-only claim ledger + the collatorNarrative split ---
 
-// ClaimLedger is the APPEND-ONLY record of every emitted governance claim (§9: "every emitted governance
+// ClaimLedger is the APPEND-ONLY record of every emitted governance claim ("every emitted governance
 // claim persists its query id/version, params, partitionRevisionHash, universe/criterion hashes, rules
 // version, value, and exact contributing source IDs"). Like the merge-ledger, its rows are unexported, the
 // only write path is Emit, Claims() copies, and the head hash chains the emissions.
@@ -561,7 +561,7 @@ func (l *ClaimLedger) MarshalJSON() ([]byte, error) {
 	}{l.claims, l.hash})
 }
 
-// Narrative is the `collatorNarrative` NAMESPACE (design §0 F-C): the one place model-authored prose is
+// Narrative is the `collatorNarrative` NAMESPACE: the one place model-authored prose is
 // allowed to live. Keeping it in its own namespace is what makes "machine governance fields carry
 // host-produced values only" enforceable — the rule cannot be enforced on free natural language, so the
 // prose is quarantined instead of policed.
@@ -571,7 +571,7 @@ type Narrative struct {
 	Prose  string                  `json:"prose"`
 }
 
-// Report is the terminal governance surface (design §4/§9): the frozen panel, every emitted claim with its
+// Report is the terminal governance surface: the frozen panel, every emitted claim with its
 // inputs, and — strictly separated — the model narrative. A reader (or an export) can therefore tell, field
 // by field, which values a host rule produced and which words a model wrote.
 type Report struct {

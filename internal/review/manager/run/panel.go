@@ -256,8 +256,8 @@ func (m *Manager) runPanel(ctx context.Context, run *audit.Run, ws *workspace.Ac
 		o := outs[i]
 		// EVERY failing seat records its OWN cause on its roster entry before the first-by-index
 		// halt is chosen. The run-level Failure can only carry one seat; a panel that dispatched N
-		// seats and was paid for N failures must not report one of them and drop the rest (that is
-		// the same defect ResolvePanel was fixed for, one layer later and no longer free).
+		// seats and was paid for N failures must not report one of them and drop the rest (the same
+		// rule ResolvePanel follows, one layer later, where the failures have already been paid for).
 		// CAPACITY IS NOT INTEGRITY. A seat that ran out of quota, or hit its wall clock, is a fact
 		// about a billing relationship or a timer — it says nothing about whether the seats that DID
 		// answer were sound. Halting on it would discard everything already paid for, so such a seat

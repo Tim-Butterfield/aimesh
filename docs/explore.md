@@ -75,9 +75,9 @@ aimesh explore run --mode forecast --target <what> --unit <unit> --horizon <when
 aimesh explore export  --sqlite <out.db> --run <run-dir> [--verify] [--json]
 aimesh explore list    [--json]
 aimesh explore doctor  [--profile <name> | --roster <path>] [--probe] [--json]
-aimesh explore acp     [--framing newline|content-length] [--turn-timeout <dur>] [--roster <path>]
-aimesh explore mcp     [--protocol dual|legacy]
-                    [--wait-seconds <n>] [--turn-timeout <dur>] [--no-capture] [--roster <path>]
+aimesh explore acp     [--adapter <name>[=<path>] ...] [--framing newline|content-length] [--turn-timeout <dur>]
+aimesh explore mcp     [--adapter <name>[=<path>] ...] [--protocol dual|legacy]
+                    [--wait-seconds <n>] [--turn-timeout <dur>] [--no-capture]
 aimesh explore setup   --adapter <name> --path <p>  |  --remove-adapter <name>
 aimesh explore setup   --acp detect|add|remove [--path <p>] [--name <k>] [--title <t>] [--acp-arg <a> ...]
 aimesh explore setup   --profile <name> --explorer adapter=<n>,model=<m>[,effort=<e>] ...
@@ -325,7 +325,7 @@ A profile of real explorers/collator makes real model calls and spends tokens. I
 
 ## Output
 
-`explore` prints a human summary (or the full structured result with `--json`). Common to every mode: any collator/canonicalizer caveat, the panel size and every **dropped** explorer with its audited reason. (The formulation provenance is *recorded* — `formulation.json`, the evidence export, the ACP `_meta` echo — but no longer printed: every registered mode is formulation-free, so it could only ever report one value.) Then the mode's own rendering — the map synthesis, the composed answer, the catalog clusters, the challenge register, the shortlist tally, the comparison matrix, or the pooled forecast.
+`explore` prints a human summary (or the full structured result with `--json`). Common to every mode: any collator/canonicalizer caveat, the panel size and every **dropped** explorer with its audited reason. (The formulation provenance is *recorded* — `formulation.json`, the evidence export, the ACP `_meta` echo — but not printed: every registered mode is formulation-free, so it could only ever report one value.) Then the mode's own rendering — the map synthesis, the composed answer, the catalog clusters, the challenge register, the shortlist tally, the comparison matrix, or the pooled forecast.
 
 Adjudicative and fixed-space results also print a governance header: the partition revision hash and ledger size (or the explicit `NONE — fixed space` line), the frozen counting-policy hash, and an `UNSETTLED` warning when contested mappings survived the confirmation round.
 
@@ -356,28 +356,35 @@ The consent model is the CLI's own: you typed the path, so that path — and not
 
 ## Driving it over ACP
 
-`aimesh explore acp` runs exploremesh as a local [Agent Client Protocol](https://agentclientprotocol.com/) agent over stdio, so an ACP-capable IDE or host can drive one exploration as a session. The prompt text becomes the task **purpose**; the load-bearing **criteria** (and any mode-specific input) arrive under `_meta.exploremesh`, which may also *select* — never redefine — the panel. Unlike reviewmesh's ACP surface there is no workspace and no write-mode gating, because an exploration edits no file you own — the only thing an ACP turn can write is its own run directory, and only when `dumpRun` asks for it.
+`aimesh explore acp` runs exploremesh as a local [Agent Client Protocol](https://agentclientprotocol.com/) agent over stdio, so an ACP-capable IDE or host can drive one exploration as a session. The prompt text becomes the task **purpose**; the load-bearing **criteria** (and any mode-specific input) arrive under `_meta.exploremesh`, together with the panel the turn composes. Like `aimesh explore mcp`, it reads no aimesh configuration: its adapters are the ones named at launch with `--adapter <name>[=<path>]` (or `AIMESH_ADAPTERS`), so it works on a fresh install. Unlike reviewmesh's ACP surface there is no workspace and no write-mode gating, because an exploration edits no file you own — the only thing an ACP turn can write is its own run directory, and only when `dumpRun` asks for it.
 
 `_meta.exploremesh` panel + capture fields:
 
 | Field | Meaning |
 |---|---|
-| `profile`, `count` | Select a configured profile, optionally narrowed to the top-N by preference order. Never clamped. |
-| `panel: {explorers[], collator}` | **Compose** an ad-hoc panel by identifier (2..16 explorers + one collator) — the ACP analogue of the CLI's `--explorer`/`--collator`. Mutually exclusive with `profile`/`count`. Every adapter must already be in the set the agent bound at **startup**: a prompt selects from the configured set and can never introduce an adapter, a binary path or a launch argument. |
-| `canonicalizers: [{adapter, model, effort}]` | Name the two identities that propose the canonicalization — the ACP analogue of the CLI's `--canonicalizer` and MCP's `canonicalizers`. **Exactly two, or omit it** (one is refused; two identical identities are refused). Compose-not-configure applies as it does to `panel`. It applies to whichever panel resolved and overrides that panel's own pair. The response echoes `canonicalizers` and `canonicalizerSource` (`explicit` / `derived`). |
+| `panel: {explorers[], collator}` | **Required.** The panel this turn composes by identifier (2..16 explorers + one collator) — the ACP analogue of the CLI's `--explorer`/`--collator`. Each seat names an adapter the agent was launched with and the exact model identifier that adapter's CLI accepts. A prompt can never introduce an adapter, a binary path or a launch argument; an unknown key (such as `profile` or `count`) is refused. |
+| `canonicalizers: [{adapter, model, effort}]` | Name the two identities that propose the canonicalization — the ACP analogue of the CLI's `--canonicalizer` and MCP's `canonicalizers`. **Exactly two, or omit it** (one is refused; two identical identities are refused). Each must name a launched adapter. It overrides the host's derived pair. The response echoes `canonicalizers` and `canonicalizerSource` (`explicit` / `derived`). |
+| `verifyReadiness: true` | Before the turn, spend one bounded call per distinct adapter/model/effort the panel names to prove each can do real work; a blocked agent halts the turn before the panel runs. With `dryRun` the calls are priced in `shape` and none is made. |
 | `dumpRun: true` | Record the run (envelopes, raw outputs, prompts, the declared task, a versioned manifest) under `$EXPLOREMESH_ARTIFACT_DIR` — the ACP analogue of `--dump-run`. The response echoes `runCaptured` and the `runId`; the record is at `$EXPLOREMESH_ARTIFACT_DIR/<runId>`. The host **path** is never put on the wire. |
 
 Full protocol reference: **[../docs/acp.md](../docs/acp.md)**.
 
 ## Driving it over MCP
 
-`aimesh explore mcp` runs exploremesh as a local [Model Context Protocol](https://modelcontextprotocol.io/) server over stdio, so an MCP agent can drive explorations as **tools**: `explore` (which **spends** — it launches the configured model CLIs, and takes a required `mode` that decides which other parameters are required), plus read-only `explore_list`, `explore_doctor`, `explore_run_status` and `explore_run_result`.
+`aimesh explore mcp` (or the combined `aimesh mcp`) runs exploremesh as a local [Model Context Protocol](https://modelcontextprotocol.io/) server over stdio, so an MCP agent can drive explorations as **tools**: `explore` (which **spends** — it launches model CLIs, and takes a required `mode` that decides which other parameters are required), plus read-only `explore_list`, `explore_doctor`, `explore_run_status` and `explore_run_result`.
 
 ```json
-{ "mcpServers": { "exploremesh": { "command": "aimesh", "args": ["explore", "mcp"] } } }
+{ "mcpServers": { "exploremesh": { "command": "aimesh", "args": ["explore", "mcp", "--adapter", "claude-code", "--adapter", "codex-cli"] } } }
 ```
 
-Three things are worth knowing before you point an agent at it:
+The server reads no aimesh configuration. Its adapters are the ones named with `--adapter` (or
+`AIMESH_ADAPTERS`), and every `explore` call composes its own required `panel` — at least two
+`explorers` and a `collator`, each naming a launched adapter and the exact model identifier that adapter's
+CLI accepts (the server passes it through verbatim). `dryRun` prices a run without a model call;
+`verifyReadiness` spends one bounded call per distinct adapter/model/effort to prove each can do real work
+before the panel runs. `explore_list` reports each launched adapter and whether its CLI can be started now.
+
+Three more things are worth knowing before you point an agent at it:
 
 - **Calls are job-shaped.** MCP clients commonly time out around 60 s and a real panel run is minutes, so a run that outlives `waitSeconds` (default 25) comes back as `{runId, state: "running"}` and is fetched with `explore_run_result`. Retrying with the same `idempotencyKey` returns the existing run instead of spending twice. On `2026-07-28`, a client that opts into the `io.modelcontextprotocol/tasks` extension gets a `CreateTaskResult` (`resultType: "task"`, `taskId == runId`) instead of `{runId, state: "running"}` and polls it with `tasks/get`; a client that does not opt in sees exactly the job shape above. See [../docs/mcp.md](../docs/mcp.md#the-iomodelcontextprotocoltasks-extension-modern-era-opt-in-per-client).
 - **The governance block, the identity caveats and the requested-vs-executed panel echo are `required` in the declared output schema.** There is no `summary` mode that can drop them, and the declaration is not just prose: every payload this server can emit is validated against its own tool's `outputSchema` in the build, so one that matched no branch would fail CI rather than reach a client.

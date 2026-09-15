@@ -1,6 +1,6 @@
 package cli
 
-// CLI surface tests for the ADJUDICATIVE modes (design §3/§4): the two adjudicative modes run end to
+// CLI surface tests for the ADJUDICATIVE modes: the two adjudicative modes run end to
 // end through the CLI on the built-in fake roster and RENDER — including, above all, rendering a WITHHELD
 // label honestly rather than hiding it behind a bare count. Plus `--artifact` validation, the one extra
 // input these modes make the CLI take.
@@ -251,7 +251,7 @@ func TestExplore_AdjudicativeModes_JSON(t *testing.T) {
 	}
 }
 
-// TestExplore_ShortlistMode_DumpRunCapturesTheDecision pins §9's system-of-record for a ballot-bearing run:
+// TestExplore_ShortlistMode_DumpRunCapturesTheDecision pins the system-of-record for a ballot-bearing run:
 // `--dump-run` writes the decision (frozen inputs, ballots, tally) alongside the merge-ledger and the claims,
 // and the manifest carries the frozen inputs hash — so "the framing predated the vote" is checkable from the
 // captured run alone, without re-running anything.

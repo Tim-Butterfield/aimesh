@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 	"github.com/Tim-Butterfield/aimesh/internal/review/access/config"
 	"github.com/Tim-Butterfield/aimesh/internal/review/access/rootfile"
@@ -33,6 +34,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 	"github.com/Tim-Butterfield/aimesh/meshcore/localstate"
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/shell"
+	"github.com/Tim-Butterfield/aimesh/meshcore/pathexpand"
 	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 )
 
@@ -97,18 +99,23 @@ Commands:
                      (shared adapter locations, run artifacts). Variants:
                      init (repo if inside one, else folder), repo init
                      (require a repo), folder init (require a non-repo dir)
-  acp                run as an ACP agent server (JSON-RPC 2.0 over stdio;
-                     flags: --framing, --root <dir> (repeatable: the trusted
-                     workspace roots a session may review; default: the launch
-                     working directory), --no-default-root,
-                     --allow-broad-root, --turn-timeout)
-  mcp                run as an MCP server (Model Context Protocol over stdio):
-                     review_report (writes nothing) plus, only with
-                     --allow-remediate, review_remediate (writes; every call
-                     must also pass allowWrite: true). Trusted roots are
-                     MANDATORY — same --root/--no-default-root/
-                     --allow-broad-root model as acp. Flags: --framing,
-                     --wait-seconds, --turn-timeout
+  acp                run as an ACP agent server (JSON-RPC 2.0 over stdio).
+                     Reads no aimesh configuration: adapters come from
+                     --adapter <name>[=<path>] (repeatable, or AIMESH_ADAPTERS),
+                     and each turn composes its panel and declares its absolute
+                     workspace. Writes need --allow-writes; without it a patch
+                     turn supplies the diff. Flags: --framing, --root <dir>
+                     (optional ceiling, repeatable), --allow-broad-root,
+                     --turn-timeout
+  mcp                run as an MCP server (Model Context Protocol over stdio).
+                     Reads no aimesh configuration: adapters come from
+                     --adapter <name>[=<path>] (repeatable, or AIMESH_ADAPTERS),
+                     and each call composes its panel and declares its absolute
+                     workspace. review_remediate output=patch supplies the diff
+                     on every server; output=apply needs --allow-writes and
+                     allowWrite: true. Flags: --framing, --root <dir>
+                     (optional ceiling), --allow-broad-root, --wait-seconds,
+                     --turn-timeout
 
 Global flags:
   -h, --help         show this help
@@ -780,7 +787,7 @@ func runReview(args []string, out, errw io.Writer) int {
 		MaxParallel:     *maxParallel,
 		DryRun:          *dryRun,
 		VerifyReadiness: *verifyReadiness,
-		// The narrowing selection travels UNEXAMINED into the one governed write path (D8-A). The
+		// The narrowing selection travels UNEXAMINED into the one governed write path. The
 		// CLI resolves no fingerprint of its own, so `--select` cannot come to mean something here
 		// that `select` does not mean over MCP or ACP.
 		Select: selection,
@@ -869,7 +876,7 @@ func runReview(args []string, out, errw io.Writer) int {
 	return gatingCode(*failOn, len(outcome.Findings))
 }
 
-// parseSelection validates `--select` at the flag boundary (D8-A).
+// parseSelection validates `--select` at the flag boundary.
 //
 // Two rules, both fail-closed, both here rather than mid-run so a caller pays nothing to learn them:
 //
@@ -923,7 +930,7 @@ func printSelection(w io.Writer, sel *review.ApplySelection) {
 // refusalCode is the CLI's answer to a PARTIAL REFUSAL: exit 7, and no halt record.
 //
 // The exit code is the CLI's only machine-readable "not clean" channel, and CI scripts key on it,
-// so exit 0 would violate D8-C's load-bearing clause on the one surface where violating it is
+// so exit 0 would violate the partial-refusal contract on the one surface where violating it is
 // cheapest. The other candidates are all wrong for this case: exit 1 (`Findings`) is the GATING
 // code and fires only under `--fail-on-findings`/`--ci`; exit 6 (`Containment`) means a
 // containment BREACH, and nothing was breached — the denylist held, which is exactly why the
@@ -1669,20 +1676,19 @@ func runACP(args []string, out, errw io.Writer) int {
 	fs.SetOutput(errw)
 	cliflags.Style(fs, "aimesh review acp")
 	framing := fs.String("framing", acp.FramingNewline, "wire framing: newline | content-length")
-	// TRUSTED ROOTS. On the CLI the human types the path and that IS the consent; over ACP
-	// the caller is a peer process, so the consent has to be given BEFORE any request — here,
-	// at launch. Everything a session later names must resolve inside these roots.
+	// ADAPTERS AND WRITES come from the launch arguments alone: this agent reads no aimesh
+	// configuration, so it works on a fresh install with nothing set up first.
+	adapters := launchflags.RegisterAdapters(fs)
+	writes := launchflags.RegisterWrites(fs)
+	// SCOPE is declared per turn (the prompt's absolute workspace, or the session cwd). `--root` is an
+	// optional CEILING every declared path must lie inside.
 	var roots setFlags
-	fs.Var(&roots, "root", "trusted workspace root an ACP session may review (repeatable; default: the launch working directory)")
-	noDefaultRoot := fs.Bool("no-default-root", false, "do not adopt the launch working directory as a trusted root (explicit --root only)")
-	// An over-broad root (`/`, a home directory, a system/shared tree) is refused for an
-	// explicit --root just as it is for the launch cwd. This flag keeps that a refusal an
-	// operator can OVERRIDE BY SAYING SO, rather than a rule the documented flag silently
-	// walked past; it never waives the non-overridable read denylist.
-	allowBroadRoot := fs.Bool("allow-broad-root", false, "permit an explicit --root that is normally refused as over-broad (/, a home directory, a system/shared tree)")
+	fs.Var(&roots, "root", "an absolute directory every turn's declared workspace and roots must lie inside (repeatable). Without it, a turn may declare any absolute directory that is not the filesystem root, a home directory, a system tree or a protected directory")
+	// An over-broad --root (`/`, a home directory, a system/shared tree) is refused unless the operator
+	// says so; it never waives the non-overridable read denylist.
+	allowBroadRoot := fs.Bool("allow-broad-root", false, "permit a --root that is normally refused as over-broad (/, a home directory, a system/shared tree)")
 	// The turn budget. Without it an ACP prompt could run until the host gave up — leaving a panel
-	// of model CLIs spending with nobody waiting for them. Every other aimesh agent surface has
-	// bounded a turn since it shipped; this closes the recorded parity gap.
+	// of model CLIs spending with nobody waiting for them. Every aimesh agent surface bounds a turn.
 	turnTimeout := fs.Duration("turn-timeout", acp.DefaultTurnTimeout, "total wall-clock budget for one prompt/review turn")
 	// CROSS-RUN DISPOSITION MEMORY is an OPERATOR opt-in here, exactly as it is a human opt-in on
 	// `reviewmesh review`. It is not a `_meta` field: on this surface the caller is a peer process,
@@ -1695,42 +1701,46 @@ func runACP(args []string, out, errw io.Writer) int {
 	if !pok {
 		return int(fault.Usage)
 	}
-	// The provenance is discarded here on purpose: ACP has no protocol-revision split, so an inferred
-	// cwd is exactly as trusted on this surface as it always was. It is the MCP surface's modern era
-	// that must distinguish them (see runMCP).
-	trustedRoots, _, rerr := acp.ResolveTrustedRoots(acp.RootOptions{Surface: "acp", Explicit: roots, NoDefault: *noDefaultRoot, AllowBroadRoot: *allowBroadRoot})
+	set, aerr := adapters.Resolve(pathexpand.OS())
+	if aerr != nil {
+		fmt.Fprintln(errw, "aimesh review acp: "+aerr.Error())
+		return int(fault.CodeOf(aerr))
+	}
+	expanded, xerr := acp.ExpandRoots(roots, pathexpand.OS())
+	if xerr != nil {
+		fmt.Fprintln(errw, "aimesh review acp: "+xerr.Error())
+		return int(fault.CodeOf(xerr))
+	}
+	ceiling, rerr := acp.ResolveCeiling(expanded, *allowBroadRoot, "acp", "")
 	if rerr != nil {
 		fmt.Fprintln(errw, "aimesh review acp: "+rerr.Error())
 		return int(fault.CodeOf(rerr))
 	}
-	a, err := app.New(app.Options{})
+	a, err := app.New(app.Options{Launch: &app.LaunchConfig{Adapters: set}})
 	if err != nil {
 		fmt.Fprintln(errw, "aimesh review acp:", err)
 		return int(fault.CodeOf(err))
 	}
-	// degrade-vs-fail policy when a requested mode exceeds the effective ceiling
-	// (config default is true); the ACP surface enforces host-capability mode gating.
-	degrade := a.Cfg.Surfaces.DegradeWhenModeUnavailable == nil || *a.Cfg.Surfaces.DegradeWhenModeUnavailable
-	// Write-authority POLICY ceiling for the ACP surface (`surfaces.defaultModeBySurface.acp`;
-	// the shipped seed is `report` — a live workspace write over ACP is an explicit config
-	// opt-in). The resolver caps the mode by the same policy; passing it to the server makes the
-	// cap visible to the host instead of a silent downgrade. An absent or unrecognized value
-	// fails CLOSED at `report`: the ACP surface never widens itself on a malformed policy.
-	policyCeiling := review.ModeReport
-	switch m := review.Mode(a.Cfg.Surfaces.DefaultModeBySurface["acp"]); m {
-	case review.ModeReport, review.ModePatch, review.ModeApply:
-		policyCeiling = m
+	if set.Empty() {
+		fmt.Fprintf(errw, "aimesh review acp: no adapter was named; every review turn is refused until the launch command adds --adapter <name> (or %s)\n", launchflags.EnvVar)
 	}
+	if writes.Allowed() {
+		fmt.Fprintln(errw, "aimesh review acp: --allow-writes: an apply turn can write accepted findings to a workspace; each one still carries the run handle of the report it applies.")
+	}
+	// degrade-vs-fail policy when a requested mode exceeds the effective ceiling (the built-in
+	// default is true).
+	degrade := a.Cfg.Surfaces.DegradeWhenModeUnavailable == nil || *a.Cfg.Surfaces.DegradeWhenModeUnavailable
 	srv := &acp.Server{
-		Manager: a.Manager(),
-		Framing: *framing,
-		Roots:   trustedRoots,
+		Manager:     a.Manager(),
+		Framing:     *framing,
+		Adapters:    set,
+		Ceiling:     ceiling,
+		AllowWrites: writes.Allowed(),
 		Caps: review.SurfaceCaps{
 			WorkspaceRoot: true, FileRead: true, FileWrite: true,
 			DiffContext: true, ArtifactDir: true, Interactive: false,
 		},
 		DegradeWhenModeUnavailable: degrade,
-		PolicyCeiling:              policyCeiling,
 		TurnTimeout:                *turnTimeout,
 		// Set ONLY by the web ACP-validation harness (it exports this env when spawning the child); a
 		// normal `reviewmesh acp` invocation leaves it unset → no synthetic host-adjudication probe.

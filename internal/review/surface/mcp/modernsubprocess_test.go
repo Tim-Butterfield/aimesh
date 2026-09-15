@@ -234,7 +234,7 @@ func startMCP(t *testing.T, args ...string) (*modernClient, *lockedBuffer, func(
 
 func TestSubprocess_ModernEraTranscriptOverTheRealBinary(t *testing.T) {
 	ws := subprocessWorkspace(t)
-	c, stderr, stop := startMCP(t, "--root", ws, "--allow-remediate", "--wait-seconds", "60")
+	c, stderr, stop := startMCP(t, "--adapter", "fake", "--root", ws, "--allow-writes", "--wait-seconds", "60")
 	defer stop()
 
 	// A STRAY `notifications/initialized`, sent by a client that will then speak nothing but
@@ -268,7 +268,7 @@ func TestSubprocess_ModernEraTranscriptOverTheRealBinary(t *testing.T) {
 	if disc.Result["resultType"] != "complete" || disc.Result["ttlMs"] == nil || disc.Result["cacheScope"] != "private" {
 		t.Errorf("the DiscoverResult is missing its modern envelope: %v", disc.Result)
 	}
-	// §6.4 sanitization: the probe is answerable by anyone who can spawn the process, before anything
+	// Sanitization: the probe is answerable by anyone who can spawn the process, before anything
 	// else, so it falls under the same projection rule as `list` and `doctor` — no host paths.
 	instr, _ := disc.Result["instructions"].(string)
 	info, _ := disc.Result["_meta"].(map[string]any)
@@ -309,7 +309,7 @@ func TestSubprocess_ModernEraTranscriptOverTheRealBinary(t *testing.T) {
 
 	// --- a real run, with a progress token AND a valid log level. Progress must flow; logs must not.
 	run := c.call(t, "tools/call", map[string]any{
-		"name": "review_report", "arguments": map[string]any{"workspace": ws},
+		"name": "review_report", "arguments": map[string]any{"workspace": ws, "panel": defaultPanel()},
 		"_meta": mergeMeta(c.meta("debug"), map[string]any{"progressToken": "modern-1"}),
 	})
 	if run.Error != nil {
@@ -334,7 +334,7 @@ func TestSubprocess_ModernEraTranscriptOverTheRealBinary(t *testing.T) {
 	// unrecognized-level -32602 SHOULD attaches to servers that implement per-request logging, and
 	// this one declines the feature outright.
 	bad := c.call(t, "tools/call", map[string]any{
-		"name": "review_report", "arguments": map[string]any{"workspace": ws},
+		"name": "review_report", "arguments": map[string]any{"workspace": ws, "panel": defaultPanel()},
 		"_meta": c.meta("not-a-level"),
 	})
 	if bad.Error != nil {
@@ -422,7 +422,7 @@ func drainFor(t *testing.T, c *modernClient, d time.Duration) {
 
 func TestSubprocess_LegacyProtocolModeIsGenuinelyLegacy(t *testing.T) {
 	ws := subprocessWorkspace(t)
-	c, stderr, stop := startMCP(t, "--protocol", "legacy", "--root", ws, "--wait-seconds", "60")
+	c, stderr, stop := startMCP(t, "--protocol", "legacy", "--adapter", "fake", "--root", ws, "--wait-seconds", "60")
 	defer stop()
 
 	// A fully-formed modern probe, answered by a process pinned to the legacy era.
@@ -462,7 +462,7 @@ func TestSubprocess_LegacyProtocolModeIsGenuinelyLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := c.call(t, "tools/call", map[string]any{
-		"name": "review_report", "arguments": map[string]any{"workspace": ws},
+		"name": "review_report", "arguments": map[string]any{"workspace": ws, "panel": defaultPanel()},
 	})
 	if call.Error != nil {
 		t.Fatalf("the legacy call failed: %+v\nstderr:\n%s", call.Error, stderr.String())
@@ -481,47 +481,43 @@ func TestSubprocess_LegacyProtocolModeIsGenuinelyLegacy(t *testing.T) {
 	}
 }
 
-func TestSubprocess_ModernWithAnInferredRootRefusesEveryPathAndInlineStillWorks(t *testing.T) {
-	// NO --root, and the launch directory carries no PROJECT MARKER, so it is not adopted: nothing
-	// suggests it is the project rather than wherever this process happened to start.
-	//
-	// The rule used to be era-conditional (refuse an inferred cwd on 2026-07-28, honour it on legacy)
-	// and that was keyed on the wrong variable — a legacy client that declines the roots capability
-	// narrows the server no more than a modern one can, and sailed through. What is asserted here is
-	// unchanged, because the OUTCOME is what mattered: no roots, paths refused, inline still working.
-	// It now arrives identically on both eras and for a reason that can be checked.
-	c, stderr, stop := startMCP(t, "--wait-seconds", "60")
+func TestSubprocess_ModernWithNoRootCeilingReviewsTheWorkspaceACallDeclares(t *testing.T) {
+	// NO --root and NO setup: the launch arguments name an adapter and nothing else. Each call declares
+	// its own absolute workspace, so a path review works on a fresh install, and so does an inline one.
+	c, stderr, stop := startMCP(t, "--adapter", "fake", "--wait-seconds", "60")
 	defer stop()
 
 	ws := subprocessWorkspace(t)
-	refused := c.call(t, "tools/call", map[string]any{
-		"name": "review_report", "arguments": map[string]any{"workspace": ws}, "_meta": c.meta(nil),
+	accepted := c.call(t, "tools/call", map[string]any{
+		"name": "review_report", "arguments": map[string]any{"workspace": ws, "panel": defaultPanel()}, "_meta": c.meta(nil),
 	})
-	if refused.Error != nil {
-		t.Fatalf("review_report: %+v\nstderr:\n%s", refused.Error, stderr.String())
+	if accepted.Error != nil {
+		t.Fatalf("review_report: %+v\nstderr:\n%s", accepted.Error, stderr.String())
 	}
-	out, _ := refused.Result["structuredContent"].(map[string]any)
-	if isErr, _ := refused.Result["isError"].(bool); !isErr {
-		t.Fatalf("a path was accepted under an INFERRED root on the modern era: %v", out)
-	}
-	if out["reasonCode"] != "scope_no_roots_configured" {
-		t.Errorf("reasonCode = %v, want scope_no_roots_configured", out["reasonCode"])
+	if isErr, _ := accepted.Result["isError"].(bool); isErr {
+		t.Fatalf("a declared absolute workspace was refused with no ceiling set: %v\nstderr:\n%s", accepted.Result["structuredContent"], stderr.String())
 	}
 
-	// It is not a brick. `inlineWorkspace` consumes no trusted root, so a modern client with zero
-	// roots can still perform a complete review of content it supplies in the call itself.
+	// A relative workspace is a malformed request: a call's scope is always absolute.
+	relative := c.call(t, "tools/call", map[string]any{
+		"name": "review_report", "arguments": map[string]any{"workspace": "project", "panel": defaultPanel()}, "_meta": c.meta(nil),
+	})
+	if relative.Error == nil {
+		t.Errorf("a relative workspace must be refused as invalid params, got %v", relative.Result)
+	}
+
 	inline := c.call(t, "tools/call", map[string]any{
 		"name": "review_report",
 		"arguments": map[string]any{"inlineWorkspace": map[string]any{
 			"sample.go": "package sample\n\nfunc Sample() int { return 1 }\n",
-		}},
+		}, "panel": defaultPanel()},
 		"_meta": c.meta(nil),
 	})
 	if inline.Error != nil {
 		t.Fatalf("inline review_report: %+v\nstderr:\n%s", inline.Error, stderr.String())
 	}
 	if isErr, _ := inline.Result["isError"].(bool); isErr {
-		t.Fatalf("the inline review was refused too, which would make the fail-closed rule a brick: %v", inline.Result["structuredContent"])
+		t.Fatalf("the inline review was refused: %v", inline.Result["structuredContent"])
 	}
 	assertTheTwoMustNots(t, c.transcript())
 }

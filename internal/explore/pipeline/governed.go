@@ -1,6 +1,6 @@
 package pipeline
 
-// This file drives the GOVERNED (canonicalizing) terminal path (design §4/§1):
+// This file drives the GOVERNED (canonicalizing) terminal path:
 //
 //	blind round 1  →  canonicalize (single OR dual merge-agreement)
 //	               →  binding CONFIRMATION round (typed challenges → versioned host rule → new revision)
@@ -60,7 +60,7 @@ func (r *runner) canonicalizingPath(primary []schema.Envelope, payloadHash strin
 			return *res, fault.New(fault.Internal, "dual canonicalization requires two canonicalizer calls")
 		}
 		// TWO INDEPENDENT proposals; only merges BOTH propose survive, a merge only one proposes is CONTESTED →
-		// SPLIT, and every held row records agreedBy (design §0 F-B).
+		// SPLIT, and every held row records agreedBy.
 		cres, cerr = canon.CanonicalizeDual(r.ctx, noms, calls[0], calls[1])
 	} else {
 		cres, cerr = canon.Canonicalize(r.ctx, noms, calls[0])
@@ -87,7 +87,7 @@ func (r *runner) canonicalizingPath(primary []schema.Envelope, payloadHash strin
 		"contestedMerges": len(cres.Ledger.Contested()), "agreementRule": cres.AgreementRuleVersion,
 	})
 
-	// -- Binding CONFIRMATION round (design §4) --
+	// -- Binding CONFIRMATION round --
 	confirmed := cres
 	if r.spec.Canonicalization.Confirm {
 		conf, herr := r.confirmationRound(cres, payloadHash)
@@ -112,10 +112,10 @@ func (r *runner) canonicalizingPath(primary []schema.Envelope, payloadHash strin
 	// The PERSISTED RANDOMIZED presentation order of the confirmed partition (canon.Present over host material
 	// that is already persisted, so it is reproducible). It orders BOTH the pooled digest a mediated round is
 	// shown and the option set a ballot is cast over — position must not be able to encode the canonicalizer's
-	// or the host's preference in either case (§4).
+	// or the host's preference in either case.
 	pres := canon.Present(confirmed, payloadHash+"\x00"+confirmed.PartitionRevisionHash)
 
-	// -- FROZEN DECISION INPUTS (design §4), for a BALLOT-bearing mode ONLY and strictly BEFORE the ballot
+	// -- FROZEN DECISION INPUTS, for a BALLOT-bearing mode ONLY and strictly BEFORE the ballot
 	// round is dispatched: else a criterion (or a shortlist cut) can be introduced after seeing which
 	// candidate it favors. --
 	if r.spec.Ballot != nil {
@@ -125,8 +125,8 @@ func (r *runner) canonicalizingPath(primary []schema.Envelope, payloadHash strin
 		}
 	}
 
-	// -- Collator-mediated LATER ROUNDS (design §1). Rounds 2..N carry the pooled CONFIRMED-canonical uniques
-	// as explicitly-delimited untrusted DATA; they add depth, never counts (§0 F-A). For a ballot-bearing mode
+	// -- Collator-mediated LATER ROUNDS. Rounds 2..N carry the pooled CONFIRMED-canonical uniques
+	// as explicitly-delimited untrusted DATA; they add depth, never counts. For a ballot-bearing mode
 	// the final round IS the ballot, dispatched under the frozen framing above. --
 	for k := 2; k <= rounds; k++ {
 		if herr := r.laterRound(k, confirmed, pres); herr != nil {
@@ -134,7 +134,7 @@ func (r *runner) canonicalizingPath(primary []schema.Envelope, payloadHash strin
 		}
 	}
 
-	// -- HOST TALLY (design §4): the ranking is computed here, from the recorded ballots, by a versioned host
+	// -- HOST TALLY: the ranking is computed here, from the recorded ballots, by a versioned host
 	// rule — never asserted by a model. --
 	if r.spec.Ballot != nil {
 		if herr := r.tallyBallots(confirmed, payloadHash); herr != nil {
@@ -143,7 +143,7 @@ func (r *runner) canonicalizingPath(primary []schema.Envelope, payloadHash strin
 		}
 	}
 
-	// -- Governance CLAIMS (design §0 F-C/§4): only for a RANKING-GRADE policy. Catalog is observe posture —
+	// -- Governance CLAIMS: only for a RANKING-GRADE policy. Catalog is observe posture —
 	// it emits no counts, so there is nothing to pin and its artifact is unchanged. --
 	if ranked {
 		if herr := r.emitClaims(confirmed, payloadHash); herr != nil {
@@ -188,7 +188,7 @@ func (r *runner) collate(confirmed canon.Result) (mode.ModeOutput, error) {
 	return r.spec.Canonicalizing.Collate(confirmed)
 }
 
-// confirmationRound runs the BINDING confirmation round (design §4): it computes the persisted RANDOMIZED
+// confirmationRound runs the BINDING confirmation round: it computes the persisted RANDOMIZED
 // presentation order, shows every explorer the provisional raw→canonical ledger WITH attribution, collects
 // TYPED challenges, and hands them to the VERSIONED HOST rule — which the canonicalizer never sees, because it
 // must not adjudicate complaints about its own partition.
@@ -261,7 +261,7 @@ func (r *runner) confirmationRound(prov canon.Result, payloadHash string) (*cano
 
 	var challenges []canon.Challenge
 	for i, rep := range replies {
-		// SAME-IDENTITY invariant across the explorer's rounds (§1): a swap between round 1 and the
+		// SAME-IDENTITY invariant across the explorer's rounds: a swap between round 1 and the
 		// confirmation round halts — a challenge is a governance act and must come from the pinned model.
 		if ierr := r.ids.observe("explorer["+identityString(r.plan.Explorers[i].Identity())+"]", rep.resolved); ierr != nil {
 			return nil, ierr
@@ -282,7 +282,7 @@ func (r *runner) confirmationRound(prov canon.Result, payloadHash string) (*cano
 	return &conf, nil
 }
 
-// laterRound runs ONE mediated explorer round k>=2 (design §1/§6). Order matters and is deliberate:
+// laterRound runs ONE mediated explorer round k>=2. Order matters and is deliberate:
 //
 //  1. the host pools the CONFIRMED-canonical uniques into a typed round artifact (explorers never see raw peer
 //     output — AssertNoRawPeerOutput proves it mechanically rather than by inspection);
@@ -306,7 +306,7 @@ func (r *runner) laterRound(k int, confirmed canon.Result, pres canon.Presentati
 		emit(r.onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
 		return herr
 	}
-	// EDGE VALIDATION BEFORE SPEND (design §6).
+	// EDGE VALIDATION BEFORE SPEND.
 	if verr := round.ValidateEdge(art, r.spec.LaterRound.Accepts()); verr != nil {
 		herr := fault.Wrap(fault.Config, fmt.Sprintf("round %d→%d edge rejected before any model call", prior.Index(), k), verr)
 		emit(r.onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
@@ -316,7 +316,7 @@ func (r *runner) laterRound(k int, confirmed canon.Result, pres canon.Presentati
 	// A BALLOT round carries the FROZEN DECISION header, prepended by the HOST — outside the untrusted block,
 	// because it is host material, and outside the mode contract, because a contract must not be able to
 	// re-word the framing a vote is cast under. It also makes the ordering auditable from the prompt bytes:
-	// the inputs hash can only appear here if the freeze already happened (§4).
+	// the inputs hash can only appear here if the freeze already happened.
 	phase := schema.PhaseExplore
 	if res.Decision != nil {
 		prompt = res.Decision.Frozen.Render() + "\n" + prompt
@@ -344,7 +344,7 @@ func (r *runner) laterRound(k int, confirmed canon.Result, pres canon.Presentati
 		return halt
 	}
 	// A later round is recorded as its own NON-blind round. It never touches round 1's envelopes (they live in
-	// an immutable round.Round) — later rounds add views, they never overwrite the baseline (§1).
+	// an immutable round.Round) — later rounds add views, they never overwrite the baseline.
 	res.Rounds = append(res.Rounds, round.NewRound(k, false, payloadHash, envs, &art))
 	return nil
 }
@@ -352,11 +352,11 @@ func (r *runner) laterRound(k int, confirmed canon.Result, pres canon.Presentati
 // pooledUniques projects the CONFIRMED partition into the mediation payload: one item per canonical entity,
 // carrying the canonical label, the distinct raw variants the panel actually used, and the attributed sources.
 // It reads ONLY the confirmed partition — never an envelope's raw body — which is what makes the redistribution
-// collator/host-mediated rather than a peer dump (§1).
+// collator/host-mediated rather than a peer dump.
 //
 // `order` is the PERSISTED RANDOMIZED presentation order (canon.Present). Items are emitted in it so position
 // in the redistributed digest is uncorrelated with the canonicalizer's own cluster order — the same reason the
-// confirmation round randomizes, and a precondition for a ballot cast over this set (§4). An entity missing
+// confirmation round randomizes, and a precondition for a ballot cast over this set. An entity missing
 // from the order is still emitted, at the end: dropping one would be a silent loss.
 func pooledUniques(confirmed canon.Result, order []string) (items []round.Item, sourceRefs []string) {
 	seenRef := map[string]bool{}
@@ -425,10 +425,10 @@ func joinComma(v []string) string {
 }
 
 // emitClaims computes one corroboration claim per confirmed canonical entity and records them in the
-// append-only claim ledger (design §4/§9). The evidence base is the BLIND round-1 baseline and nothing else —
+// append-only claim ledger. The evidence base is the BLIND round-1 baseline and nothing else —
 // govern.NewBlindBaseline refuses any other round, so the anti-echo invariant is enforced by the types rather
 // than by this call site remembering it. Model prose (the canonicalizers' coverage notes) is quarantined in the
-// collatorNarrative namespace, never merged into a claim (§0 F-C).
+// collatorNarrative namespace, never merged into a claim.
 func (r *runner) emitClaims(confirmed canon.Result, formulationHash string) error {
 	res := r.res
 	if len(res.Rounds) == 0 {
@@ -453,7 +453,7 @@ func (r *runner) emitClaims(confirmed canon.Result, formulationHash string) erro
 		}
 		ledger.Emit(claim)
 	}
-	// A BALLOT-bearing mode's tally claims go into the SAME append-only ledger (§9: every emitted governance
+	// A BALLOT-bearing mode's tally claims go into the SAME append-only ledger (every emitted governance
 	// claim persists its query id, params, hashes, value and contributing sources). They sit alongside the
 	// corroboration claims rather than replacing them, which is exactly the point: `emergent` salience and
 	// `voted` preference are two different measurements of the same entities and the record reports both.
@@ -468,8 +468,8 @@ func (r *runner) emitClaims(confirmed canon.Result, formulationHash string) erro
 	if notes := confirmed.CoverageNotes; notes != "" {
 		src := schema.ExplorerIdentity{}
 		if len(confirmed.Canonicalizers) > 0 {
-			// ATTRIBUTION, NOT SELECTION — stated because "index 0 of a slice of identities" is exactly the
-			// shape that hid the canonicalizer-b defect, and a reader is owed the difference.
+			// ATTRIBUTION, NOT SELECTION — stated because "index 0 of a slice of identities" invites reading it
+			// as a selection, and a reader is owed the difference.
 			//
 			// `Canonicalizers` is [a, b] in ROLE order (canon.CanonicalizeDual builds it that way); it is never
 			// sorted, so nothing here is picking a winner out of an incidental ordering, and no downstream

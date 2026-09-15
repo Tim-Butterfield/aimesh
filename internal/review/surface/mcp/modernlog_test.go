@@ -108,7 +108,7 @@ func runBackgroundedReport(t *testing.T, era proto.Era) *tap {
 	t.Helper()
 	ws := workspaceFixture(t)
 	rv := &slowEventingReviewer{afterResponse: make(chan struct{})}
-	s := newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} })
+	s := newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} })
 
 	sr, cw := io.Pipe()
 	cr, sw := io.Pipe()
@@ -132,7 +132,7 @@ func runBackgroundedReport(t *testing.T, era proto.Era) *tap {
 		}
 	}
 
-	args := map[string]any{"workspace": ws, "waitSeconds": 1}
+	args := map[string]any{"workspace": ws, "waitSeconds": 1, "panel": defaultPanel()}
 	params := map[string]any{"name": "review_report", "arguments": args}
 	switch era {
 	case proto.EraModern:

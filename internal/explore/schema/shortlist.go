@@ -1,6 +1,6 @@
 package schema
 
-// This file holds the SHORTLIST mode's app-owned round artifacts (design §3 Shortlist row / §4): the
+// This file holds the SHORTLIST mode's app-owned round artifacts: the
 // FIXED round-1 "enumerate the candidate options" prompt + schema, and the FIXED round-2 BALLOT prompt +
 // schema over the CONFIRMED canonical IDs.
 //
@@ -67,12 +67,12 @@ func ShortlistExplorerPrompt(raw RawTask) string {
 	return b.String()
 }
 
-// --- Round 2: the explicit BALLOT over the confirmed canonical IDs (design §3/§4) ---
+// --- Round 2: the explicit BALLOT over the confirmed canonical IDs ---
 
 // ballotFields is the FIXED ballot-response schema. `ranking` is required and ordered (best first);
 // `approved` is an optional, separate question ("which of these would you accept at all?") tallied on its own
 // rather than folded into the score; `rationale` is model prose, quarantined into the collatorNarrative
-// namespace by the host and never merged into a machine governance field (§0 F-C). There is deliberately no
+// namespace by the host and never merged into a machine governance field. There is deliberately no
 // field for a winner, a score, or a tally.
 var ballotFields = []Field{
 	{Name: "ranking", Type: TypeString, Required: true, Repeated: true},

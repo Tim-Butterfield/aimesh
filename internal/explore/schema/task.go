@@ -8,32 +8,32 @@ import (
 	"strings"
 )
 
-// RawTask is the user's per-run intent (design §6.2): the exploration purpose, the criteria it
-// must satisfy, and optional prior context (so exploration N+1 can consume exploration N's result,
-// §6.4). It is supplied per invocation — NOT roster state — analogous to reviewmesh's workspace
+// RawTask is the user's per-run intent: the exploration purpose, the criteria it
+// must satisfy, and optional prior context (so exploration N+1 can consume exploration N's result).
+// It is supplied per invocation — NOT roster state — analogous to reviewmesh's workspace
 // path. It is persisted alongside the collator's final_prompt as the intent-fidelity audit record.
 type RawTask struct {
 	Purpose      string   `json:"purpose"`
 	Criteria     []string `json:"criteria"`
 	PriorContext string   `json:"priorContext,omitempty"`
-	// Mode selects the app-owned exploration mode (design §3). Empty ⇒ the default mode ("map"); it is
+	// Mode selects the app-owned exploration mode. Empty ⇒ the default mode ("map"); it is
 	// carried as an opaque string here (the mode registry lives in internal/mode to avoid an import
 	// cycle, and the surfaces + pipeline resolve it). omitempty so a default/Map task serializes as
 	// before. Validate accepts an empty or any mode string; the surfaces + pipeline reject an UNKNOWN
 	// mode against the registry with a message listing the known modes.
 	Mode string `json:"mode,omitempty"`
 	// Artifact is the supplied TYPED ARTIFACT UNDER REVIEW — the thing a mode attacks rather than
-	// researches (design §3, the Challenge row). It is user-supplied per invocation (a CLI `--artifact
+	// researches (the Challenge mode). It is user-supplied per invocation (a CLI `--artifact
 	// <path|->`, an ACP `_meta.exploremesh.artifact`), never roster state and never model-authored. Most
 	// modes ignore it, so Validate does NOT require it here: a mode that NEEDS it declares that through
 	// its ModeSpec.ValidateTask hook, which every surface runs BEFORE any spend. omitempty so a task for
 	// a mode that ignores it carries no `artifact` key at all.
 	Artifact string `json:"artifact,omitempty"`
-	// --- the FIXED-SPACE declarations (design §3 Compare + Forecast rows) ---
+	// --- the FIXED-SPACE declarations ---
 	//
 	// These fields are what MAKES those modes fixed-space: the option set / criteria / estimation target are
 	// declared by the USER, per invocation, BEFORE any explorer speaks — which is why neither mode needs a
-	// canonicalizer or a confirmation round (there is no emergent universe to resolve, §0 F-B). Like
+	// canonicalizer or a confirmation round (there is no emergent universe to resolve). Like
 	// Artifact they are optional at this level and REQUIRED by whichever mode says so through its
 	// ModeSpec.ValidateTask, so a task for a mode that is not fixed-space carries none of these keys.
 
@@ -56,7 +56,7 @@ type RawTask struct {
 // Validate checks the raw task is usable: a non-empty purpose and at least one NON-BLANK criterion.
 // An all-whitespace criteria list (every entry blank after trimming) is rejected exactly like an
 // empty list — the CLI's splitCSV already drops blanks, and the ACP surface must never accept a
-// criteria list that carries no real constraint (design §6.2: criteria are load-bearing intent).
+// criteria list that carries no real constraint (criteria are load-bearing intent).
 // The mode is NOT resolved here (the registry lives in internal/mode); an empty or known mode is
 // accepted, and the surfaces + pipeline reject an unknown mode against the registry.
 func (t RawTask) Validate() error {
@@ -75,7 +75,7 @@ func (t RawTask) Validate() error {
 	return nil
 }
 
-// ExplorerTaskPayload is what EVERY explorer receives (design §6.2): the collator-formulated
+// ExplorerTaskPayload is what EVERY explorer receives: the collator-formulated
 // final prompt + the expanded response schema. Its serialized form is BYTE-IDENTICAL across
 // explorers — the only variable per explorer is (adapter, model, effort) — so "identical" is
 // verifiable (Canonical/Hash), not aspirational.
@@ -111,7 +111,7 @@ func (p ExplorerTaskPayload) Validate() error {
 	return ExpandedSatisfiesMinimum(p.ExpandedSchema)
 }
 
-// FormulationSource records who produced the shared payload (design §6.7). Formulation is APP-OWNED:
+// FormulationSource records who produced the shared payload. Formulation is APP-OWNED:
 // every mode supplies its own explorer prompt + explorer schema, so the only source a run can record is
 // a formulation-free one. It stays a typed, extensible label (rather than an implied constant) because
 // it is a persisted governance fact — the record that no shared collator frame conditioned round 1.
@@ -122,15 +122,15 @@ type FormulationSource string
 
 const (
 	// FormulationFreeMap marks a payload the pipeline built DETERMINISTICALLY from the mode's app-owned
-	// prompt + fixed schema, with no collator formulate call at all (design §3). Later comparisons
+	// prompt + fixed schema, with no collator formulate call at all. Later comparisons
 	// therefore stay honest that no shared collator frame conditioned round-1 — the common cause is
-	// removed, not merely bounded (§0 F-A).
+	// removed, not merely bounded.
 	FormulationFreeMap FormulationSource = "formulation-free (map)"
 )
 
-// Formulation is the persisted run-state of phase-1 formulation (design §6.7). CollatorAttempted is
+// Formulation is the persisted run-state of phase-1 formulation. CollatorAttempted is
 // retained (and always false) because it is a positive GOVERNANCE assertion in the run record, not a
-// branch flag: §9's derived export reads run directories it did not write and projects it as the
+// branch flag: the derived export reads run directories it did not write and projects it as the
 // `collator_attempted` / `formulation_free` columns, so an artifact reader can see the property
 // without having to know which modes a given build shipped.
 type Formulation struct {
@@ -139,7 +139,7 @@ type Formulation struct {
 	Payload           ExplorerTaskPayload `json:"payload"`
 }
 
-// FormulationFree builds the persisted formulation for a FORMULATION-FREE mode (design §3): the
+// FormulationFree builds the persisted formulation for a FORMULATION-FREE mode: the
 // payload is the mode's app-owned prompt + fixed explorer schema, assembled deterministically WITHOUT
 // any collator formulate call. CollatorAttempted is false — the collator was never asked to formulate
 // (unlike the fallback, where it was asked and failed). The source records the formulation-free

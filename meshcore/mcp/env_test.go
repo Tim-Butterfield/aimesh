@@ -12,12 +12,9 @@ import (
 
 // This file pins the PER-REQUEST PROTOCOL CONTEXT (env.go).
 //
-// AGAINST THE OLD CODE EVERY TEST HERE FAILS, and not only because the API is new: there was no
-// per-request context at all. The progress token lived on the Call, the negotiated version and the log
-// level lived on the Server, and a handler that wanted to know which roots governed its paths had to
-// reach back into the application's process-global resolver. What is asserted below is that a request
-// now CARRIES those facts, which is the precondition for the sessionless revision, where there is no
-// session left to read them from.
+// What is asserted below is that a request CARRIES its protocol facts — the progress token, the
+// negotiated version, the log level and the roots that govern its paths — which is the precondition
+// for the sessionless revision, where there is no session to read them from.
 
 // envProbe registers a tool that hands the test whatever the handler saw on its Call.
 func envProbe(t *testing.T, tune ...func(*mcp.Server)) (*client, func(), func() *mcp.RequestEnv) {

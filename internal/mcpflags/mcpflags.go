@@ -1,12 +1,10 @@
 // Package mcpflags declares the LAUNCH flags both MCP servers share, once.
 //
-// Why a package rather than two copies: these flags state POSTURE, not preference. `--protocol
-// legacy` decides whether this process is a conformant 2026-07-28 server or a compatibility
-// fallback; `--strict-schema` decides whether a non-conforming payload is shipped or refused;
-// `--probe-deep` decides whether launching the server spends real tokens. An operator reads the
-// help text to learn what they are agreeing to, and two hand-maintained descriptions of the same
-// switch drift — they already had, differing in whether a run was called "a run" or "an
-// exploration" — with nothing in the build to catch it.
+// They are one declaration rather than two copies because these flags state POSTURE, not preference:
+// `--protocol legacy` decides whether this process is a conformant 2026-07-28 server or a
+// compatibility fallback, and `--strict-schema` decides whether a non-conforming payload is shipped
+// or refused. An operator reads the help text to learn what they are agreeing to, and two
+// descriptions of the same switch would drift.
 //
 // It is also what makes `aimesh mcp` possible. A composed server registers both domains' flags on
 // ONE flag set, and a duplicate name panics; declaring the shared ones here is what leaves each
@@ -38,7 +36,6 @@ type Shared struct {
 	WaitSeconds  *int
 	TurnTimeout  *time.Duration
 	StrictSchema *bool
-	ProbeDeep    *bool
 }
 
 // Register declares the shared flags on fs. defaultWait is the domain's own DefaultWaitSeconds, so
@@ -54,17 +51,14 @@ func Register(fs *flag.FlagSet, defaultWait int) *Shared {
 		// legacy hosts, which have no fall-forward mechanism, and buys nothing an operator cannot get
 		// by simply not sending `initialize`.
 		//
-		// SUNSET-PATH (MCP26-SUNSET; migration design §16.2): the whole flag goes with the era.
+		// SUNSET-PATH (MCP26-SUNSET): the whole flag goes with the era.
 		Protocol: fs.String("protocol", string(proto.ProtocolDual),
 			"MCP era posture: dual (serve whichever revision the client opens with — the sessionless 2026-07-28 revision or a legacy `initialize` handshake — and commit to it) | legacy (be a pre-2026-07-28 server in every observable respect: `server/discover` is an unknown method and no modern request is served). A legacy-mode process is a documented compatibility fallback, NOT a conformant 2026-07-28 deployment; the `doctor` tool reports which mode is in force"),
 		// WIRE FRAMING IS A PROPERTY OF THE PROCESS, not of a domain — it decides how bytes are
 		// delimited on the one stdio stream both domains share, so it belongs beside --protocol.
 		//
-		// It used to be declared by the REVIEW domain, which had two consequences a user could hit.
-		// `aimesh mcp --only explore --framing content-length` was REFUSED as a foreign flag with
-		// "--framing would do nothing" — untrue, since framing is exactly what would have done
-		// something. And `aimesh explore mcp` had no --framing at all, so an explore-only deployment
-		// could not choose content-length even though its server has always honoured the setting.
+		// Declared here, it is accepted under `aimesh mcp --only explore` and by `aimesh explore mcp`,
+		// so an explore-only deployment can choose content-length as a review one can.
 		Framing: fs.String("framing", "",
 			"wire framing: newline (the MCP stdio default) | content-length. It applies to the whole process, so it is accepted whichever domain(s) are being served"),
 		WaitSeconds: fs.Int("wait-seconds", defaultWait,
@@ -73,12 +67,6 @@ func Register(fs *flag.FlagSet, defaultWait int) *Shared {
 			"total wall-clock budget for one run"),
 		StrictSchema: fs.Bool("strict-schema", false,
 			"validate every result's structuredContent against its tool's declared outputSchema BEFORE sending it, and fail the call loudly on a violation instead of shipping a non-conforming payload. Off by default because it is not free (the payload is re-marshalled and walked on every call); the same check runs in the build for every result shape the tests construct. Also settable with "+proto.StrictSchemaEnv+"=1"),
-		// The DEEP probe is a LAUNCH-TIME flag, not a tool parameter, and that is the whole design.
-		// It spends real tokens, and the `doctor` tool carries readOnlyHint with a description
-		// promising that no process is started and nothing is spent. A peer that could trigger a
-		// spend by calling a read-only tool would make that annotation a lie.
-		ProbeDeep: fs.Bool("probe-deep", false,
-			"at launch (once), run the DEEP readiness probe of the default panel's adapters — one REAL, bounded model invocation each, in a throwaway isolated directory — and include the result in this server's readiness projection (the `doctor` tool). SPENDS REAL TOKENS at startup. Without it, readiness stays static. No interactive trust/login prompt is ever answered on your behalf"),
 	}
 }
 

@@ -1,6 +1,6 @@
 package canon
 
-// This file is the DUAL-CANONICALIZER MERGE-AGREEMENT (design §0 F-B + §4): the ranking-grade replacement
+// This file is the DUAL-CANONICALIZER MERGE-AGREEMENT: the ranking-grade replacement
 // for a single canonicalizer's partition authority.
 //
 // The problem it closes: every emergent-space count rides on a partition ("is 'Postgres' the same candidate
@@ -20,7 +20,7 @@ package canon
 // claim about independent support.
 //
 // Every held mapping row records `agreedBy` (both proposing calls + identities); the DECIDING authority on
-// this path is the versioned HOST rule, not either model (§0 F-C: machine governance fields carry
+// this path is the versioned HOST rule, not either model (machine governance fields carry
 // host-produced values only), so DecidedByCall names the rule and DecidedByIdentity is deliberately left
 // zero — no model decided it.
 
@@ -33,10 +33,10 @@ import (
 
 // DualRuleVersion is the VERSIONED host rule that turns two independent canonicalizer proposals into one
 // held partition. It is persisted on every row's deciding call and on the Result, so a partition can always
-// be re-derived from the two recorded proposals by the exact rule that produced it (§0 F-C).
+// be re-derived from the two recorded proposals by the exact rule that produced it.
 const DualRuleVersion = "host-dual-merge-agreement@v1"
 
-// ContestedMerge is a merge exactly ONE canonicalizer proposed (design §0 F-B). The host rule resolves it in
+// ContestedMerge is a merge exactly ONE canonicalizer proposed. The host rule resolves it in
 // the conservative direction — the nominations are kept SPLIT — and the refused merge is recorded as a
 // first-class decision in the same append-only chain, so a reader can see precisely which corroboration the
 // partition may be undercounting and who proposed it.
@@ -60,7 +60,7 @@ type ContestedMerge struct {
 const ResolutionSplit = "split"
 
 // CanonicalizeDual runs TWO INDEPENDENT canonicalizer calls over the same nominations and returns the
-// partition both agree on (design §0 F-B). Both proposals are validated for partition integrity FIRST (each
+// partition both agree on. Both proposals are validated for partition integrity FIRST (each
 // must itself be a surjective partition — an invalid proposal is a canonicalizer failure, not something to
 // silently intersect around), then the held partition is their intersection, then the surjectivity gate runs
 // over the held partition exactly as on the single path. Errors name WHICH canonicalizer produced the bad

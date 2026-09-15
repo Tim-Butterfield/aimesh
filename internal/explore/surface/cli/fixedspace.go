@@ -1,6 +1,6 @@
 package cli
 
-// This file holds the CLI surface of the FIXED-SPACE modes (design §3 Compare + Forecast rows): the
+// This file holds the CLI surface of the FIXED-SPACE modes: the
 // structured `--criterion` spec parser and the two renderers.
 //
 // The renderers exist as their own functions for the same reason the adjudicative ones do: what a

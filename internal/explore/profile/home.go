@@ -68,7 +68,7 @@ func Discover(cwd string) (string, bool) {
 	return "", false
 }
 
-// DiscoverProfiles is Discover under its historical name, kept because callers distinguish "the
+// DiscoverProfiles is Discover under a second name, kept because callers distinguish "the
 // workbench's own saved config" from a caller-resolved seed roster at their call sites.
 func DiscoverProfiles(cwd string) (string, bool) { return Discover(cwd) }
 

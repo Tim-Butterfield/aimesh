@@ -4,18 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/Tim-Butterfield/aimesh/meshcore/audit"
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
+	corefake "github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 
 	"github.com/Tim-Butterfield/aimesh/internal/explore/pipeline"
-	"github.com/Tim-Butterfield/aimesh/internal/explore/profile"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/acp"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/acp/testhost"
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 )
 
 // fakeExplorer is a deterministic in-process Explorer: it emits one progress event, optionally blocks on
@@ -25,7 +29,7 @@ type fakeExplorer struct {
 	err   error
 	// gotRaw captures the last RawTask the server handed it (so a test can assert criteria-via-_meta).
 	gotRaw *schema.RawTask
-	// gotPlan captures the last PANEL the server handed it (so a test can assert profile/count selection).
+	// gotPlan captures the last PANEL the server handed it (so a test can assert the composed panel ran).
 	gotPlan *roster.Plan
 	// gotOpts captures the last Options — how a test proves a per-turn parameter was PLUMBED to the
 	// pipeline rather than merely accepted off the wire.
@@ -68,26 +72,65 @@ func (f *fakeExplorer) Run(ctx context.Context, plan roster.Plan, raw schema.Raw
 	}, nil
 }
 
-func testPlan(t *testing.T) roster.Plan {
-	t.Helper()
-	plan, err := roster.Roster{
-		Explorers: []roster.Explorer{{Adapter: "fake", Model: "m1", Effort: "high"}, {Adapter: "fake", Model: "m2", Effort: "low"}},
-		Collator:  roster.Collator{Adapter: "fake", Model: "mc"},
-	}.Plan()
-	if err != nil {
-		t.Fatalf("plan: %v", err)
+// testPanel is the panel a test prompt composes when the panel is not what the test is about: two fake
+// explorers and a fake collator.
+func testPanel() map[string]any {
+	return map[string]any{
+		"explorers": []any{
+			map[string]any{"adapter": "fake", "model": "m1", "effort": "high"},
+			map[string]any{"adapter": "fake", "model": "m2", "effort": "low"},
+		},
+		"collator": map[string]any{"adapter": "fake", "model": "mc"},
 	}
-	return plan
 }
 
-// serve wires the server to a pair of in-memory pipes and returns a driving Client + a stop func.
+// withPanel returns em with testPanel added when it names no panel. A "panel" key set to nil is removed,
+// so a test can send a prompt with no panel at all.
+func withPanel(em map[string]any) map[string]any {
+	out := make(map[string]any, len(em)+1)
+	for k, v := range em {
+		out[k] = v
+	}
+	if p, has := out["panel"]; !has {
+		out["panel"] = testPanel()
+	} else if p == nil {
+		delete(out, "panel")
+	}
+	return out
+}
+
+// launchSet builds the adapter set an agent launched with `--adapter <name>` for each name would hold.
+// The internal fake is unlocked for the test; any other built-in adapter is launched at an executable the
+// test owns, so its availability is real and needs no CLI on the machine running the tests.
+func launchSet(t *testing.T, names ...string) launchflags.Set {
+	t.Helper()
+	t.Setenv(corefake.EnvVar, "1")
+	var adapters []launchflags.Adapter
+	for _, n := range names {
+		a := launchflags.Adapter{Name: n, Source: launchflags.SourceFlag}
+		if n != launchflags.FakeAdapter {
+			p := filepath.Join(t.TempDir(), n)
+			if runtime.GOOS == "windows" {
+				p += ".exe"
+			}
+			if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatalf("fixture: %v", err)
+			}
+			a.Path = p
+		}
+		adapters = append(adapters, a)
+	}
+	return launchflags.NewSet(adapters...)
+}
+
+// serve wires a server launched with the fake adapter to a pair of in-memory pipes and returns a driving
+// Client + a stop func.
 func serve(t *testing.T, exp acp.Explorer) (*testhost.Client, func()) {
 	t.Helper()
 	t.Setenv("AIMESH_HOME", t.TempDir())
-	t.Setenv("AIMESH_HOME", t.TempDir())
 	sr, cw := io.Pipe() // server reads sr; client writes cw
 	cr, sw := io.Pipe() // client reads cr; server writes sw
-	srv := &acp.Server{Explorer: exp, Plan: testPlan(t), Framing: acp.FramingNewline}
+	srv := &acp.Server{Explorer: exp, Adapters: launchSet(t, "fake"), Framing: acp.FramingNewline}
 	done := make(chan struct{})
 	go func() { _ = srv.Serve(sr, sw); close(done) }()
 	client := testhost.NewClient(acp.FramingNewline, cr, cw)
@@ -101,7 +144,7 @@ func serve(t *testing.T, exp acp.Explorer) (*testhost.Client, func()) {
 }
 
 func metaCriteria(criteria ...string) map[string]any {
-	return map[string]any{"exploremesh": map[string]any{"criteria": criteria}}
+	return map[string]any{"exploremesh": map[string]any{"panel": testPanel(), "criteria": criteria}}
 }
 
 func TestServer_HappyPath_PromptResponseAndProgress(t *testing.T) {
@@ -176,7 +219,7 @@ func TestServer_PurposeOverrideFromMeta(t *testing.T) {
 	_, err := client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    "the human prompt",
-		"_meta":     map[string]any{"exploremesh": map[string]any{"criteria": []string{"c1"}, "purpose": "the exact purpose"}},
+		"_meta":     map[string]any{"exploremesh": map[string]any{"panel": testPanel(), "criteria": []string{"c1"}, "purpose": "the exact purpose"}},
 	})
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
@@ -215,7 +258,7 @@ func TestServer_Mode(t *testing.T) {
 	// (b) explicit known mode is applied + echoed.
 	resp2, _ := client.Call("session/prompt", map[string]any{
 		"sessionId": sid, "prompt": "explore",
-		"_meta": map[string]any{"exploremesh": map[string]any{"criteria": []string{"c1"}, "mode": "map"}},
+		"_meta": map[string]any{"exploremesh": map[string]any{"panel": testPanel(), "criteria": []string{"c1"}, "mode": "map"}},
 	})
 	if resp2.Error != nil {
 		t.Fatalf("known mode rejected: %v", resp2.Error)
@@ -227,7 +270,7 @@ func TestServer_Mode(t *testing.T) {
 	// (c) unknown mode → invalid-params (-32602) listing known modes.
 	resp3, _ := client.Call("session/prompt", map[string]any{
 		"sessionId": sid, "prompt": "explore",
-		"_meta": map[string]any{"exploremesh": map[string]any{"criteria": []string{"c1"}, "mode": "bogus"}},
+		"_meta": map[string]any{"exploremesh": map[string]any{"panel": testPanel(), "criteria": []string{"c1"}, "mode": "bogus"}},
 	})
 	if resp3.Error == nil || resp3.Error.Code != -32602 {
 		t.Fatalf("unknown mode must be invalid-params (-32602), got %v", resp3.Error)
@@ -316,12 +359,11 @@ func TestServer_ResumeMethodNotFoundWithoutStore(t *testing.T) {
 // in flight at once): the second must be rejected "session busy" (codeInvalidRequest) while the first runs.
 func TestServer_SingleFlight(t *testing.T) {
 	t.Setenv("AIMESH_HOME", t.TempDir())
-	t.Setenv("AIMESH_HOME", t.TempDir())
 	block := make(chan struct{})
 	exp := &fakeExplorer{block: block}
 	sr, cw := io.Pipe()
 	cr, sw := io.Pipe()
-	srv := &acp.Server{Explorer: exp, Plan: testPlan(t), Framing: acp.FramingNewline}
+	srv := &acp.Server{Explorer: exp, Adapters: launchSet(t, "fake"), Framing: acp.FramingNewline}
 	done := make(chan struct{})
 	go func() { _ = srv.Serve(sr, sw); close(done) }()
 	fr := acp.NewFramer(acp.FramingNewline, cr, cw)
@@ -377,63 +419,7 @@ func TestServer_SingleFlight(t *testing.T) {
 	_ = sw.Close()
 }
 
-// --- panel selection via _meta (profile + count, design §7) ---
-
-// testProfiles is the profile SET a profile-aware agent binds to: `base` (2 explorers) as the DEFAULT and
-// `wide` (3 explorers in a deliberate PREFERENCE order, so a count subset is recognizable).
-func testProfiles() profile.Set {
-	return profile.Set{
-		SchemaVersion:  profile.CurrentSchemaVersion,
-		DefaultProfile: "base",
-		Profiles: map[string]profile.Profile{
-			"base": {
-				Explorers: []roster.Explorer{
-					{Adapter: "fake", Model: "base-a", Effort: "high"},
-					{Adapter: "fake", Model: "base-b", Effort: "low"},
-				},
-				Collator: roster.Collator{Adapter: "fake", Model: "base-c"},
-			},
-			"wide": {
-				Explorers: []roster.Explorer{
-					{Adapter: "fake", Model: "z-first", Effort: "high"},
-					{Adapter: "fake", Model: "a-second", Effort: "low"},
-					{Adapter: "fake", Model: "m-third"},
-				},
-				Collator: roster.Collator{Adapter: "fake", Model: "wide-c"},
-			},
-		},
-	}
-}
-
-// serveWithProfiles wires a server bound to a profile SET (what `exploremesh acp` does without --roster):
-// Plan is the DEFAULT profile's full panel and Profiles is everything a prompt may select from.
-func serveWithProfiles(t *testing.T, exp acp.Explorer) (*testhost.Client, func()) {
-	t.Helper()
-	t.Setenv("AIMESH_HOME", t.TempDir())
-	t.Setenv("AIMESH_HOME", t.TempDir())
-	set := testProfiles()
-	def, err := set.Default()
-	if err != nil {
-		t.Fatalf("default profile: %v", err)
-	}
-	plan, err := def.Roster().Plan()
-	if err != nil {
-		t.Fatalf("plan: %v", err)
-	}
-	sr, cw := io.Pipe()
-	cr, sw := io.Pipe()
-	srv := &acp.Server{Explorer: exp, Plan: plan, Profiles: set, Framing: acp.FramingNewline}
-	done := make(chan struct{})
-	go func() { _ = srv.Serve(sr, sw); close(done) }()
-	client := testhost.NewClient(acp.FramingNewline, cr, cw)
-	stop := func() {
-		_ = client.Notify("exit", nil)
-		_ = cw.Close()
-		<-done
-		_ = sw.Close()
-	}
-	return client, stop
-}
+// --- the required panel ---
 
 // newSession runs initialize + session/new and returns the session id.
 func newSession(t *testing.T, client *testhost.Client) string {
@@ -453,7 +439,7 @@ func newSession(t *testing.T, client *testhost.Client) string {
 }
 
 // promptMeta builds a `_meta` carrying the REQUIRED criteria plus whatever extra exploremesh keys are
-// under test (profile / count).
+// under test. It adds no panel: a test that needs one names it.
 func promptMeta(extra map[string]any) map[string]any {
 	em := map[string]any{"criteria": []string{"c1"}}
 	for k, v := range extra {
@@ -462,209 +448,75 @@ func promptMeta(extra map[string]any) map[string]any {
 	return map[string]any{"exploremesh": em}
 }
 
-// echoed returns the PromptResponse's `_meta.exploremesh` map.
-func echoed(t *testing.T, resp *testhost.Response) map[string]any {
-	t.Helper()
-	meta, _ := resp.Result["_meta"].(map[string]any)
-	em, _ := meta["exploremesh"].(map[string]any)
-	if em == nil {
-		t.Fatal("no _meta.exploremesh in PromptResponse")
-	}
-	return em
-}
-
-// TestServer_ProfileSelection: an absent profile binds to the SET'S DEFAULT; a named profile selects that
-// profile's panel; both are echoed back with the selected/configured explorer counts.
-func TestServer_ProfileSelection(t *testing.T) {
+// TestServer_PanelIsRequired: a prompt that names no panel is invalid-params whose message shows the
+// corrected shape, and nothing reaches the pipeline.
+func TestServer_PanelIsRequired(t *testing.T) {
 	exp := &fakeExplorer{}
-	client, stop := serveWithProfiles(t, exp)
+	client, stop := serve(t, exp)
 	defer stop()
 	sid := newSession(t, client)
 
-	// (a) no profile named → the set's default (`base`), echoed by name.
 	resp, err := client.Call("session/prompt", map[string]any{"sessionId": sid, "prompt": "explore", "_meta": promptMeta(nil)})
-	if err != nil || resp.Error != nil {
-		t.Fatalf("prompt: err=%v rpc=%v", err, resp.Error)
-	}
-	em := echoed(t, resp)
-	if em["profile"] != "base" {
-		t.Errorf("echoed profile = %v, want the default `base`", em["profile"])
-	}
-	if em["explorersSelected"] != float64(2) || em["explorersConfigured"] != float64(2) {
-		t.Errorf("echoed counts = %v/%v, want 2/2", em["explorersSelected"], em["explorersConfigured"])
-	}
-	if exp.gotPlan == nil || len(exp.gotPlan.Explorers) != 2 || exp.gotPlan.Collator.Model != "base-c" {
-		t.Errorf("server ran the wrong panel: %+v", exp.gotPlan)
-	}
-
-	// (b) an explicit profile selects that panel (all 3 explorers + its own collator).
-	resp2, err := client.Call("session/prompt", map[string]any{
-		"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"profile": "wide"}),
-	})
-	if err != nil || resp2.Error != nil {
-		t.Fatalf("prompt: err=%v rpc=%v", err, resp2.Error)
-	}
-	em2 := echoed(t, resp2)
-	if em2["profile"] != "wide" || em2["explorersSelected"] != float64(3) {
-		t.Errorf("echoed panel = %v (%v of %v), want wide 3 of 3", em2["profile"], em2["explorersSelected"], em2["explorersConfigured"])
-	}
-	if exp.gotPlan == nil || len(exp.gotPlan.Explorers) != 3 || exp.gotPlan.Collator.Model != "wide-c" {
-		t.Errorf("server ran the wrong panel: %+v", exp.gotPlan)
-	}
-}
-
-// TestServer_UnknownProfile_InvalidParams: an unknown profile is invalid-params (-32602) NAMING the
-// configured profiles — never a silent fallback to the default panel.
-func TestServer_UnknownProfile_InvalidParams(t *testing.T) {
-	exp := &fakeExplorer{}
-	client, stop := serveWithProfiles(t, exp)
-	defer stop()
-	sid := newSession(t, client)
-
-	resp, err := client.Call("session/prompt", map[string]any{
-		"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"profile": "nope"}),
-	})
 	if err != nil {
 		t.Fatalf("call: %v", err)
 	}
 	if resp.Error == nil || resp.Error.Code != -32602 {
-		t.Fatalf("an unknown profile must be invalid-params (-32602), got %v", resp.Error)
+		t.Fatalf("a prompt with no panel must be invalid-params (-32602), got %v", resp.Error)
 	}
-	if !strings.Contains(resp.Error.Message, "nope") || !strings.Contains(resp.Error.Message, "base, wide") {
-		t.Errorf("the error should name the bad profile + list the configured ones: %q", resp.Error.Message)
+	for _, want := range []string{"_meta.exploremesh.panel", `"explorers"`, `"collator"`} {
+		if !strings.Contains(resp.Error.Message, want) {
+			t.Errorf("the refusal must show the corrected shape (%q): %q", want, resp.Error.Message)
+		}
 	}
 	if exp.gotPlan != nil {
-		t.Error("a rejected profile must never reach the pipeline")
+		t.Error("a prompt with no panel must never reach the pipeline")
 	}
 }
 
-// TestServer_CountSelectsTopN: `count` takes the top-N by PREFERENCE order out of the selected profile,
-// returns the plan in canonical attribution order, and echoes the selected/configured counts. The string
-// "all" is the explicit every-explorer form.
-func TestServer_CountSelectsTopN(t *testing.T) {
+// TestServer_ProfileAndCountAreRefused: `profile` and `count` are not exploremesh prompt fields, and an
+// unknown key in the exploremesh namespace is refused rather than silently dropped.
+func TestServer_ProfileAndCountAreRefused(t *testing.T) {
 	exp := &fakeExplorer{}
-	client, stop := serveWithProfiles(t, exp)
+	client, stop := serve(t, exp)
+	defer stop()
+	sid := newSession(t, client)
+
+	for _, key := range []string{"profile", "count"} {
+		resp, err := client.Call("session/prompt", map[string]any{
+			"sessionId": sid, "prompt": "explore",
+			"_meta": promptMeta(map[string]any{"panel": testPanel(), key: "x"}),
+		})
+		if err != nil {
+			t.Fatalf("%s: call: %v", key, err)
+		}
+		if resp.Error == nil || resp.Error.Code != -32602 || !strings.Contains(resp.Error.Message, key) {
+			t.Errorf("a %q key must be refused as invalid params naming it, got %v", key, resp.Error)
+		}
+	}
+	if exp.gotPlan != nil {
+		t.Error("a refused prompt must never reach the pipeline")
+	}
+}
+
+// TestServer_VerifyReadinessReachesThePipeline: the per-turn readiness probe is plumbed to the pipeline,
+// not merely accepted off the wire.
+func TestServer_VerifyReadinessReachesThePipeline(t *testing.T) {
+	exp := &fakeExplorer{}
+	client, stop := serve(t, exp)
 	defer stop()
 	sid := newSession(t, client)
 
 	resp, err := client.Call("session/prompt", map[string]any{
-		"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"profile": "wide", "count": 2}),
+		"sessionId": sid, "prompt": "explore",
+		"_meta": promptMeta(map[string]any{"panel": testPanel(), "verifyReadiness": true}),
 	})
 	if err != nil || resp.Error != nil {
 		t.Fatalf("prompt: err=%v rpc=%v", err, resp.Error)
 	}
-	em := echoed(t, resp)
-	if em["explorersSelected"] != float64(2) || em["explorersConfigured"] != float64(3) {
-		t.Errorf("echoed counts = %v/%v, want 2/3", em["explorersSelected"], em["explorersConfigured"])
+	if !exp.gotOpts.VerifyReadiness {
+		t.Fatal("verifyReadiness was accepted on the wire but not passed to the pipeline")
 	}
-	if exp.gotPlan == nil || len(exp.gotPlan.Explorers) != 2 {
-		t.Fatalf("server ran %+v, want a 2-explorer subset", exp.gotPlan)
-	}
-	// The top 2 by preference (z-first, a-second) — returned in canonical attribution order.
-	if exp.gotPlan.Explorers[0].Model != "a-second" || exp.gotPlan.Explorers[1].Model != "z-first" {
-		t.Errorf("subset = %+v, want the top 2 by preference in canonical order", exp.gotPlan.Explorers)
-	}
-
-	resp2, _ := client.Call("session/prompt", map[string]any{
-		"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"profile": "wide", "count": "all"}),
-	})
-	if resp2.Error != nil {
-		t.Fatalf("count \"all\" rejected: %v", resp2.Error)
-	}
-	if len(exp.gotPlan.Explorers) != 3 {
-		t.Errorf("count \"all\" ran %d explorers, want 3", len(exp.gotPlan.Explorers))
-	}
-}
-
-// TestServer_InvalidCount_InvalidParams: out-of-range, <2, non-integer, unrecognized-string and non-scalar
-// counts are all invalid-params (-32602) — the count is NEVER clamped (requested = executed, design §7).
-func TestServer_InvalidCount_InvalidParams(t *testing.T) {
-	exp := &fakeExplorer{}
-	client, stop := serveWithProfiles(t, exp)
-	defer stop()
-	sid := newSession(t, client)
-
-	for _, tc := range []struct {
-		name  string
-		count any
-	}{
-		{"above the profile size", 9},
-		{"below the 2-explorer minimum", 1},
-		{"not a whole number", 2.5},
-		{"an unrecognized string", "most"},
-		{"not a scalar", []any{2}},
-	} {
-		exp.gotPlan = nil
-		resp, err := client.Call("session/prompt", map[string]any{
-			"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"profile": "wide", "count": tc.count}),
-		})
-		if err != nil {
-			t.Fatalf("%s: call: %v", tc.name, err)
-		}
-		if resp.Error == nil || resp.Error.Code != -32602 {
-			t.Errorf("count %s must be invalid-params (-32602), got %v", tc.name, resp.Error)
-		}
-		if exp.gotPlan != nil {
-			t.Errorf("count %s must be rejected before the pipeline runs", tc.name)
-		}
-	}
-	// An out-of-range count says so explicitly rather than silently clamping.
-	resp, _ := client.Call("session/prompt", map[string]any{
-		"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"profile": "wide", "count": 9}),
-	})
-	if resp.Error == nil || !strings.Contains(resp.Error.Message, "never clamped") {
-		t.Errorf("the out-of-range error should say the count is not clamped: %v", resp.Error)
-	}
-}
-
-// TestServer_RawRoster_HasNoNamedProfiles: with an explicit --roster the agent binds to a single ANONYMOUS
-// roster — naming ANY profile is invalid-params, a prompt naming neither runs the configured Plan unchanged
-// (echoing an empty profile name), and `count` still subsets that one roster.
-func TestServer_RawRoster_HasNoNamedProfiles(t *testing.T) {
-	exp := &fakeExplorer{}
-	client, stop := serve(t, exp) // no Profiles wired → the --roster posture
-	defer stop()
-	sid := newSession(t, client)
-
-	resp, err := client.Call("session/prompt", map[string]any{
-		"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"profile": "wide"}),
-	})
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	if resp.Error == nil || resp.Error.Code != -32602 {
-		t.Fatalf("naming a profile against a raw roster must be invalid-params (-32602), got %v", resp.Error)
-	}
-	if !strings.Contains(resp.Error.Message, "no named profiles") {
-		t.Errorf("the error should explain the raw-roster posture: %q", resp.Error.Message)
-	}
-
-	resp2, _ := client.Call("session/prompt", map[string]any{"sessionId": sid, "prompt": "explore", "_meta": promptMeta(nil)})
-	if resp2.Error != nil {
-		t.Fatalf("plain prompt rejected: %v", resp2.Error)
-	}
-	em := echoed(t, resp2)
-	if em["profile"] != "" || em["explorersSelected"] != float64(2) || em["explorersConfigured"] != float64(2) {
-		t.Errorf("raw-roster echo = %v (%v of %v), want an empty profile + 2 of 2", em["profile"], em["explorersSelected"], em["explorersConfigured"])
-	}
-	if exp.gotPlan == nil || len(exp.gotPlan.Explorers) != 2 {
-		t.Errorf("server ran the wrong panel: %+v", exp.gotPlan)
-	}
-
-	// `count` still applies (a raw roster IS the single anonymous profile) and still fails out-of-range.
-	resp3, _ := client.Call("session/prompt", map[string]any{
-		"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"count": 3}),
-	})
-	if resp3.Error == nil || resp3.Error.Code != -32602 {
-		t.Errorf("an out-of-range count against a raw roster must be invalid-params, got %v", resp3.Error)
-	}
-	resp4, _ := client.Call("session/prompt", map[string]any{
-		"sessionId": sid, "prompt": "explore", "_meta": promptMeta(map[string]any{"count": 2}),
-	})
-	if resp4.Error != nil {
-		t.Fatalf("an in-range count against a raw roster was rejected: %v", resp4.Error)
-	}
-	if len(exp.gotPlan.Explorers) != 2 {
-		t.Errorf("count 2 ran %d explorers, want 2", len(exp.gotPlan.Explorers))
+	if exp.gotPlan == nil || len(exp.gotPlan.Explorers) != 2 || exp.gotPlan.Collator.Model != "mc" {
+		t.Errorf("the pipeline ran %+v, want the composed panel", exp.gotPlan)
 	}
 }

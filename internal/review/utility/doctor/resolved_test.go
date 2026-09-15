@@ -25,11 +25,10 @@ func readinessOf(t *testing.T, in Input, profile string) (ok bool, detail string
 
 // TestReadiness_JudgesTheCALLERSPlanWhenGivenOne.
 //
-// The static preflight used to re-resolve from config, which meant it could not see a `--set` role
-// override or a composed `--reviewer` panel. A run whose plan had ALREADY resolved was then halted
-// Class A — "no adapter resolvable for role X" — with that exact role overridden on the command
-// line. It was answering "is the PROFILE ready" while the run needed "is what I am about to run
-// ready", and those diverge the moment an invocation overrides anything.
+// The static preflight judges the plan the run resolved, not the profile re-resolved from config, so
+// it sees a `--set` role override or a composed `--reviewer` panel. "Is the PROFILE ready" and "is
+// what I am about to run ready" diverge the moment an invocation overrides anything, and only the
+// second may halt a run.
 func TestReadiness_JudgesTheCallersPlanWhenGivenOne(t *testing.T) {
 	c := config.Default()
 	c.Adapters["fake"] = config.Adapter{ModelIdentity: "self_report"}

@@ -42,19 +42,15 @@ func readReceiptAt(t *testing.T, runDir, rel string) Receipt {
 	return r
 }
 
-// TestCLIApply_ConcurrentInPlaceEditIsRefused is the data-loss defect itself, on the surface a
-// human actually uses.
+// TestCLIApply_ConcurrentInPlaceEditIsRefused pins the data-loss case on the surface a human actually
+// uses.
 //
 // The file is edited IN PLACE after the remediation copy was taken and before the commit — same
 // inode, same length, only the bytes differ, which is exactly what an editor's save does. The
 // staged bytes derive from the pre-edit content, so committing them silently discards the human's
-// work.
-//
-// AGAINST THE OLD CODE THIS TEST FAILS: `handleMode` committed with `ws.Commit(rcopy)` — i.e.
-// `CommitExpecting(h, nil)`, no pins — so the destination's identity still matched (an in-place
-// save keeps the inode) and the concurrent edit was overwritten by the marker. The run reported
-// success. Reverting `PinsFromCopy`/`CommitExpecting` alone reproduces it: the assertions on the
-// error, on the receipt and on the file contents all fail together.
+// work. An in-place save keeps the inode, so only the content pins (`PinsFromCopy`/`CommitExpecting`)
+// catch it: without them the assertions on the error, on the receipt and on the file contents all fail
+// together.
 func TestCLIApply_ConcurrentInPlaceEditIsRefused(t *testing.T) {
 	m := newManager(t, fake.Valid)
 	ws, file := makeWorkspace(t)
@@ -98,10 +94,6 @@ func TestCLIApply_ConcurrentInPlaceEditIsRefused(t *testing.T) {
 
 // TestCLIApply_JournalIsDurableBeforeTheFirstEdit checks the ORDER, not just the existence: at the
 // moment the journal event fires, the journal is on disk and the live workspace is still untouched.
-//
-// AGAINST THE OLD CODE THIS TEST FAILS: the full-cycle path emitted no `remediation_journaled`
-// event and wrote no journal at all, so the hook never fires and the final journal assertion finds
-// no file.
 func TestCLIApply_JournalIsDurableBeforeTheFirstEdit(t *testing.T) {
 	m := newManager(t, fake.Valid)
 	ws, file := makeWorkspace(t)
@@ -144,9 +136,6 @@ func TestCLIApply_JournalIsDurableBeforeTheFirstEdit(t *testing.T) {
 // TestCLIApply_UnwritableJournalHaltsWithNothingWritten makes the journal impossible to write (its
 // path is occupied by a DIRECTORY — what a full or read-only disk amounts to for this purpose) and
 // requires the write window to stay shut.
-//
-// AGAINST THE OLD CODE THIS TEST FAILS: there was no journal, so the obstruction was irrelevant and
-// the run happily wrote the marker and returned success.
 func TestCLIApply_UnwritableJournalHaltsWithNothingWritten(t *testing.T) {
 	m := newManager(t, fake.Valid)
 	ws, file := makeWorkspace(t)
@@ -178,9 +167,6 @@ func TestCLIApply_UnwritableJournalHaltsWithNothingWritten(t *testing.T) {
 // TestCLIApply_ReceiptRecordsTheCommittedReality is the positive half: an ordinary apply leaves a
 // receipt whose applied set, file list and `committed` flag describe what actually reached the
 // tree.
-//
-// AGAINST THE OLD CODE THIS TEST FAILS: the full-cycle path wrote no receipt, so
-// remediation/receipt.json does not exist.
 func TestCLIApply_ReceiptRecordsTheCommittedReality(t *testing.T) {
 	m := newManager(t, fake.Valid)
 	ws, file := makeWorkspace(t)
@@ -238,9 +224,6 @@ func TestCLIApply_UnshownAndSkippedFindingsKeepTheirStates(t *testing.T) {
 // TestFullCycleApply_WorkspaceIdentityIsVerifiedBeforeTheWrite proves the reviewed root is bound by
 // IDENTITY and not by pathname on the full-cycle path too: the directory the review ran against is
 // swapped for a different one whose file happens to carry the same bytes.
-//
-// AGAINST THE OLD CODE THIS TEST FAILS: `handleMode` never captured or checked an identity, so the
-// substitute tree was copied, edited and committed without complaint.
 func TestFullCycleApply_WorkspaceIdentityIsVerifiedBeforeTheWrite(t *testing.T) {
 	m := newManager(t, fake.Valid)
 	ws, file := makeWorkspace(t)
@@ -296,11 +279,8 @@ func TestFullCycleApply_WorkspaceIdentityIsVerifiedBeforeTheWrite(t *testing.T) 
 // The defect this whole change exists to fix was not a wrong line of code; it was a SECOND write
 // path that drifted from the first. So the invariant is asserted structurally, over the package's
 // own source: exactly one function commits to a live workspace, and every caller that writes goes
-// through it. A future edit that reintroduces a `ws.Commit` beside a surface — the exact shape of
-// the original defect — fails here, in this package, rather than silently on one surface.
-//
-// AGAINST THE OLD CODE THIS TEST FAILS on its first assertion: review.go's handleMode contained
-// `ws.Commit(rcopy)`, a second commit call site outside the governed path.
+// through it. A future edit that adds a `ws.Commit` beside a surface — a second commit call site outside
+// the governed path — fails here, in this package, rather than silently on one surface.
 func TestOneGovernedWritePath(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {

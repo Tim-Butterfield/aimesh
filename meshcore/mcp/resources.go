@@ -374,7 +374,7 @@ func (s *Server) listResources(ctx context.Context, env *RequestEnv, id json.Raw
 // ADVERTISING it under modern — so no client is stranded by the change, and the legacy golden is
 // untouched because legacy emits no caching hints at all and nothing is invited to cache.
 //
-// SUNSET-PATH (MCP26-SUNSET; migration design §16.2): the dual-URI handling collapses to the
+// SUNSET-PATH (MCP26-SUNSET): the dual-URI handling collapses to the
 // digest form and this function becomes unconditional.
 func advertisedResources(env *RequestEnv, list []Resource) []Resource {
 	if env == nil || env.Era != EraModern {

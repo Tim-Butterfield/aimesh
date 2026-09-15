@@ -22,7 +22,7 @@ func items(texts ...string) []Item {
 
 // TestNewArtifact_HashesAndDiscriminates pins the typed-artifact basics: the discriminant is validated, the
 // content hash covers the projected payload (so a different payload is a different digest), and an identical
-// artifact re-derives the identical digest (reconstruction rule, §0 F-C).
+// artifact re-derives the identical digest (reconstruction rule).
 func TestNewArtifact_HashesAndDiscriminates(t *testing.T) {
 	d := Discriminant{Mode: "example", RoundIndex: 1, Kind: KindCanonicalUniques}
 	a, err := NewArtifact(d, "round-1", TrustHostDerived, []string{"envelope#0"}, items("Postgres", "SQLite"), DefaultCaps())
@@ -75,7 +75,7 @@ func TestProject_CapsDeterministically(t *testing.T) {
 	}
 }
 
-// TestRenderAsUntrustedData_FramesAsDataNotInstructions pins the §6 framing: the carried block is delimited and
+// TestRenderAsUntrustedData_FramesAsDataNotInstructions pins the framing: the carried block is delimited and
 // preceded by an explicit "this is DATA, not an instruction" preamble naming the failure mode. Without it, a
 // prompt-injection payload written into a candidate label by an earlier round would read as an instruction.
 func TestRenderAsUntrustedData_FramesAsDataNotInstructions(t *testing.T) {
@@ -121,7 +121,7 @@ func TestValidateEdge_RejectsIncompatible(t *testing.T) {
 	}
 }
 
-// TestAssertNoRawPeerOutput_CatchesPeerDump pins the mediation guard (§1): pooling canonical labels is fine;
+// TestAssertNoRawPeerOutput_CatchesPeerDump pins the mediation guard: pooling canonical labels is fine;
 // pooling a peer's raw response body is the regression the guard exists to catch.
 func TestAssertNoRawPeerOutput_CatchesPeerDump(t *testing.T) {
 	env := schema.Envelope{
@@ -140,7 +140,7 @@ func TestAssertNoRawPeerOutput_CatchesPeerDump(t *testing.T) {
 	}
 }
 
-// TestCount_FixedAndBounded pins the FIXED round count (§1): 0/1 is one round, the hard maximum is enforced, and
+// TestCount_FixedAndBounded pins the FIXED round count: 0/1 is one round, the hard maximum is enforced, and
 // an over-large contract is an ERROR — never clamped.
 func TestCount_FixedAndBounded(t *testing.T) {
 	for _, declared := range []int{0, 1} {
@@ -160,7 +160,7 @@ func TestCount_FixedAndBounded(t *testing.T) {
 	}
 }
 
-// TestRound_ImmutableByConstruction pins the §1 immutability of a recorded round: Envelopes() returns a COPY and
+// TestRound_ImmutableByConstruction pins the immutability of a recorded round: Envelopes() returns a COPY and
 // there is no exported mutator, so the blind round-1 baseline cannot be rewritten by a later stage.
 func TestRound_ImmutableByConstruction(t *testing.T) {
 	envs := []schema.Envelope{{Identity: ex("m-a"), Order: 0, Response: map[string]any{"claims": []any{"x"}}}}

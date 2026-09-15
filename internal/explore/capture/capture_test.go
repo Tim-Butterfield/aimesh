@@ -198,7 +198,7 @@ func TestDump_CatalogLedger(t *testing.T) {
 	}
 }
 
-// TestDump_GovernedRun_PersistsGovernanceArtifacts pins the governance capture surface (design §4/§9): a run under the
+// TestDump_GovernedRun_PersistsGovernanceArtifacts pins the governance capture surface: a run under the
 // ranking-grade policy persists the CONFIRMED merge-ledger AND the superseded provisional one (a revision is a
 // new entry — the prior revision must stay readable), the confirmation record (presentation order + typed
 // challenges + versioned resolutions), the pre-flight verdicts, the recorded rounds, and every emitted
@@ -248,7 +248,7 @@ func TestDump_GovernedRun_PersistsGovernanceArtifacts(t *testing.T) {
 	if m.CountingPolicyHash == "" || m.GovernanceClaimsHash == "" || m.GovernanceClaims == 0 {
 		t.Errorf("the manifest must record the frozen policy hash + the emitted claims: %+v", m)
 	}
-	// Every persisted claim carries its inputs (§9).
+	// Every persisted claim carries its inputs.
 	b, rerr := os.ReadFile(filepath.Join(rn.Dir, "governance-claims.json"))
 	if rerr != nil {
 		t.Fatalf("read governance claims: %v", rerr)

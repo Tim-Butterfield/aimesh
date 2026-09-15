@@ -10,13 +10,10 @@ import (
 	"testing"
 )
 
-// AGAINST THE OLD CODE EVERY TEST IN THIS FILE FAILS.
-//
-// A `$ref: "https://…"` compiled fine and failed later, if it was ever reached, with a file-not-found
-// — the protocol's "MUST NOT automatically dereference a network URI" held by accident rather than by
-// refusal. A `$ref` naming `../../etc/x.json` was joined onto the schema's directory and opened. A
-// self-referential `$defs` chain recursed until the stack ran out. And nothing anywhere reported which
-// keywords this validator does and does not implement, so a published schema could adopt one it
+// These tests pin the compile-time bounds: a `$ref: "https://…"` is refused rather than failing later
+// with a file-not-found; a `$ref` naming `../../etc/x.json` is never joined onto a directory and
+// opened; a self-referential `$defs` chain is bounded rather than recursing until the stack runs out;
+// and the validator reports which keywords it implements, so a published schema cannot adopt one it
 // silently ignores.
 
 // --- (a) the non-local $ref refusal ---

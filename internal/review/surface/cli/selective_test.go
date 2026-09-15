@@ -11,12 +11,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// SELECTIVE APPLY on the CLI (D8-A, design §13.3).
-//
-// AGAINST A TREE WITHOUT SELECTIVE APPLY every test here fails: `--select` was not a flag, so `flag.Parse`
-// refused it and the command exited 3 with "flag provided but not defined". That is a behavioral
-// failure rather than a compile one — `parseSelection` and `printSelection` are new symbols, but the
-// tests reach them through `run(...)`, which existed.
+// SELECTIVE APPLY on the CLI. The tests reach `parseSelection` and `printSelection` through `run(...)`,
+// so they assert the flag's behavior as a user meets it.
 
 // TestSelect_CLI_FingerprintIsDisclosedByTheProjection is the DISCLOSURE CHANNEL on this surface: a
 // human runs `--report --json`, reads a fingerprint, and passes it back as `--select`. Without it

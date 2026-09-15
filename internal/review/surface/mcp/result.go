@@ -41,20 +41,15 @@ func seatSpecMap(s review.SeatSpec) map[string]any {
 // panelPick is what a call ASKED for. It is kept beside the executed roster because the echo is
 // only meaningful as a pair.
 type panelPick struct {
-	source    string // "default" | "profile" | "adhoc"
-	profile   string
+	source    string // "adhoc": every panel is composed by the call
 	reviewers []review.SeatSpec
 	roles     map[review.Role]review.SeatSpec // cross_check / verifier / author_remediator
 }
 
-// echo renders the requested-vs-executed roster. It is REQUIRED in the output schema: a profile
-// that resolved somewhere unexpected, or a seat that halted, is visible only by comparing the two
-// halves.
+// echo renders the requested-vs-executed roster. It is REQUIRED in the output schema: a seat that
+// halted is visible only by comparing the two halves.
 func (p panelPick) echo(executed []runview.PanelSeat) map[string]any {
 	req := map[string]any{"source": p.source}
-	if p.profile != "" {
-		req["profile"] = p.profile
-	}
 	if len(p.reviewers) > 0 {
 		seats := make([]map[string]any, 0, len(p.reviewers))
 		for _, s := range p.reviewers {
@@ -431,7 +426,7 @@ func remediateResult(rec *record, out run.RemediateOutcome, err error, patch *pr
 		// The write-outcome discriminator and its counts ride EVERY remediation result, halted
 		// ones included. A consumer that ignores `outcome` is less informed but never wrong,
 		// because the coarse signal it would need in order to be wrong — `isError` — is set
-		// independently, below, from `refused` (design §13.4.0/§13.4.2).
+		// independently, below, from `refused`.
 		"outcome": out.Outcome(),
 		"counts":  map[string]any{"applied": out.Applied(), "refused": out.Refused()},
 	}
@@ -474,7 +469,7 @@ func remediateResult(rec *record, out run.RemediateOutcome, err error, patch *pr
 	// "halted" would be a lie (the commit succeeded). The not-clean signal goes where a consumer
 	// reads it without parsing anything: `isError`. It is over-signalling by design — a caller
 	// that looks and finds `applied: 7` has lost nothing, whereas a caller that believes eight
-	// findings were written when seven were has lost the thing D8-C exists to protect.
+	// findings were written when seven were has lost the thing the partial-refusal contract exists to protect.
 	if out.Refused() > 0 {
 		structured["reasonCode"] = run.ReasonApplyRefusedProtectedPath
 		return structured, renderReceipt(out, nil, patch), true

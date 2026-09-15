@@ -1,12 +1,12 @@
 package evidence
 
-// Tests for the export DESTINATION GUARD (dest.go). Every one of them describes a way the previous,
-// unguarded `os.Remove(dbPath) + rewrite` destroyed a file it was never asked to touch:
+// Tests for the export DESTINATION GUARD (dest.go). Each one pins a way an unguarded
+// `os.Remove(dbPath) + rewrite` would destroy a file it was never asked to touch:
 //
-//	a protected path (~/.aimesh/**, .git/**, .env*, key material) was deleted and replaced
-//	an existing, unrelated file was replaced with no confirmation at all
-//	a FAILED export had already removed the previous database before it failed
-//	a symlink was followed, and an empty directory was simply removed
+//	a protected path (~/.aimesh/**, .git/**, .env*, key material) deleted and replaced
+//	an existing, unrelated file replaced with no confirmation at all
+//	a FAILED export that removed the previous database before it failed
+//	a symlink followed, or an empty directory simply removed
 //
 // They run on deterministic in-process fakes, and every path is under t.TempDir(): the denylist matches
 // on path COMPONENTS, so a `.aimesh` inside a temp directory is refused exactly as the real one is, and
@@ -136,8 +136,8 @@ func TestExport_ExistingDestinationNeedsForce(t *testing.T) {
 }
 
 // TestExport_SidecarCollisionAlsoNeedsForce covers the half of the destination a user never thinks about:
-// SQLite's `-journal`/`-wal`/`-shm` files. The old code removed the whole set unconditionally, so a stale
-// journal from an unrelated database vanished silently; they are now part of the destination for the
+// SQLite's `-journal`/`-wal`/`-shm` files. Removing the whole set unconditionally would make a stale
+// journal from an unrelated database vanish silently, so they are part of the destination for the
 // no-clobber check too, and the refusal names the file actually in the way.
 func TestExport_SidecarCollisionAlsoNeedsForce(t *testing.T) {
 	dir := capturedRun(t, shortlistTask())
@@ -174,7 +174,7 @@ func TestExport_FailedExportLeavesThePreviousDatabaseIntact(t *testing.T) {
 	// The injected failure is a REAL one, not a hook: a run directory whose ballot names a canonical ID
 	// absent from the confirmed revision is refused by the foreign keys — which happens after the run has
 	// been read and after the temporary database has been created and partly written. That is precisely
-	// the window the old code left the destination deleted in.
+	// the window in which an unguarded export would leave the destination deleted.
 	broken := doctoredRun(t)
 	if _, eerr := Export(broken, dest, Options{Force: true}); eerr == nil {
 		t.Fatal("the doctored run must fail the export")
@@ -209,7 +209,7 @@ func TestExport_FailedExportLeavesThePreviousDatabaseIntact(t *testing.T) {
 // TestExport_NonRegularDestinationIsRefused: a directory, a symlink or any other non-plain-file
 // destination is refused rather than followed. The symlink case is the one the scope check alone cannot
 // catch — canonicalization RESOLVES a final symlink, so the resolver would happily approve a link pointing
-// at a file the user never named — and the directory case is the one the old code silently DELETED, since
+// at a file the user never named — and the directory case is the one an unguarded export would silently DELETE, since
 // `os.Remove` succeeds on an empty directory.
 func TestExport_NonRegularDestinationIsRefused(t *testing.T) {
 	dir := capturedRun(t, shortlistTask())
@@ -272,7 +272,7 @@ func TestExport_FreshDestinationStillJustWorks(t *testing.T) {
 }
 
 // doctoredRun captures a shortlist run and then tampers with its decision record so a ballot names a
-// canonical ID that is absent from the confirmed revision — the §9 invariant, and a failure that lands
+// canonical ID that is absent from the confirmed revision — the ballot foreign-key invariant, and a failure that lands
 // AFTER the export has started writing.
 func doctoredRun(t *testing.T) string {
 	t.Helper()

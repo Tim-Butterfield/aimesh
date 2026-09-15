@@ -460,7 +460,7 @@ func TestParseSlot_ColonInValue(t *testing.T) {
 	}
 }
 
-// --- profiles + --count (design §7) ---
+// --- profiles + --count ---
 
 // profileEnv isolates a profile-aware test from BOTH the developer's real config and this repo:
 // AIMESH_HOME + AIMESH_HOME point at a temp home and the cwd moves to a NON-repo temp dir, so
@@ -518,7 +518,7 @@ func writeProfiles(t *testing.T, path string) {
 }
 
 // TestExplore_ProfileAndCount runs a named profile with a --count subset end-to-end on fakes and asserts
-// printSelected names the source + the selected/full counts + the "not run" subset note (design §7: a
+// printSelected names the source + the selected/full counts + the "not run" subset note (a
 // count subset must never be implicit, because a reorder changes WHICH explorers it selects).
 func TestExplore_ProfileAndCount(t *testing.T) {
 	writeProfiles(t, profileEnv(t))
@@ -568,7 +568,7 @@ func TestExplore_NoFlags_UsesDefaultProfile(t *testing.T) {
 }
 
 // TestExplore_ProfileDefaultMode: a profile's defaultMode supplies the mode when --mode is omitted, and
-// an explicit --mode overrides it (precedence explicit > profile default > the app default map, §7).
+// an explicit --mode overrides it (precedence explicit > profile default > the app default map).
 func TestExplore_ProfileDefaultMode(t *testing.T) {
 	writeProfiles(t, profileEnv(t))
 
@@ -636,7 +636,7 @@ func TestExplore_UnknownProfile(t *testing.T) {
 }
 
 // TestExplore_CountOutOfRange: a --count above the profile size and a --count below 2 both fail clearly
-// BEFORE any spend — the count is never clamped (requested = executed, §7). A non-numeric value is a
+// BEFORE any spend — the count is never clamped (requested = executed). A non-numeric value is a
 // usage error too.
 func TestExplore_CountOutOfRange(t *testing.T) {
 	writeProfiles(t, profileEnv(t))
@@ -701,7 +701,7 @@ func TestDoctor_Profile(t *testing.T) {
 	}
 }
 
-// TestList_Profiles proves `list` surfaces the configured profile set (design §8) in BOTH projections:
+// TestList_Profiles proves `list` surfaces the configured profile set in BOTH projections:
 // the default profile's name and, per profile, its name/isDefault/defaultMode/ordered explorers +
 // collator. The legacy top-level `roster` field keeps reporting the DEFAULT profile's roster.
 func TestList_Profiles(t *testing.T) {

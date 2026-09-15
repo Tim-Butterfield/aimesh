@@ -13,9 +13,9 @@ A map of the docs for the [`aimesh`](../README.md) monorepo: the **meshcore** su
 | Doc | Covers |
 |---|---|
 | [`architecture.md`](architecture.md) | How meshcore, reviewmesh, and exploremesh fit together; the one-way import boundary; halt classes and exit codes. |
-| [`configuration.md`](configuration.md) | Config file locations, resolution precedence, adapters/models, per-app **profiles** (reviewmesh's reviewer panel + lanes; exploremesh's explorers + collator), surface ceilings and capabilities, environment variables. |
-| [`security.md`](security.md) | What leaves the machine, containment guarantees, the remediation double opt-in. |
-| [`acp.md`](acp.md) | The ACP surface in **both** apps (`aimesh review acp` / `aimesh explore acp`): method mapping, trusted roots, `_meta` contracts, host-verification procedure. |
+| [`configuration.md`](configuration.md) | Saved (CLI-only) configuration vs MCP/ACP launch configuration, config file locations, resolution precedence, adapters/models, per-app **profiles** (reviewmesh's reviewer panel + lanes; exploremesh's explorers + collator), CLI surface ceilings and capabilities, environment variables. |
+| [`security.md`](security.md) | What leaves the machine, containment guarantees, per-call scope, the write grant and supplied diff. |
+| [`acp.md`](acp.md) | The ACP surface in **both** apps (`aimesh review acp` / `aimesh explore acp`): launch flags, method mapping, per-turn scope, `_meta` contracts, host-verification procedure. |
 | [`mcp.md`](mcp.md) | The MCP surface in **both** apps (`aimesh review mcp` / `aimesh explore mcp`): tools and schemas, the job shape, the error model, admission limits, the remediation write window, and the CLI/ACP/MCP surface-parity tables. |
 | [`glossary.md`](glossary.md) | Terminology across all three components, labeled by owner. |
 
@@ -26,7 +26,7 @@ meshcore has no UI and no product domain; it is consumed by both apps via `go.wo
 | Doc | Covers |
 |---|---|
 | [`../meshcore/README.md`](../meshcore/README.md) | Package map (`core`, `model`, `verify`, `workspace`, `scope`, `config`, `config/adapterlocations`, `localstate`, `doctor`, `clihint`, `acp`, `mcp`, `audit`, `fault`, `jsonschema`) and governance guarantees. |
-| [`adapters.md`](adapters.md) | The adapter contract, per-provider recipes, and how to add a new adapter. |
+| [`adapters.md`](adapters.md) | Which adapters are available on each surface, naming adapters at launch and path expansion, the adapter contract, per-provider recipes, and how to add a new adapter. |
 | [`model-identity.md`](model-identity.md) | Evidence tiers and how model identity is captured and classified. |
 
 **Substrate schemas** (see [`schema/README.md`](schema/README.md) for the full index): `call-status`, `model-verification`, `halt-record`, `config`, `effective-config`, `event-log-line`, `edit`, `doctor-issue`.
@@ -39,8 +39,8 @@ Package path: `github.com/Tim-Butterfield/aimesh/internal/review` (part of the r
 |---|---|
 | [`review.md`](review.md) | Commands, quick start, configuration, diagnostic codes, surfaces (CLI, ACP, MCP). |
 | [`prompts.md`](prompts.md) | Reviewer/adjudication prompt templates and their JSON result contracts. |
-| [`acp.md`](acp.md) | `aimesh review acp` — trusted roots, mode gating, `_meta.reviewmesh` (authority, profile/panel), withheld files. |
-| [`mcp.md`](mcp.md) | `aimesh review mcp` — `review_report`, the `review_remediate` double opt-in, staleness, the journal → apply → receipt write window. |
+| [`acp.md`](acp.md) | `aimesh review acp` — per-turn scope, mode gating and the write grant, `_meta.reviewmesh` (authority, panel), withheld files. |
+| [`mcp.md`](mcp.md) | `aimesh review mcp` — `review_report`, `review_remediate` (supplied diff, `--allow-writes`), staleness, the journal → apply → receipt write window. |
 
 **Review schemas** (see [`schema/README.md`](schema/README.md)): `reviewer-result`, `host-adjudication`, `patch-summary`, `run-state`, `session-update`.
 

@@ -6,7 +6,7 @@ package pipeline
 // WHERE THE STOP GOES, AND WHY IT IS NOT WHERE REVIEW'S IS. reviewmesh stops after its static preflight,
 // because that preflight is free: it reads config and asks each adapter whether it is Available, so a
 // review's shape can promise that every adapter answered. exploremesh's first stage is the identity
-// PRE-FLIGHT (design §1), and that stage INVOKES — one real call per governed role. So the honest stop is
+// PRE-FLIGHT, and that stage INVOKES — one real call per governed role. So the honest stop is
 // BEFORE it, and the guarantee is correspondingly weaker: a shape says nothing left between here and the
 // first call is a CONFIGURATION question, and it does NOT say the collator answered. Moving the stop after
 // the pre-flight to strengthen the claim would mean a "dry" run that spent, which is the one thing the flag
@@ -34,7 +34,7 @@ import (
 // SIMPLIFICATION. A review's shape reports a min and a max because a review ITERATES: its outer cycles
 // stop when adjudication converges, so the figure depends on model behaviour aimesh cannot predict. An
 // exploration has no such rule — the round count is FIXED by the mode contract (round.Count refuses an
-// over-large one rather than clamping it, and design §1 rules out a data-dependent termination rule
+// over-large one rather than clamping it, and the mode contract rules out a data-dependent termination rule
 // precisely because an aggressively-merging canonicalizer could steer it). Every remaining multiplier —
 // panel size, dual canonicalization, the confirmation round — is settled before the run starts. So the
 // count here is exact for a run that completes, and a range would be false precision in the other
@@ -44,7 +44,7 @@ import (
 // spend less), and a dropped explorer that never reached its adapter — an unregistered adapter, a scratch
 // directory that could not be created — costs nothing. Neither is a discount anyone should plan around.
 type Shape struct {
-	// Mode is the app-owned mode contract this run would execute (design §3).
+	// Mode is the app-owned mode contract this run would execute.
 	Mode string `json:"mode"`
 	// Explorers is the panel in ATTRIBUTION order — the order everything recorded about the run is built
 	// from. Every one of them is called in every round; MaxParallel bounds only how many at once, so
@@ -83,7 +83,7 @@ type Shape struct {
 	Payload ShapePayload `json:"payload"`
 }
 
-// ShapePolicy is the mode contract's declared governance grade (design §4). Every field is fixed by the
+// ShapePolicy is the mode contract's declared governance grade. Every field is fixed by the
 // mode, never by the run, which is why the whole cost is knowable in advance.
 type ShapePolicy struct {
 	// Dual runs TWO independent canonicalizer proposals instead of one.
@@ -142,7 +142,7 @@ type ShapeCall struct {
 // pooled confirmed-canonical uniques, which are derived from what the panel says in round 1 — they do not
 // exist yet, and any figure for them here would be invented.
 type ShapePayload struct {
-	// Prompt is the full round-1 explorer prompt, byte-identical for every explorer (§6.2). It is included
+	// Prompt is the full round-1 explorer prompt, byte-identical for every explorer. It is included
 	// whole rather than summarized because the question it answers — "is this actually the exploration I
 	// meant?" — cannot be answered from a byte count.
 	Prompt string `json:"prompt"`
@@ -152,7 +152,7 @@ type ShapePayload struct {
 	// hash the run records as proof every explorer received identical bytes.
 	PayloadHash string `json:"payloadHash"`
 	// SchemaFields are the response fields the app-owned explorer schema requires, in schema order. The
-	// collator never authors this schema (§5), which is why it can be shown before the run.
+	// collator never authors this schema, which is why it can be shown before the run.
 	SchemaFields []string `json:"schemaFields"`
 }
 
@@ -161,8 +161,9 @@ type ShapePayload struct {
 // would have hit later at the same point, for money.
 //
 // rounds is the already-validated round count (RunSpec resolves it before the stop, so a bad round contract
-// is reported as itself rather than as a strange call total).
-func shapeOf(plan roster.Plan, raw schema.RawTask, spec mode.ModeSpec, opts Options, rounds int) (Shape, error) {
+// is reported as itself rather than as a strange call total). probes is the number of readiness calls
+// Options.VerifyReadiness would make (0 when it is off).
+func shapeOf(plan roster.Plan, raw schema.RawTask, spec mode.ModeSpec, opts Options, rounds, probes int) (Shape, error) {
 	sh := Shape{
 		Mode:        spec.Name,
 		Collator:    plan.Collator.Identity(),
@@ -209,6 +210,11 @@ func shapeOf(plan roster.Plan, raw schema.RawTask, spec mode.ModeSpec, opts Opti
 	}
 
 	sh.Calls = shapeCalls(spec, len(plan.Explorers), len(sh.Canonicalizers), rounds)
+	if probes > 0 {
+		readiness := ShapeCall{Phase: "readiness", Role: "adapters", Calls: probes,
+			Detail: "one bounded deep-probe call per distinct agent the panel names, before anything else is invoked (verifyReadiness)"}
+		sh.Calls = append([]ShapeCall{readiness}, sh.Calls...)
+	}
 	for _, c := range sh.Calls {
 		sh.ModelCalls += c.Calls
 	}

@@ -1,6 +1,6 @@
 package schema
 
-// This file holds the C1 CITATION contract: the frozen
+// This file holds the CITATION contract: the frozen
 // prompt-facing citation grammar, the HOST's authoritative alias vocabulary for one collation, and
 // the single validation pass that rewrites a collator's `Finding.Sources` into refs that actually
 // resolve.
@@ -163,7 +163,7 @@ func clipRef(ref string) string {
 	return s
 }
 
-// ApplyCitations is the SINGLE, HOST-AUTHORITATIVE citation pass over a Map collation (design §3 C1).
+// ApplyCitations is the SINGLE, HOST-AUTHORITATIVE citation pass over a Map collation.
 // For every finding it:
 //
 //   - keeps each source that resolves to a primary `envelope#k` alias of this run;

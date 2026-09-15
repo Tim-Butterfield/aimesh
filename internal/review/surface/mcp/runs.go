@@ -25,8 +25,8 @@ import (
 // the source-run guard below, which returns the ORIGINAL receipt to a retry. After a restart the
 // durable base-hash pins refuse the second write instead, as a halt.
 //
-// It is no longer a spend governor — see the note on the retention constants for why the admission
-// bounds were removed and where the concurrency decision moved to. For the write primitive, the
+// It is not a spend governor — see the note on the retention constants for why there are no admission
+// bounds and where the concurrency decision lives. For the write primitive, the
 // idempotency guard is not a convenience. A retried remediation that applied a second time would be
 // an unrequested write.
 
@@ -270,7 +270,7 @@ func (rg *registry) reserve(id, tool, mode, key, sourceRunID string, cancel func
 	return r, nil, nil
 }
 
-// admit registers a new run. It no longer refuses: there is no admission governor (see the note on
+// admit registers a new run. It does not refuse: there is no admission governor (see the note on
 // retention above), so the error return is kept only because callers treat admission as fallible and
 // a future bound would land here.
 func (rg *registry) admit(id, tool, mode, key, sourceRunID string, cancel func()) (*record, error) {

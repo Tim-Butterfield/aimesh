@@ -160,24 +160,22 @@ func (d WorkspaceDirtiness) Summary() string {
 // declining to also write the means of undoing that would be restraint aimed at the wrong thing.
 //
 // It is a no-op for every other tree: a repository has a VCS, and an initialized folder already has
-// the directory. A failure is not fatal — the run proceeds and keeps its temp-directory artifacts,
-// which is what it did before this existed.
+// the directory. A failure is not fatal — the run proceeds and keeps its temp-directory artifacts.
 func EnsureDurableRunDir(ctx context.Context, workspace, mode, artifactDir string) (string, bool) {
 	if mode != "apply" || strings.TrimSpace(workspace) == "" {
 		return "", false
 	}
-	// ONLY the fallback location is claimed, never a configured one. `localstate.RunDir` returns this
-	// exact path when nothing else was resolved; anything else is a directory an operator or a surface
-	// chose, and relocating THAT would be this feature overruling a deliberate decision in order to
-	// protect against a hazard the operator may already have handled.
-	if artifactDir != localstate.RunDir(reviewComponent, "") {
+	// ONLY the temp fallback location is claimed, never a configured one: anything else is a directory
+	// an operator or a surface chose, and relocating THAT would be this feature overruling a deliberate
+	// decision in order to protect against a hazard the operator may already have handled.
+	if artifactDir != localstate.TempRunDir(reviewComponent) {
 		return "", false
 	}
 	if d := ProbeWorkspaceDirtiness(ctx, workspace); d.Known {
 		return "", false // a VCS is the way back; nothing to arrange
 	}
-	if _, ok := localstate.ComponentDir(reviewComponent); ok {
-		return "", false // already initialized: the run directory is durable
+	if cdir, ok := localstate.ComponentDirFor(workspace, reviewComponent); ok {
+		return filepath.Join(cdir, localstate.RunsSubdir), true // already initialized: use it
 	}
 	home := filepath.Join(workspace, localstate.HomeDirName, reviewComponent, localstate.RunsSubdir)
 	if err := os.MkdirAll(home, 0o755); err != nil {

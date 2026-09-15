@@ -12,14 +12,13 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
 )
 
-// TestCLIJSON_ARealRunValidatesAgainstItsPublishedSchema closes the hole that let the published
-// projection schema drift out of date without a single test failing.
+// TestCLIJSON_ARealRunValidatesAgainstItsPublishedSchema keeps the published projection schema in step
+// with real output.
 //
-// The only schema check that existed ran over a DRY RUN — a projection with no findings, no panel
-// provenance, and none of the run-level qualifiers, because a dry run stops before its first model
-// call. So `docs/schema/review-projection.schema.json` was being validated against the one shape that
-// exercises almost none of it, while the schema is `additionalProperties: false` and would therefore
-// REJECT every real run that gained a key. It had.
+// A DRY RUN projection has no findings, no panel provenance, and none of the run-level qualifiers,
+// because a dry run stops before its first model call, so validating only that shape exercises almost
+// none of `docs/schema/review-projection.schema.json` — while the schema is
+// `additionalProperties: false` and would REJECT every real run that gained a key.
 //
 // This runs a real review and validates what a consumer actually receives.
 func TestCLIJSON_ARealRunValidatesAgainstItsPublishedSchema(t *testing.T) {

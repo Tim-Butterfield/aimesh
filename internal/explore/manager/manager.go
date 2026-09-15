@@ -34,7 +34,7 @@ import (
 type Manager struct {
 	mu sync.Mutex
 
-	// profiles is the FULL multi-profile set the workbench holds (design §7) and the single thing any
+	// profiles is the FULL multi-profile set the workbench holds and the single thing any
 	// write touches; roster is a DERIVED, read-only cache of the DEFAULT profile's roster that the roster
 	// projections (RosterView / DoctorReport / PrivacyView / RosterPlanView / SnapshotRoster) read. It is
 	// re-derived from the set by persistSetLocked after every accepted write, so it can never drift.

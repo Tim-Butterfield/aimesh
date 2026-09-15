@@ -1,13 +1,13 @@
 package schema
 
 // This file holds the explorer outer envelope + model-identity policy and the fixed, exploremesh-
-// owned collator-output schema (design §6.2–§6.4, §6.7).
+// owned collator-output schema.
 
 import (
 	"fmt"
 )
 
-// ExplorerIdentity is the full attribution key for an explorer (design §6.1): the (adapter, model,
+// ExplorerIdentity is the full attribution key for an explorer: the (adapter, model,
 // effort) triple. Attribution keys on the WHOLE triple, never the model alone — two explorers may
 // share a model (Opus-high vs Opus-low), so a model-only key would collide.
 type ExplorerIdentity struct {
@@ -19,7 +19,7 @@ type ExplorerIdentity struct {
 // IdentityStatus mirrors meshcore's model-identity tiers (verify): a strong-evidence match, a
 // self-reported claim, an unknown (no usable evidence), or a strong-evidence MISMATCH. exploremesh
 // maps meshcore/verify's classification onto these; kept as a local type so the schema package does
-// not depend on the identity engine (the pipeline in P3.4 does the mapping).
+// not depend on the identity engine (the pipeline does the mapping).
 //
 // The status is DESCRIPTIVE ONLY. It is recorded on every envelope and surfaced to the reader, and
 // nothing in the pipeline reads it to decide whether a response is used: a response's content
@@ -44,7 +44,7 @@ func (s IdentityStatus) IsWeak() bool { return s != IdentityVerified }
 // (after verify.CapEvidence) onto it.
 type IdentityEvidence string
 
-// Envelope is the exploremesh-owned outer wrapper around one explorer response (design §6.3): the
+// Envelope is the exploremesh-owned outer wrapper around one explorer response: the
 // verified identity, ordering, an optional identity caveat, and the decoded response object
 // (already validated against the expanded schema). Untrusted response content stays inside Response.
 type Envelope struct {
@@ -68,11 +68,11 @@ type Envelope struct {
 }
 
 // EnvelopeRef renders the prompt-facing / ledger-facing reference for the envelope produced by the
-// explorer at panel position `order` in explorer round `roundIndex` (design §6). Round 1 renders the
+// explorer at panel position `order` in explorer round `roundIndex`. Round 1 renders the
 // unqualified `envelope#k`, so a single-round Map/Synthesize/Catalog artifact carries bare refs; a
 // LATER round is qualified with its round (`r2:envelope#k`)
 // so refs never collide across rounds — which is what lets a count filter itself to the immutable blind
-// round-1 artifacts (§0 F-A, the anti-echo invariant).
+// round-1 artifacts (the anti-echo invariant).
 func EnvelopeRef(roundIndex, order int) string {
 	if roundIndex <= 1 {
 		return fmt.Sprintf("envelope#%d", order)
@@ -80,7 +80,7 @@ func EnvelopeRef(roundIndex, order int) string {
 	return fmt.Sprintf("r%d:envelope#%d", roundIndex, order)
 }
 
-// AbstentionField is the reserved, OPTIONAL response field an explorer sets to decline to answer (design §1's
+// AbstentionField is the reserved, OPTIONAL response field an explorer sets to decline to answer (a
 // DELIBERATE ABSTENTION, as distinct from a technical absence). It is a host-recognized channel rather than a
 // prose convention precisely because the two must be tallied separately: an explorer that could not answer and
 // an explorer that chose not to answer say different things about a count's denominator.
@@ -95,7 +95,7 @@ func IsAbstention(response map[string]any) bool {
 	return ok && v
 }
 
-// CollatorOutput is the FIXED, exploremesh-owned synthesis schema (design §6.4) — not collator-
+// CollatorOutput is the FIXED, exploremesh-owned synthesis schema — not collator-
 // defined. It is the Map mode's terminal collator output; it satisfies the mode-package ModeOutput
 // contract via Summary().
 type CollatorOutput struct {
@@ -115,7 +115,7 @@ type Finding struct {
 	Statement  string  `json:"statement"`
 	Evidence   string  `json:"evidence,omitempty"`
 	Confidence float64 `json:"confidence,omitempty"`
-	// Sources are the `envelope#k` CITATIONS backing this finding (design §3 C1). After the host's
+	// Sources are the `envelope#k` CITATIONS backing this finding. After the host's
 	// citation pass (ApplyCitations) every entry here is a ref that RESOLVES to a primary envelope of
 	// this run: an unknown or malformed ref is dropped, never rewritten and never left in place.
 	Sources []string `json:"sources,omitempty"`
@@ -140,7 +140,7 @@ type Finding struct {
 	UnverifiedReferences []string `json:"unverifiedReferences,omitempty"`
 }
 
-// DisagreementEntry records a substantive disagreement across explorers (design §6.4): the subject,
+// DisagreementEntry records a substantive disagreement across explorers: the subject,
 // each explorer's attributed position, the collator's resolution (or that it is left to the human),
 // and the residual risk if the disagreement is unresolved.
 type DisagreementEntry struct {

@@ -1,4 +1,4 @@
-// Package evidence is exploremesh's OPTIONAL, DETERMINISTIC SQLite export (design §9): it builds a
+// Package evidence is exploremesh's OPTIONAL, DETERMINISTIC SQLite export: it builds a
 // relational evidence database FROM a captured run directory, so auditors can run re-runnable governance SQL
 // over a run.
 //
@@ -18,7 +18,7 @@
 //   - THE EXPORT NEVER REPAIRS ITS INPUT. A malformed artifact is an error, not a skipped file. An export
 //     that quietly dropped what it could not read would produce a database that looks complete and is not.
 //   - INTEGRITY IS ENFORCED, NOT ASSERTED. `PRAGMA foreign_keys=ON`, STRICT tables, and
-//     `foreign_key_check` + `integrity_check` at finalize. §9's load-bearing example — a ballot row naming a
+//     `foreign_key_check` + `integrity_check` at finalize. The load-bearing example — a ballot row naming a
 //     canonical ID absent from the confirmed revision — is therefore a CONSTRAINT VIOLATION that fails the
 //     export, rather than a discrepancy some later reader might notice.
 //
@@ -121,7 +121,7 @@ func build(runDir string, rec *runRecord, dbPath string) (Summary, error) {
 		return Summary{}, w.err
 	}
 	if err := tx.Commit(); err != nil {
-		// A deferred foreign-key violation surfaces here. It is the §9 invariant doing its job, so the error
+		// A deferred foreign-key violation surfaces here. It is the governance invariant doing its job, so the error
 		// says what it means rather than leaving a bare "constraint failed".
 		return Summary{}, fmt.Errorf("commit evidence export (a constraint violation here means the run directory does not satisfy a governance invariant — e.g. a ballot naming a canonical ID absent from the confirmed revision): %w", err)
 	}
@@ -171,7 +171,7 @@ func open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// finalize runs the integrity gates §9 requires. Both are run AFTER the commit, over the finished file, so
+// finalize runs the integrity gates the export requires. Both are run AFTER the commit, over the finished file, so
 // they check what a reader will actually open.
 func finalize(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA foreign_key_check")
@@ -767,7 +767,7 @@ func (w *writer) writeCriteria() {
 		r.direction, r.role, r.weight = string(c.Direction), string(c.EffectiveRole()), c.Weight
 		if r.declaredIn == "" {
 			// A comparison criterion is declared by the USER in the task, and its evidence is synthesized per
-			// cell by the panel — recorded with the same vocabulary §4 uses for every other criterion.
+			// cell by the panel — recorded with the same vocabulary used for every other criterion.
 			r.origin, r.aggregation, r.declaredIn = string(govern.OriginUser), string(govern.AggregationEvidenceSynthesis), "declared_task"
 		}
 	}
@@ -832,7 +832,7 @@ func (w *writer) writeDecision() {
 }
 
 // writeClaims writes every emitted governance claim as TYPED COLUMNS plus its exact contributing source
-// rows (§9). Nothing here is a JSON blob: the whole point of the export is that a governance question is a
+// rows. Nothing here is a JSON blob: the whole point of the export is that a governance question is a
 // SQL query rather than a JSON traversal.
 func (w *writer) writeClaims() {
 	g := w.rec.Governance
@@ -877,7 +877,7 @@ func (w *writer) writeNarrative() {
 	}
 }
 
-// writeLineage builds the artifact elements and the ONE variable-depth structure over them (§9). The edges
+// writeLineage builds the artifact elements and the ONE variable-depth structure over them. The edges
 // run from SOURCE to DERIVED, so a recursive CTE walking children answers "what did this blind response
 // end up contributing to", and the same CTE walking parents answers "what is this result built on".
 func (w *writer) writeLineage() {

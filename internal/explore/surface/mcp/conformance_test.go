@@ -14,7 +14,7 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the CONFORMANCE HARNESS the MCP design review asked for: the whole protocol tail, walked
+// This file is the CONFORMANCE HARNESS: the whole protocol tail, walked
 // end to end by the OFFICIAL MCP Go SDK client rather than by a client written alongside the server.
 //
 // The transcript it walks, in order:
@@ -310,7 +310,7 @@ func TestConformance_StdoutIsPureJSONRPCWhileRunning(t *testing.T) {
 	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + proto.LatestProtocolVersion + `","clientInfo":{"name":"t","version":"1"}}}`)
 	send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	send(`{"jsonrpc":"2.0","id":2,"method":"logging/setLevel","params":{"level":"debug"}}`)
-	send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"explore","_meta":{"progressToken":9},"arguments":{"purpose":"p","criteria":["c"],"mode":"map"}}}`)
+	send(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"explore","_meta":{"progressToken":9},"arguments":{"purpose":"p","criteria":["c"],"mode":"map","panel":{"explorers":[{"adapter":"fake","model":"m1"},{"adapter":"fake","model":"m2"}],"collator":{"adapter":"fake","model":"mc"}}}}}`)
 
 	deadline := time.Now().Add(15 * time.Second)
 	for !strings.Contains(out.String(), `"id":3`) {

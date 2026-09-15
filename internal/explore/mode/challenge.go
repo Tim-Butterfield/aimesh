@@ -1,6 +1,6 @@
 package mode
 
-// This file is the CHALLENGE mode (design §3 Challenge row) — an ADJUDICATIVE mode, and the one
+// This file is the CHALLENGE mode — an ADJUDICATIVE mode, and the one
 // that has to be honest about a count.
 //
 //	round 1 (BLIND)   each explorer attacks the supplied artifact: typed findings with a closed severity
@@ -10,7 +10,7 @@ package mode
 //	collate           a SEVERITY-TRIAGED register, every entry pinned to a HOST-computed govern.Claim
 //
 // Challenge is count-bearing, so it takes the full ranking-grade canonicalization policy (Dual + Confirm) —
-// §3 is explicit that confirmation covers EVERY count-bearing mode, and giving Shortlist a guard Challenge
+// Confirmation covers EVERY count-bearing mode, and giving Shortlist a guard Challenge
 // lacked would be exactly the asymmetry the design warns about.
 //
 // The register's arithmetic is the part worth stating plainly. Corroboration is NOT "how many reviewers
@@ -19,7 +19,7 @@ package mode
 // enter. So the round-2 cross-review can sharpen a finding, escalate its severity in the reviewer's own
 // assessment, or refute it — and it can never move the count. Minority findings are never dropped: a
 // single-source finding survives into the register with its `single_source` label, because de-dup may
-// cluster and may not drop (§4).
+// cluster and may not drop.
 
 import (
 	"encoding/json"
@@ -34,7 +34,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// --- the terminal output (design §3 Challenge row) ---
+// --- the terminal output ---
 
 // ChallengeOutput is the FIXED, exploremesh-owned terminal output of the Challenge mode: a SEVERITY-TRIAGED
 // register of the confirmed canonical findings, the strengths that survived the attack, and the quarantined
@@ -44,7 +44,7 @@ type ChallengeOutput struct {
 	// ArtifactDigest is the SHA-256 of the exact artifact bytes the panel attacked ("" for a composition that
 	// supplies none) — so a register can be tied to the artifact revision it was produced against.
 	ArtifactDigest string `json:"artifactDigest,omitempty"`
-	// PartitionRevisionHash is the CONFIRMED partition every entry's count was computed at (§4: every count
+	// PartitionRevisionHash is the CONFIRMED partition every entry's count was computed at (every count
 	// pins the partition revision it rides on).
 	PartitionRevisionHash string `json:"partitionRevisionHash"`
 	// Register is the severity-triaged finding register, most severe first. Minority findings are present —
@@ -54,7 +54,7 @@ type ChallengeOutput struct {
 	// them — the honest inverse of the register, recorded so "the panel attacked this and it held" is visible
 	// rather than inferred from an absence.
 	SurvivingStrengths []ChallengeStrength `json:"survivingStrengths,omitempty"`
-	// CollatorNarrative is the quarantined MODEL PROSE namespace (§0 F-C): coverage notes and the like. No
+	// CollatorNarrative is the quarantined MODEL PROSE namespace: coverage notes and the like. No
 	// machine governance field above may carry model text, which is why it is all collected here.
 	CollatorNarrative []govern.Narrative `json:"collatorNarrative,omitempty"`
 }
@@ -79,7 +79,7 @@ type ChallengeEntry struct {
 	// statement, severity, failure scenario and evidence.
 	Findings []AttributedFinding `json:"findings"`
 	// Deepening is the round-2 CROSS-REVIEW record for this entity, attributed. It adds depth and stances; it
-	// contributes NOTHING to Corroboration (§0 F-A).
+	// contributes NOTHING to Corroboration.
 	Deepening []AttributedAssessment `json:"deepening,omitempty"`
 }
 
@@ -160,12 +160,12 @@ func shortHash(h string) string {
 
 // challengeReview is the Challenge mode's LaterRoundContract: it accepts ONLY the pooled confirmed-canonical
 // uniques at the current artifact schema version, and it embeds the host's already-framed untrusted-data
-// block VERBATIM — a contract may not re-frame or re-label it (§6).
+// block VERBATIM — a contract may not re-frame or re-label it.
 type challengeReview struct{}
 
 // Accepts declares the round→round edge this round will take. It names KindCanonicalUniques and nothing else,
 // so feeding it raw blind envelopes is rejected before spend — which is the mechanical form of "explorers
-// never see raw peer output" (§1).
+// never see raw peer output".
 func (challengeReview) Accepts() round.Accepts {
 	return round.Accepts{Kinds: []round.Kind{round.KindCanonicalUniques}, SchemaVersion: round.SchemaVersion}
 }
@@ -227,7 +227,7 @@ func (challengeCollator) CanonicalizerPrompt(noms []canon.Nomination) (string, e
 	if len(noms) > 0 {
 		lastIdx = strconv.Itoa(len(noms) - 1)
 	}
-	return "You are the CANONICALIZER — a role DISTINCT from the collator and from the reviewers (design §4). " +
+	return "You are the CANONICALIZER — a role DISTINCT from the collator and from the reviewers. " +
 		"Below are raw FINDINGS produced INDEPENDENTLY by separate reviewers attacking the same artifact. " +
 		"CLUSTER the findings that identify the SAME UNDERLYING DEFECT (the same failure, described differently) " +
 		"under one canonical entity. Two DIFFERENT defects are two entities even when they touch the same " +
@@ -269,7 +269,7 @@ func (challengeCollator) Collate(canon.Result) (ModeOutput, error) {
 // internal/govern over a baseline this function could not widen if it tried.
 func (challengeCollator) CollateGoverned(in CollateInput) (ModeOutput, error) {
 	if in.Governance == nil {
-		return nil, fmt.Errorf("challenge: no governance claims were emitted — every register entry must be pinned to a host-computed claim (design §0 F-C)")
+		return nil, fmt.Errorf("challenge: no governance claims were emitted — every register entry must be pinned to a host-computed claim")
 	}
 	claims := map[string]govern.Claim{}
 	for _, c := range in.Governance.Claims {
@@ -426,8 +426,8 @@ func requireArtifact(raw schema.RawTask) error {
 }
 
 func init() {
-	// Challenge (design §3). Formulation-free like every registered mode: the app owns BOTH the
-	// round-1 prompt and schema, so the collator authors no explorer schema (§5). Count-bearing ⇒ the full
+	// Challenge. Formulation-free like every registered mode: the app owns BOTH the
+	// round-1 prompt and schema, so the collator authors no explorer schema. Count-bearing ⇒ the full
 	// ranking-grade policy (Dual + Confirm). Two FIXED rounds: blind attack, then the collator-mediated
 	// cross-review over the pooled confirmed-canonical digest.
 	register(ModeSpec{
@@ -442,7 +442,7 @@ func init() {
 		LaterRound:       challengeReview{},
 		ValidateTask:     requireArtifact,
 		// EMERGENT space: the findings are authored by the reviewers, so grouping them across reviewers is
-		// entity resolution and may only happen through the recorded canonicalization ledger (§0 F-B).
+		// entity resolution and may only happen through the recorded canonicalization ledger.
 		Class: schema.EmergentSpace,
 	})
 }

@@ -9,8 +9,8 @@ import (
 // This file is the `io.modelcontextprotocol/tasks` EXTENSION: `resultType: "task"` on `tools/call`,
 // and the three methods `tasks/get`, `tasks/update`, `tasks/cancel`.
 //
-// It is adopted under product decision D7 with the extension's EXPERIMENTAL status as an accepted,
-// recorded risk (migration design §12.2). Two things bound that risk and they are both structural
+// It is adopted with the extension's EXPERIMENTAL status as an accepted risk. Two things bound that
+// risk and they are both structural
 // rather than aspirational:
 //
 //  1. THIS PACKAGE MINTS NO IDENTIFIER AND OWNS NO STATE. A task is a PROJECTION over run state the
@@ -246,8 +246,8 @@ func (s *Server) embeddedResult(env *RequestEnv, res *CallToolResult) any {
 //
 // We do NOT meet the rationale the overview gives for that rule ("Crash resilience. A task ID is a
 // durable handle."). Our registries are in memory, so a `taskId` is durable for the life of the
-// SERVER PROCESS and not across a restart of it. That is recorded here, in docs/mcp.md and in the
-// design (§12.3) rather than quietly enjoyed.
+// SERVER PROCESS and not across a restart of it. That is stated here and in docs/mcp.md rather than
+// quietly enjoyed.
 func (s *Server) createTaskResponse(id json.RawMessage, env *RequestEnv, taskID string) *rpcResponse {
 	v, ok := s.Tasks.Task(taskID)
 	if !ok {
@@ -384,7 +384,7 @@ func (s *Server) cancelTask(env *RequestEnv, id json.RawMessage, params json.Raw
 // extension.
 //
 // WE EMIT `-32021`, AND THE EXTENSION SPECIFIES `-32003`. That is a KNOWN, DECLARED DEVIATION, not
-// an oversight, and both texts were read before choosing (migration design §15.2):
+// an oversight, and both texts were read before choosing:
 //
 //   - The extension: "Servers **MUST** return this error [`-32003`] for non-declaring clients issuing
 //     `tasks/get`, `tasks/update`, and `tasks/cancel` requests."

@@ -1,16 +1,16 @@
 package schema
 
-// This file holds the Synthesize mode's app-owned artifacts (design §3): the FIXED explorer
+// This file holds the Synthesize mode's app-owned artifacts: the FIXED explorer
 // schema + deterministic explorer prompt (converge on one best complete answer), and the terminal
 // SynthesizeOutput the collator composes. Synthesize is FORMULATION-FREE like Map — the collator
-// authors NO round-1 schema (§5): both the explorer prompt and the explorer schema are app-owned.
+// authors NO round-1 schema: both the explorer prompt and the explorer schema are app-owned.
 
 import (
 	"fmt"
 	"strings"
 )
 
-// SynthesizeOutput is the FIXED, exploremesh-owned terminal output of the Synthesize mode (design §3).
+// SynthesizeOutput is the FIXED, exploremesh-owned terminal output of the Synthesize mode.
 // The collator SELECTS the strongest candidate answer and, where clearly beneficial, GRAFTS
 // superior elements from the others into a single composed artifact — it does NOT tally. Every grafted
 // element records which explorer it came from (componentProvenance), and rejected alternatives are
@@ -22,7 +22,7 @@ type SynthesizeOutput struct {
 	// ComponentProvenance records, per grafted element, which explorer it was taken from — so the
 	// composed artifact is attributable rather than an unsourced blend.
 	ComponentProvenance []ProvenanceEntry `json:"componentProvenance"`
-	// MinorityReport preserves the rejected alternatives + why each was not chosen (design §3: minority
+	// MinorityReport preserves the rejected alternatives + why each was not chosen (minority
 	// carried, never dropped).
 	MinorityReport []MinorityEntry `json:"minorityReport"`
 	// Rationale explains the selection/composition decision (why this candidate, why these grafts).
@@ -64,7 +64,7 @@ func (o SynthesizeOutput) Validate() error {
 }
 
 // synthesizeExplorerFields is the Synthesize mode's FIXED explorer-response schema: one best complete
-// answer with its rationale + assumptions (design §3). It is app-owned (never collator-authored, §5);
+// answer with its rationale + assumptions. It is app-owned (never collator-authored);
 // it is NOT the Map minimum schema — a formulation-free mode's explorer schema is its own contract and
 // is not held to the minimum-schema guard (that guard governs a collator-EXPANDED Map schema).
 var synthesizeExplorerFields = []Field{

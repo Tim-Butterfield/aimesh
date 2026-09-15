@@ -197,8 +197,8 @@ func TestSetup_AdapterRequiresPath(t *testing.T) {
 }
 
 func TestGitignore_NoAikitOrAnalysis(t *testing.T) {
-	// Walk to the repo root (marked by go.work) — the reviewmesh app is now a nested
-	// module (reviewmesh/go.mod), so go.mod no longer identifies the repo root.
+	// Walk to the repo root, marked by go.work: the workspace holds more than one go.mod, so go.mod
+	// does not identify the repo root.
 	dir, _ := os.Getwd()
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.work")); err == nil {
@@ -582,11 +582,10 @@ func TestSplitArgs_BothFlagForms(t *testing.T) {
 	}
 }
 
-// TestSplitArgs_EveryValueFlagKeepsItsValue is the regression this closes.
+// TestSplitArgs_EveryValueFlagKeepsItsValue: each of these value-taking flags must keep its value.
 //
-// These six flags were all absent from the hand-maintained map that used to answer "does this
-// flag take a value". Their values were therefore classified as POSITIONALS, so the workspace
-// path was lost and the parser blamed the flag ("flag needs an argument") instead. `--path` and
+// A value misclassified as a POSITIONAL loses the workspace path, and the parser then blames the
+// flag ("flag needs an argument") instead. `--path` and
 // `--changed-since` are two of the flags the help text pushes hardest, so this was reachable by
 // following the documentation.
 //

@@ -158,16 +158,14 @@ func TestResolve_HashMismatchHalts(t *testing.T) {
 	}
 }
 
-// TestResolve_ALargeDocumentIsCarriedWhole is the no-silent-truncation rule, in its surviving
-// form. There used to be a byte budget here and an oversized document was refused; the budget is
-// gone, because how much context a model can take is the model's business and a real
-// specification (this repo's own docs/mcp.md is 105 KiB) cleared the old 64 KiB ceiling easily.
+// TestResolve_ALargeDocumentIsCarriedWhole is the no-silent-truncation rule. There is no byte budget,
+// because how much context a model can take is the model's business.
 //
-// What must NOT change is that nothing is quietly shortened: the caller declared the document, so
+// What must hold is that nothing is quietly shortened: the caller declared the document, so
 // the document is what the seats get, byte for byte.
 func TestResolve_ALargeDocumentIsCarriedWhole(t *testing.T) {
 	ws := t.TempDir()
-	const size = (64 << 10) + 5000 // comfortably past the ceiling that used to refuse
+	const size = (64 << 10) + 5000 // a large document, well past a small one
 	p := writeFile(t, ws, "huge.md", strings.Repeat("A", size))
 	set, err := Resolve(Input{Workspace: ws, Mode: review.ModeReport,
 		Docs: []review.AuthorityDoc{{Name: "huge", Path: p}}})
@@ -337,7 +335,7 @@ func TestProvenanceSplit_AdjudicatorBlockExcludesInline(t *testing.T) {
 }
 
 // TestRender_EmptyIsEmpty pins the blast radius: with no authority the rendered block is the
-// empty string, so a prompt is byte-identical to what it was before this feature existed.
+// empty string, so a prompt with no authority carries no authority block.
 func TestRender_EmptyIsEmpty(t *testing.T) {
 	var zero Set
 	if zero.ReviewerBlock() != "" || zero.AdjudicatorBlock() != "" {

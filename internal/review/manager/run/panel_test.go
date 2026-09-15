@@ -267,10 +267,10 @@ func TestPanel_ProvenanceIsHostComputed(t *testing.T) {
 // is applyable like any other, and each supporting seat's tier is recorded so a reader can see what
 // the support consists of.
 //
-// This replaces a "weak-identity quarantine" that refused such findings for apply. That rule presumed
-// we could tell a proven model from a claimed one — which the codex echo test showed we cannot — so it
-// withheld fixes for genuine defects on the strength of a tier that might itself be our own argument
-// handed back to us. Identity is recorded, never acted on (../../../../docs/model-identity.md).
+// Refusing such findings for apply would presume we can tell a proven model from a claimed one — which
+// the codex echo test shows we cannot — and would withhold fixes for genuine defects on the strength of
+// a tier that might itself be our own argument handed back to us. Identity is recorded, never acted on
+// (../../../../docs/model-identity.md).
 func TestPanel_WeakIdentitySupportIsAppliableAndLabeled(t *testing.T) {
 	finding := func(title, file string) review.Finding {
 		return review.Finding{ID: "x", Title: title, Kind: review.KindFail, Severity: review.SeverityHigh, File: file, Location: "1"}

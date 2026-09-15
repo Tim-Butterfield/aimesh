@@ -53,20 +53,20 @@ const seatSchema = `{
   "additionalProperties": false,
   "required": ["adapter", "model"],
   "properties": {
-    "adapter": {"type": "string", "description": "A configured adapter identifier, as reported by the list tool. Never a path or a binary name."},
-    "model": {"type": "string", "description": "A model identifier this adapter can select. PREFER a configured catalog key from the list tool's modelCatalog: those resolve to a pinned per-adapter argument and effort. Any other string is passed to the adapter VERBATIM and reported back with modelSource: 'passthrough' — the run is not refused for it, but the configuration cannot describe that model and a name the provider does not recognise fails in the provider's words, mid-run, after spending. The adapter is never passed through."},
+    "adapter": {"type": "string", "description": "An adapter this server was launched with, as reported by the list tool. Never a path or a binary name."},
+    "model": {"type": "string", "description": "The exact model identifier this adapter's CLI accepts, passed to it VERBATIM and reported back with modelSource: 'passthrough'. Look the identifier up for your adapter and the license it runs under: this server does not validate it, so a name the provider does not recognise fails in the provider's words once the run starts. Ask verifyReadiness to check it before a full run."},
     "effort": {"type": "string", "description": "Optional reasoning-effort label. A different effort is a genuinely different vantage, so it is part of a reviewer seat's identity. Accepted on 'reviewers[]' only."}
   }
 }`
 
-// panelSchema is the AD-HOC panel. An ad-hoc panel MUST name `author_remediator`: it is the
+// panelSchema is the panel every call composes. It MUST name `author_remediator`: it is the
 // host-adjudication seat, and defaulting it silently would mean the caller composed a panel whose
 // adjudicator it never saw — the one seat whose judgment becomes the accepted set.
 var panelSchema = fmt.Sprintf(`{
   "type": "object",
   "additionalProperties": false,
   "required": ["reviewers", "author_remediator"],
-  "description": "An AD-HOC panel, composed by identifier from this server's configured adapters. Mutually exclusive with 'profile': a panel is composed OR selected, never half of each. Composing one persists nothing — the call IS the ephemeral profile.",
+  "description": "The panel, composed per call from the adapters this server was launched with. reviewers and author_remediator are required; cross_check and verifier run only when named, and a run without them lists them in skippedSteps. Composing one persists nothing.",
   "properties": {
     "reviewers": {"type": "array", "minItems": 1, "maxItems": %d, "items": %s, "description": "The ORDERED blind primary seats. Every seat reviews blind and in parallel; agreement is computed BY THE HOST over which seats reported a finding. Two seats with an identical (adapter, model, effort) triple are refused — an identical seat adds no independent vantage and would double-count as agreement."},
     "cross_check": %s,
@@ -111,26 +111,18 @@ var inlineWorkspaceSchema = fmt.Sprintf(`{
   "propertyNames": {"pattern": "^[^/\\\\][^\\u0000]*$"}
 }`, maxInlineEntries, maxInlineEntryBytes)
 
-// rootsArgSchema is the NARROWING-ONLY per-call root argument.
-//
-// It is the migration `client/roots` itself names — that page is deprecated as of 2026-07-28 and says
-// "existing implementations SHOULD migrate to passing directories or files via tool parameters,
-// resource URIs, or server configuration" — and it is the tool-parameter option, applied literally.
-//
-// The safety property is entirely `intersectRoots`: the effective set for a call is the intersection
-// of the operator's launch roots with this argument, which keeps the deeper of each overlapping pair
-// and NOTHING when they are disjoint. It is never a union, so naming a directory here cannot grant
-// it; the worst a hostile or confused caller can do is refuse its own call.
+// rootsArgSchema is the per-call EXTRA roots argument: directories a call reads beside its workspace.
+// It is the tool-parameter form `client/roots` names as its migration ("passing directories or files
+// via tool parameters").
 const rootsArgSchema = `{
       "type": "array", "minItems": 1, "maxItems": 32,
       "items": {"type": "string", "minLength": 1},
-      "description": "Absolute directory paths this call should be confined to. NARROWING ONLY: the effective scope is the INTERSECTION with the trusted roots the operator established at launch. Naming a directory outside them does not grant it — the intersection simply drops it, and an empty intersection refuses the call. Omit it to run at the operator's full roots."
+      "description": "Extra ABSOLUTE directories this call reads beside its workspace — for example the project folder holding authority documents while the workspace is a temporary directory. Each follows the same rules as the workspace: absolute, not the filesystem root, a home directory, a system tree or a protected directory, and inside the operator's --root ceiling when one is set."
     }`
 
 // commonReportProps are the run-forming parameters both review tools share.
 var commonReportProps = fmt.Sprintf(`
     "roots": %s,
-    "profile": {"type": "string", "description": "A configured profile name (see the list tool). Mutually exclusive with 'panel'. Omitted (with no panel): this server's configured default profile."},
     "panel": %s,
     "authority": %s,
     "waitSeconds": {"type": "integer", "minimum": 1, "maximum": %d, "default": %d, "description": "How long to wait inline for the run. If it finishes in time you get the full result; otherwise you get {runId, state:\"running\"} and poll review_run_status / fetch review_run_result."},
@@ -141,24 +133,21 @@ var commonReportProps = fmt.Sprintf(`
 	rootsArgSchema, panelSchema, authoritySchema, MaxWaitSeconds, DefaultWaitSeconds)
 
 // reportInputSchema is `review_report`. The top-level `oneOf` is the workspace XOR inlineWorkspace
-// choice; `"not": {"required": ["profile", "panel"]}` inside each branch is the profile XOR panel
-// choice. Both are re-enforced server-side.
+// choice, re-enforced server-side; `panel` is required in both.
 var reportInputSchema = fmt.Sprintf(`{
   "oneOf": [
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workspace"],
-      "not": {"required": ["profile", "panel"]},
+      "required": ["workspace", "panel"],
       "properties": {
-        "workspace": {"type": "string", "minLength": 1, "description": "The directory to review. It must resolve INSIDE this server's trusted roots (established at launch, before any request existed): a request may narrow them, never widen them."},%s
+        "workspace": {"type": "string", "minLength": 1, "description": "The ABSOLUTE directory to review. It is this call's root: files outside it (and outside any extra roots) are refused. It may not be the filesystem root, a home directory, a system tree or a protected directory, and it must lie inside the operator's --root ceiling when one is set."},%s
       }
     },
     {
       "type": "object",
       "additionalProperties": false,
-      "required": ["inlineWorkspace"],
-      "not": {"required": ["profile", "panel"]},
+      "required": ["inlineWorkspace", "panel"],
       "properties": {
         "inlineWorkspace": %s,%s
       }
@@ -166,26 +155,21 @@ var reportInputSchema = fmt.Sprintf(`{
   ]
 }`, commonReportProps, inlineWorkspaceSchema, commonReportProps)
 
-// remediateInputSchema is `review_remediate`. It has ONE form, and that is D5.
-//
-// The `oneOf` is gone with the full-cycle branch. On 2026-07-28 stdio a cancelled request may receive
-// no further message at all, so a one-call review-and-write leaves a caller whose response is
-// cancelled holding no handle to a run that may already have written to its files. `fromRun` closes
-// that window with no new parameter: it is a value the caller already RECEIVED, in a completed
-// response, before the write request was sent — and basic/index says state spanning requests "MUST be
-// referenced by an explicit identifier the client passes on each request".
-//
-// This is a deliberate BREAKING CHANGE to this tool's input schema, and the teaching error names the
-// two-step path (see remediateHandler). The CLI is untouched.
+// remediateInputSchema is `review_remediate`. It has one form: `fromRun` plus the workspace that run
+// reviewed. `fromRun` is a value the caller already RECEIVED in a completed response, so a caller whose
+// write call is cancelled still holds the handle to the run it named — basic/index says state spanning
+// requests "MUST be referenced by an explicit identifier the client passes on each request". The
+// `oneOf` makes `allowWrite: true` required exactly when `output` is `apply`.
 var remediateInputSchema = fmt.Sprintf(`{
   "type": "object",
   "additionalProperties": false,
-  "required": ["fromRun", "output", "allowWrite"],
-  "description": "Apply the already-adjudicated accepted findings of a prior review_report run. Nothing is re-reviewed and nothing is re-judged. This is the ONLY write form on this surface: the one-call review-and-write form is not offered over MCP, because a caller whose response is cancelled would be left holding no handle to a run that may have written.",
+  "required": ["fromRun", "workspace", "output"],
+  "description": "Produce or apply the already-adjudicated accepted findings of a prior review_report run. Nothing is re-reviewed and nothing is re-judged. output=patch returns the complete diff and changes no project content; it is available on every server, so an agent can apply the change itself. output=apply writes the live workspace and is available only when the operator launched this server with --allow-writes.",
   "properties": {
-    "fromRun": {"type": "string", "minLength": 1, "description": "The runId of a completed review_report run on THIS server. Its accepted findings are the exact set that will be written, and it is your durable handle: it survives cancellation of this call."},
-    "output": {"type": "string", "enum": ["patch", "apply"], "description": "patch: produce a diff artifact and change nothing. apply: write the changes to the live workspace."},
-    "allowWrite": {"type": "boolean", "const": true, "description": "Must be literally true. It is a per-call confirmation, not a default: omitting it refuses the call before any spend."},
+    "fromRun": {"type": "string", "minLength": 1, "description": "The runId of a completed review_report run. Its accepted findings are the exact set that is patched or applied, and it is your durable handle: it survives cancellation of this call."},
+    "workspace": {"type": "string", "minLength": 1, "description": "The ABSOLUTE workspace the source run reviewed. It locates that run's record, and it must be the same tree the run judged: a different workspace is refused."},
+    "output": {"type": "string", "enum": ["patch", "apply"], "description": "patch: produce the complete diff and change no project content. apply: write the changes to the live workspace (requires --allow-writes at launch and allowWrite: true)."},
+    "allowWrite": {"type": "boolean", "description": "Required, and literally true, for output=apply: a per-call confirmation that this call writes. Not needed for output=patch."},
     "select": {
       "type": "array",
       "minItems": 1,
@@ -195,7 +179,11 @@ var remediateInputSchema = fmt.Sprintf(`{
     "roots": %s,
     "waitSeconds": {"type": "integer", "minimum": 1, "maximum": %d, "default": %d},
     "idempotencyKey": {"type": "string", "maxLength": 200, "description": "Repeating a call with the same key returns the ORIGINAL receipt. A remediation is never applied twice for the same key, and never twice for the same fromRun."}
-  }
+  },
+  "oneOf": [
+    {"properties": {"output": {"const": "patch"}}},
+    {"required": ["allowWrite"], "properties": {"output": {"const": "apply"}, "allowWrite": {"const": true}}}
+  ]
 }`, rootsArgSchema, MaxWaitSeconds, DefaultWaitSeconds)
 
 const runIDInputSchema = `{
@@ -263,14 +251,13 @@ const findingSchema = `{
 const panelEchoSchema = `{
     "type": "object",
     "required": ["requested", "executed"],
-    "description": "The panel as REQUESTED and as EXECUTED. ALWAYS present, and always both halves: a profile that resolved elsewhere, or a seat that halted, is visible only by comparing them.",
+    "description": "The panel as REQUESTED and as EXECUTED. ALWAYS present, and always both halves: a seat that halted is visible only by comparing them.",
     "properties": {
       "requested": {
         "type": "object",
         "required": ["source"],
         "properties": {
-          "source": {"type": "string", "enum": ["default", "profile", "adhoc"]},
-          "profile": {"type": "string"},
+          "source": {"type": "string", "enum": ["adhoc"]},
           "reviewers": {"type": "array", "items": {"type": "object"}},
           "cross_check": {"type": "object"},
           "verifier": {"type": "object"},
@@ -424,6 +411,7 @@ const reviewShapeSchema = `{
       "surface": {"type": "string"},
       "seats": {"type": "array", "items": {"type": "object"}, "description": "The blind panel in REQUESTED order: seatId, adapter, model, effort. Every seat runs; maxParallel bounds only how many at once, so shortening this list is the only thing that removes a call."},
       "lanes": {"type": "array", "items": {"type": "object"}, "description": "Every other resolved role. A role ABSENT here is a call this run will not make. An 'execution: host' lane runs in-process and costs no model call."},
+      "skippedSteps": {"type": "array", "items": {"type": "string", "enum": ["cross_check", "verifier"]}, "description": "The optional steps this run will not take because no seat was assigned to them. Report them with the result so a thinner review is not mistaken for a full one."},
       "maxParallel": {"type": "integer", "description": "Bounds wall clock, never cost."},
       "outerCycles": {"type": "integer"},
       "panelRounds": {"type": "integer", "description": "The budget the panel SHARES for one cycle — never a per-seat figure."},
@@ -601,8 +589,8 @@ var reportResultSchema = fmt.Sprintf(`{
 	panelEchoSchema, identityCaveatsSchema, haltProps,
 	panelEchoSchema, identityCaveatsSchema, haltProps)
 
-// The PARTIAL-REFUSAL contract, declared once and reused on every branch that can carry it
-// (design §13.4). A finding whose target is a protected path is refused rather than halting the
+// The PARTIAL-REFUSAL contract, declared once and reused on every branch that can carry it. A
+// finding whose target is a protected path is refused rather than halting the
 // run; these three fields are how a caller learns that happened without reading the receipt.
 const (
 	applyOutcomeSchema = `{
@@ -766,103 +754,57 @@ var runStatusSchema = fmt.Sprintf(`{
 // disclosure, not a convenience.
 const listOutputSchema = `{
   "type": "object",
-  "required": ["adapters", "modelCatalog", "profiles", "modes", "limits", "remediation"],
+  "required": ["adapters", "modes", "limits", "remediation"],
   "properties": {
-    "modelCatalog": {
-      "type": "array",
-      "description": "THE CONFIGURED VOCABULARY: every key panel[].model may name and have resolved for it. PREFER THESE. A composed panel may also name a model that is not here — it is passed to the adapter verbatim and reported with modelSource: 'passthrough' — but then the configuration cannot describe it, nothing pins its effort or argument, and whether it exists at all is the provider's answer, so a typo becomes a vendor error mid-run instead of a refusal before spending. The ADAPTER is never passed through: it must be one this server has configured. Effort is embedded in the key by convention, so read adapters[].effort rather than inferring it from the name, and note that modelArg (what the adapter's CLI is actually given) is frequently NOT the key.",
-      "items": {
-        "type": "object",
-        "required": ["key", "adapters"],
-        "properties": {
-          "key": {"type": "string", "description": "the exact token to put in a composed panel's model field"},
-          "provider": {"type": "string"},
-          "canonicalModel": {"type": "string"},
-          "adapterDefault": {"type": "boolean", "description": "the entry an adapter falls back to when a lane names no model"},
-          "adapters": {
-            "type": "array",
-            "description": "which adapters this key is reachable through. A key bound to one adapter is the ordinary case.",
-            "items": {
-              "type": "object",
-              "required": ["adapter"],
-              "properties": {
-                "adapter": {"type": "string"},
-                "modelArg": {"type": "string"},
-                "effort": {"type": "string"}
-              }
-            }
-          }
-        }
-      }
-    },
     "adapters": {
       "type": "array",
+      "description": "The adapters this server was launched with. A panel seat may name only these. An adapter with available: false cannot be used until its CLI can be started; 'reason' says why.",
       "items": {
         "type": "object",
-        "required": ["name", "kind", "configured"],
+        "required": ["name", "kind", "available"],
         "properties": {
           "name": {"type": "string"}, "displayName": {"type": "string"},
-          "kind": {"type": "string", "enum": ["shell", "acp", "fake"]},
-          "configured": {"type": "boolean"},
-          "identityEvidenceCapability": {"type": "string", "description": "The adapter's DECLARED evidence tier — not a live verdict. Proving a model's identity still takes a real call."},
-          "specOnly": {"type": "boolean"}
+          "kind": {"type": "string", "enum": ["shell", "fake"]},
+          "available": {"type": "boolean"},
+          "reason": {"type": "string"},
+          "source": {"type": "string", "enum": ["flag", "env"], "description": "Where the operator named the adapter."},
+          "identityEvidenceCapability": {"type": "string", "description": "The adapter's DECLARED evidence tier — not a live verdict. Proving a model's identity still takes a real call."}
         }
-      }
-    },
-    "profiles": {
-      "type": "object",
-      "required": ["defaultProfile", "profiles"],
-      "properties": {
-        "defaultProfile": {"type": "string"},
-        "profiles": {"type": "array", "items": {"type": "object"}}
       }
     },
     "modes": {"type": "array", "items": {"type": "string"}},
     "limits": {"type": "object"},
     "remediation": {
       "type": "object",
-      "required": ["allowed", "ceiling"],
-      "description": "Whether this server may write, and how far. 'allowed: false' means review_remediate is not listed at all.",
+      "required": ["writes", "diffAvailable"],
+      "description": "Who performs writes on this server.",
       "properties": {
-        "allowed": {"type": "boolean"},
-        "ceiling": {"type": "string", "enum": ["report", "patch", "apply"]},
-        "capability": {"type": "string"},
+        "writes": {"type": "string", "enum": ["aimesh", "agent"], "description": "aimesh: the operator launched this server with --allow-writes, so review_remediate output=apply writes the workspace. agent: aimesh never changes project content here; apply the diff yourself."},
+        "diffAvailable": {"type": "boolean", "description": "Always true: review_remediate output=patch supplies the complete diff on every server."},
         "note": {"type": "string"}
       }
     },
-    "roots": {"type": "object", "required": ["count"], "description": "How many trusted roots this server has. The paths themselves are NOT reported — a caller does not need them to compose a call, and they map the operator's machine.", "properties": {"count": {"type": "integer"}}}
+    "roots": {"type": "object", "required": ["ceiling"], "description": "How many --root ceiling directories bound the paths a call may declare (0 = no ceiling). The paths are NOT reported.", "properties": {"ceiling": {"type": "integer"}}}
   }
 }`
 
-// doctorOutputSchema gains the ROOT-CONFINEMENT DISCLOSURE, and it is categorical by construction:
-// every field here is a count or an enum, never a path. A waiver check that leaked the waived
-// directory would violate the very sanitization rule it exists to disclose.
-//
-// The reason it is here at all rather than only on stderr at launch: a host launches its servers from
-// a config file and the stdio transport says the client "MAY capture, forward, or ignore the server's
-// stderr output". A security-relevant setting visible only on a channel the reader may discard is
-// disclosed in name only.
+// doctorOutputSchema is the readiness projection. Every field is a count, an enum or a boolean — never a
+// path — because a tool result is inference input for a third party.
 const doctorOutputSchema = `{
   "type": "object",
-  "required": ["ok", "checks", "rootNarrowing", "rootCount", "inferredRootWaived", "protocolMode", "protocolEra"],
+  "required": ["ok", "checks", "writes", "diffAvailable", "rootCeiling", "protocolMode", "protocolEra"],
   "properties": {
-    "ok": {"type": "boolean"},
+    "ok": {"type": "boolean", "description": "True when at least one adapter this server was launched with can be started."},
     "checks": {
       "type": "array",
       "items": {"type": "object", "required": ["name", "ok"], "properties": {
         "name": {"type": "string"}, "ok": {"type": "boolean"}, "detail": {"type": "string"}
       }}
     },
-    "rootNarrowing": {
-      "type": "string",
-      "enum": ["none", "startup-only", "startup+client"],
-      "description": "WHICH channels are narrowing this server's filesystem scope, categorically and with no paths. none: there is no trusted root at all, so every filesystem path is refused. startup-only: the operator's launch roots stand. startup+client: a client declared roots and the effective set is the intersection. (A per-call 'roots' argument narrows only the call that carries one, and doctor takes no arguments, so no fourth value is reported here.)"
-    },
-    "rootCount": {"type": "integer", "minimum": 0, "description": "How many trusted roots are in force for this request. The paths are never reported."},
-    "inferredRootWaived": {
-      "type": "boolean",
-      "description": "Whether the operator launched with --allow-inferred-root. When false (the default) and this server's roots were INFERRED from its launch directory rather than typed by a human, protocol revisions that removed the client's ability to narrow this server get NO trusted root and refuse every filesystem path. Reported here, and not only on stderr at launch, because a host may discard stderr."
-    },
+    "writes": {"type": "string", "enum": ["aimesh", "agent"], "description": "Who performs writes. aimesh: launched with --allow-writes, so review_remediate output=apply writes the workspace. agent: aimesh never changes project content here; ask for output=patch and apply the diff yourself."},
+    "diffAvailable": {"type": "boolean", "description": "Always true: review_remediate output=patch supplies the complete diff on every server."},
+    "verify": {"type": "object", "description": "The operator's --verify-cmd grant: how many project build/test commands run on each review's containment copy (0 = none), whether they also run on report runs, and the per-command timeout. The commands themselves are never reported, and their result gates nothing.", "properties": {"commands": {"type": "integer", "minimum": 0}, "baseline": {"type": "boolean"}, "timeoutSeconds": {"type": "integer", "minimum": 0}}},
+    "rootCeiling": {"type": "integer", "minimum": 0, "description": "How many --root ceiling directories bound the paths a call may declare. 0 means no ceiling. The paths are never reported."},
     "protocolMode": {
       "type": "string",
       "enum": ["dual", "legacy"],
@@ -892,15 +834,17 @@ func raw(s string) json.RawMessage {
 const instructions = `reviewmesh runs a governed, blind panel of independent models over an artifact and returns a HOST-ADJUDICATED result.
 
 How the tools relate:
-- review_report STARTS A REVIEW. It spawns model CLIs and SPENDS MONEY, and it writes NOTHING to the workspace. Confirm with the user before repeating one.
-- review_remediate APPLIES accepted findings. It is listed only when the operator launched this server with remediation enabled, and every call must pass allowWrite: true. It has ONE form: fromRun. Pass the runId of a completed review_report run — there is no one-shot write on this surface, so a human can always read the accepted set before anything is written, and a cancelled response can never leave you holding no handle to a run that wrote.
+- review_report STARTS A REVIEW. It spawns model CLIs and SPENDS MONEY, and it changes no project content. Confirm with the user before repeating one.
+- review_remediate acts on a completed review_report run's accepted findings. Pass fromRun (that run's runId) and the absolute workspace it reviewed. output=patch returns the complete diff on every server; output=apply writes the workspace, needs allowWrite: true, and works only when the operator launched this server with --allow-writes. review_doctor reports "writes": "aimesh" when aimesh can apply, or "agent" when you apply the diff yourself.
 - Runs are JOB-SHAPED. If a run does not finish within waitSeconds you get {runId, state:"running"} — poll review_run_status, then fetch review_run_result. Do not re-issue the call: pass the same idempotencyKey and you get the existing run back rather than paying twice (and, for remediation, rather than writing twice).
-- list and doctor are read-only configuration reporting. Call list FIRST if you need to know which adapters, models or profiles exist.
+- list and doctor are read-only reporting. Call list FIRST to see which adapters this server was launched with.
 
-Choosing a panel — MATCH OR COMPOSE:
-- Call list, and if a configured profile already matches what you want, pass its name as "profile".
-- Otherwise compose an ad-hoc "panel". An ad-hoc panel MUST name author_remediator — it is the seat whose adjudication becomes the accepted set, and a hidden default would mean composing a panel whose judge you never saw.
-- An ad-hoc call IS the ephemeral profile. Nothing is persisted, and no call can ever create, edit or delete configuration.
+Composing a panel:
+- Every review composes its own "panel": reviewers[] and author_remediator are required; cross_check and verifier run only when named, and a run without them lists them in skippedSteps. author_remediator is the seat whose adjudication becomes the accepted set, so it is never defaulted.
+- Each seat names an adapter from list and the exact model identifier that adapter's CLI accepts. Look the identifier up for your adapter and the license it runs under; this server passes it through verbatim and does not validate it. Use verifyReadiness to check a model before a full run, and dryRun to price one.
+
+Scope:
+- workspace is an ABSOLUTE directory, and it is the call's root. Use roots to add other absolute directories the call reads, such as a project folder holding authority documents. No path may be the filesystem root, a home directory, a system tree or a protected directory, and every path must lie inside the operator's --root ceiling when one is set. Use inlineWorkspace to review content you supply in the call itself.
 
 Rules that matter for how you report a result:
 - AGREEMENT COUNTS ARE COMPUTED BY THE HOST over the blind seats. Report them as given. Never recount supportingSeats, and never restate a count in your own words.
@@ -910,10 +854,9 @@ Rules that matter for how you report a result:
 
 Reading a result on MCP 2026-07-28 and later:
 - resultType, state and task are THREE DIFFERENT THINGS and two of them are called "complete". resultType describes the REQUEST (the protocol's own field: "complete" means the response carries its final content); state describes the RUN (running / complete / halted / cancelled, inside structuredContent); a task, where one is offered, is a HANDLE to a run and not a state of one. A tool result carrying isError: true is still resultType "complete" — the request completed, the tool failed.
-- TRUSTED ROOTS ARE ESTABLISHED AT LAUNCH and this revision gives a client no way to narrow them (roots/list was removed). Pass a per-call "roots" argument to narrow a single call; nothing you send can widen them. If the operator launched with an INFERRED working directory rather than an explicit --root, this revision treats it as untrusted and refuses every filesystem path — call doctor to see which, and use inlineWorkspace to review content you supply in the call itself.
 - THIS SERVER EMITS NO PROTOCOL LOG NOTIFICATIONS on this revision. The Logging feature is deprecated as of 2026-07-28 and its named migration for stdio servers is stderr, which is where this server's diagnostics go; setting _meta.io.modelcontextprotocol/logLevel is accepted and ignored rather than rejected. In-flight visibility lives on _meta.progressToken (notifications/progress) and on review_run_status / review_run_result, which are responses. No governance-relevant fact has ever existed only in a log line.
 
 What this server will not do:
-- It never changes configuration. A call SELECTS or COMPOSES from what the operator already configured; it can never introduce an adapter, a binary path or a launch argument.
-- It reads only inside its trusted roots, which were established at launch. A path outside them is refused before any spend, and no request can widen them.
+- It never changes configuration, and it reads none: its adapters and grants come from its launch arguments, and a call can never introduce an adapter, a binary path or a launch argument.
+- It reads only inside the paths a call declares, and never the filesystem root, a home directory, a system tree or a protected path.
 - A failed run comes back as a tool result with isError set and a machine-readable {exitCode, haltClass, reasonCode} payload. Branch on reasonCode, not on the message text.`

@@ -17,10 +17,9 @@ func TestParseReviewerResult_Valid(t *testing.T) {
 	}
 }
 
-// TestParseReviewerResult_ToleratesUnknownTopLevelField pins the H2 robustness fix: a real
-// reviewer that emits a benign extra top-level key (observed in the wild: `"source":"reviewer"`)
-// must NOT lose its findings. Before the fix, DisallowUnknownFields rejected the whole result,
-// the one corrective retry replaced it with an empty approve, and 3 valid findings were lost.
+// TestParseReviewerResult_ToleratesUnknownTopLevelField: a real reviewer that emits a benign extra
+// top-level key (observed in the wild: `"source":"reviewer"`) must NOT lose its findings. Rejecting the
+// whole result would let the one corrective retry replace it with an empty approve.
 func TestParseReviewerResult_ToleratesUnknownTopLevelField(t *testing.T) {
 	in := []byte(`{"schemaVersion":1,"role":"reviewer","phase":"semantic_iterate","verdict":"request_changes","source":"reviewer","findings":[{"id":"F1","kind":"risk","severity":"high","title":"x"}]}`)
 	r, err := ParseReviewerResult(in)

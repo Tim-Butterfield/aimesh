@@ -1,6 +1,6 @@
 package pipeline
 
-// These tests pin the CANONICALIZER SELECTION rule (design §4): which identity is asked for the second,
+// These tests pin the CANONICALIZER SELECTION rule: which identity is asked for the second,
 // independent canonicalization judgment on the dual path, where that choice comes from, and how it is
 // recorded.
 //
@@ -265,9 +265,9 @@ func TestCanonicalizerMalformedSpecRefused(t *testing.T) {
 	}
 }
 
-// TestCanonicalizerDerivationRefusesPlanWithoutPreference pins the guard that keeps the fix from being
-// undone by a hand-built plan: without the preference order the only order left is the attribution order,
-// and quietly falling back to it is exactly the defect. It must refuse instead.
+// TestCanonicalizerDerivationRefusesPlanWithoutPreference pins the guard against a hand-built plan:
+// without the preference order the only order left is the attribution order, and quietly falling back
+// to it would choose canonicalizer slot b from the wrong order. It must refuse instead.
 func TestCanonicalizerDerivationRefusesPlanWithoutPreference(t *testing.T) {
 	handBuilt := roster.Plan{
 		Explorers: roster.AttributionOrdered{{Adapter: "fake", Model: "alpha"}, {Adapter: "fake", Model: "zulu"}},

@@ -1,6 +1,6 @@
 package evidence
 
-// This file implements the DERIVABILITY INVARIANT (design §9): the evidence database is a DERIVED artifact,
+// This file implements the DERIVABILITY INVARIANT: the evidence database is a DERIVED artifact,
 // so exporting the same run directory twice must produce the same thing. That is a checkable property, and
 // this is the check.
 //
@@ -120,11 +120,11 @@ func FileDigest(path string) (string, error) {
 
 // Verify re-exports runDir into a scratch database of its OWN and compares BOTH the canonical dump and the
 // file digest against an existing export. It is the runnable form of "the database's derivability is itself
-// a checkable invariant" (§9): a caller can hand an auditor a database and the run directory it came from,
+// a checkable invariant": a caller can hand an auditor a database and the run directory it came from,
 // and the auditor can check that one really does produce the other.
 //
 // The scratch database lives in a temporary directory this function CREATES and REMOVES, rather than beside
-// dbPath where it used to. Two reasons, both of them about the check not being able to hurt what it is
+// dbPath. Two reasons, both of them about the check not being able to hurt what it is
 // checking: a scratch path derived from the destination can collide with a real file the user owns, and a
 // check that leaves anything next to the artifact it verified is not a read-only check. Because the scratch
 // path is unobservable and disposable, it is built directly — the destination guard has nothing to protect

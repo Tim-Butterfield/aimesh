@@ -229,7 +229,7 @@ type Receipt struct {
 	// a successful commit with an empty Files wrote nothing because nothing differed, which is a
 	// different fact from not having committed at all.
 	Committed bool `json:"committed"`
-	// Selection is the narrowing selection this window was given, if any (D8-A). It rides the
+	// Selection is the narrowing selection this window was given, if any. It rides the
 	// DURABLE receipt for the same reason `outcome` and `refused` do: a caller whose response was
 	// cancelled must still be able to answer "which findings did I ask for, and did any selector
 	// name nothing" from the run directory alone.
@@ -252,6 +252,9 @@ type RemediateRequest struct {
 	// ReviewerPanel is carried only so the plan resolves to the SAME configuration the report run
 	// used (it selects the author_remediator lane); no reviewer seat is executed on this path.
 	ReviewerPanel []review.SeatSpec
+	// ComposedRoles are the source run's call-composed role seats, carried for the same reason as
+	// ReviewerPanel (see Request.ComposedRoles).
+	ComposedRoles map[review.Role]review.SeatSpec
 	// TrustedRoots are the out-of-band trusted roots of an agent surface (see Request.TrustedRoots).
 	// They are ENFORCED here, not merely carried: the workspace must resolve inside them before a
 	// copy is made. A surface whose caller is not a human establishes its roots at launch, and a
@@ -265,7 +268,7 @@ type RemediateRequest struct {
 	Findings  []review.Finding
 	Decisions []review.Decision
 	// Select, when non-nil, NARROWS the accepted set to the findings whose HOST-COMPUTED
-	// fingerprint it names (D8-A). nil applies the whole accepted set; an EMPTY non-nil slice is a
+	// fingerprint it names. nil applies the whole accepted set; an EMPTY non-nil slice is a
 	// refusal, never a fallback to "everything". See writeRequest.Select — this is carried straight
 	// through to the one governed write path, unexamined here, so the rule has one implementation.
 	Select []string
@@ -307,14 +310,14 @@ type RemediateOutcome struct {
 	Receipt     Receipt
 	Cancelled   bool
 	Withheld    []review.WithheldFile
-	// Selection is what a narrowing `select` did — requested, matched, unmatched (D8-A). nil when
+	// Selection is what a narrowing `select` did — requested, matched, unmatched. nil when
 	// no selection was supplied. Populated on every path, refusals included, so a caller learns
 	// which of its selectors named nothing even when the call refused for naming nothing at all.
 	Selection *review.ApplySelection
 	// Refusals lists the findings refused because their target is a PROTECTED PATH. Nothing was
 	// written to any of them (the denylist is non-overridable), every other accepted finding was
 	// applied, and the non-emptiness of this slice is what makes the call answer `isError: true`
-	// with `outcome: "partial_refusal"` rather than reading as a clean success (D8-C, §13.4).
+	// with `outcome: "partial_refusal"` rather than reading as a clean success.
 	Refusals []review.ApplyRefusal
 	// Verification is what the operator's own build/test commands did on the containment copy,
 	// before and after this remediation's edits. nil when none were supplied. It is a RECORD:
@@ -695,7 +698,7 @@ func (m *Manager) Remediate(ctx context.Context, req RemediateRequest) (Remediat
 	}
 	plan, err := m.Cfg.Resolve(config.ResolveRequest{
 		Profile: req.Profile, Mode: req.Mode, Surface: req.Surface,
-		Available: available, ReviewerPanel: req.ReviewerPanel,
+		Available: available, ReviewerPanel: req.ReviewerPanel, ComposedRoles: req.ComposedRoles,
 	})
 	if err != nil {
 		return out, err
@@ -711,7 +714,7 @@ func (m *Manager) Remediate(ctx context.Context, req RemediateRequest) (Remediat
 	}
 
 	startedAt := m.now()
-	run, rerr := audit.NewRun(m.ArtifactDir, "", startedAt)
+	run, rerr := audit.NewRun(m.artifactDirFor(req.Workspace), "", startedAt)
 	if rerr != nil {
 		return out, fault.Wrap(fault.Internal, "create run dir", rerr).WithReason("remediation_run_dir_failed")
 	}

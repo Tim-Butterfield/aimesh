@@ -7,6 +7,6 @@
 // appendix).
 //
 // It imports meshcore ONLY — never the reviewmesh app, never web/shared (enforced by the
-// import-boundary CI check). The domain schema, roster, fan-out→collate pipeline, and CLI arrive
-// in P3.2–P3.5 under exploremesh/internal/…; this root package is the module's doc anchor.
+// import-boundary CI check). The domain schema, roster, fan-out→collate pipeline, and CLI live
+// in the packages under internal/explore/; this root package is the module's doc anchor.
 package explore

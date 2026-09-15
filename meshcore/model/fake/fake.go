@@ -50,7 +50,7 @@ const (
 	// `.env` — a path the non-overridable write denylist protects. It exists to drive the
 	// partial-refusal contract end to end: the valid finding must be applied, the protected one
 	// must be refused and recorded, and the run must not report itself as a clean success. A
-	// single-finding scenario would prove the refusal but not the thing D8-C is actually about —
+	// single-finding scenario would prove the refusal but not the thing the partial-refusal contract is actually about —
 	// that the OTHER findings survive it.
 	ProtectedPath Scenario = "protected_path"
 	ExitError     Scenario = "exit_error" // exits 1 with a diagnostic stderr (NO Go error) → Class A "adapter exited N" (mirrors a real CLI like codex-cli failing)

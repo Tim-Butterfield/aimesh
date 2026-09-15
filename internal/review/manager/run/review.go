@@ -37,9 +37,13 @@ import (
 type Manager struct {
 	Cfg         config.Config
 	Adapters    map[string]model.Adapter
-	ArtifactDir string // base for run directories (e.g. tmp/reviewmesh)
-	TempBase    string // base for isolated copies ("" = OS temp)
-	Now         func() time.Time
+	ArtifactDir string // base for run directories when ArtifactDirFor is unset
+	// ArtifactDirFor, when set, chooses the base for run directories per run from that run's workspace.
+	// A server that serves many workspaces sets it so each run's record lands beside the workspace it
+	// reviewed, never beside wherever the process started.
+	ArtifactDirFor func(workspace string) string
+	TempBase       string // base for isolated copies ("" = OS temp)
+	Now            func() time.Time
 }
 
 // Request is one review invocation.
@@ -67,12 +71,15 @@ type Request struct {
 	AdapterOverride map[review.Role]string // per-lane --set role.adapter=NAME
 	ModelOverride   map[review.Role]string // per-lane --set role.model=NAME
 	// ReviewerPanel is an AD-HOC blind primary panel composed by the invocation (CLI
-	// `--reviewer`, ACP `_meta.reviewmesh.panel`). When present it REPLACES the selected
-	// profile's panel — it never merges with it. COMPOSE-NOT-CONFIGURE: every seat must name an
-	// adapter and model the CONFIGURATION already defines, so a request can select and order
-	// configured identities but can never introduce an adapter, a binary path, or a launch
-	// argument. An unresolvable seat is a config error before any spend.
+	// `--reviewer`, an MCP or ACP call's panel). When present it REPLACES the selected profile's
+	// panel — it never merges with it. Every seat must name an adapter this process makes
+	// available; its model string is passed to that adapter verbatim. An unresolvable seat is a
+	// config error before any spend.
 	ReviewerPanel []review.SeatSpec
+	// ComposedRoles are the single-slot role seats an MCP or ACP call composed. When non-nil the
+	// run resolves against those seats and ReviewerPanel alone, never a saved profile — see
+	// config.ResolveRequest.ComposedRoles.
+	ComposedRoles map[review.Role]review.SeatSpec
 	// MaxParallel bounds how many seats invoke their model CLI AT ONCE. 0 (the default) runs every
 	// seat in parallel; the panel size is then the only bound, which is the caller's own choice.
 	//
@@ -112,7 +119,7 @@ type Request struct {
 	// say so; a review is otherwise unaffected by it.
 	WorkspaceEphemeral bool
 	// Select, when non-nil, NARROWS this run's write set to the accepted findings whose
-	// HOST-COMPUTED fingerprint it names (D8-A, design §13.3). nil applies everything the run's own
+	// HOST-COMPUTED fingerprint it names. nil applies everything the run's own
 	// adjudication authorizes; an EMPTY non-nil slice is a refusal, never "apply everything".
 	//
 	// It is meaningful only in a write mode. A `report` run writes nothing, so a selection on one
@@ -261,7 +268,7 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 	resolveReq := config.ResolveRequest{
 		Profile: req.Profile, Mode: req.Mode, Surface: req.Surface, Available: available,
 		AdapterOverride: req.AdapterOverride, ModelOverride: req.ModelOverride,
-		ReviewerPanel: req.ReviewerPanel,
+		ReviewerPanel: req.ReviewerPanel, ComposedRoles: req.ComposedRoles,
 	}
 	plan, err := m.Cfg.Resolve(resolveReq)
 	if err != nil {
@@ -355,10 +362,10 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 	// disposable place — so the state directory is created for it, before the run, and the whole
 	// record lands somewhere that survives a reboot.
 	//
-	// It is a no-op for every other tree, and a failure is not fatal: the run proceeds with the
-	// artifacts it would have had before this existed.
-	artifactDir := m.ArtifactDir
-	if durable, ok := EnsureDurableRunDir(ctx, req.Workspace, string(plan.Mode), m.ArtifactDir); ok {
+	// It is a no-op for every other tree, and a failure is not fatal: the run proceeds with its
+	// temp-directory artifacts.
+	artifactDir := m.artifactDirFor(req.Workspace)
+	if durable, ok := EnsureDurableRunDir(ctx, req.Workspace, string(plan.Mode), artifactDir); ok {
 		artifactDir = durable
 	}
 	// req.RunID names the directory when a surface supplied one (MCP; see Request.RunID); empty
@@ -742,7 +749,7 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 			return adjudication.Result{}, 0, e
 		}
 		_ = run.Event(m.now(), "info", "cross_check_started", "cross-check lane", map[string]any{"adapter": ccLane.Adapter, "model": ccLane.Model})
-		// CROSS-CHECK INPUT WITH A PANEL (design §Reviewer panel): the informed lane sees the
+		// CROSS-CHECK INPUT WITH A PANEL: the informed lane sees the
 		// POST-ADJUDICATION decision set — one deduped, host-decided view — NOT N raw seat
 		// streams. Feeding it every seat's raw output would scale its prompt with the panel and
 		// re-expose the raw streams the seats were kept blind to. The set is bounded, and a
@@ -1813,7 +1820,7 @@ func (m *Manager) handleMode(ctx context.Context, run *audit.Run, req Request, p
 		Accept: func(d review.Decision) bool {
 			return adjudication.Actionable(d) && d.ApplyRefusalReason == ""
 		},
-		// THE NARROWING SELECTION (D8-A). It narrows EVERY cycle of a converging apply — a filter
+		// THE NARROWING SELECTION. It narrows EVERY cycle of a converging apply — a filter
 		// that stopped applying after cycle 1 would write findings the caller excluded — but only
 		// the first cycle is MEASURED against the caller's list (SelectPrimary), because by cycle 2
 		// a selected finding may be absent precisely because cycle 1 applied it.

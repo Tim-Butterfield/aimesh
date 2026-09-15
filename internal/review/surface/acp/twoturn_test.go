@@ -7,7 +7,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// THE ACP TWO-TURN WRITE CONTRACT (migration design §9.4, decision D5).
+// THE ACP TWO-TURN WRITE CONTRACT.
 //
 // ACP has no lookup surface — not one of its methods accepts a run identifier or returns anything
 // about a prior run, and `session/resume` deliberately replays nothing. So a write whose response is
@@ -54,7 +54,7 @@ func TestACPWrite_ApplyWithARunHandleProceeds(t *testing.T) {
 	}
 }
 
-// TestACPWrite_SelectIsHonouredOnAWriteTurn — D8-A. `select` is a REAL filter here, so acceptance is
+// TestACPWrite_SelectIsHonouredOnAWriteTurn — `select` is a REAL filter here, so acceptance is
 // what must be pinned: a server that declared it and dropped it would silently widen a host's write
 // set, which is why the field can never be merely declared.
 func TestACPWrite_SelectIsHonouredOnAWriteTurn(t *testing.T) {

@@ -13,9 +13,9 @@ import (
 // The problem it answers: this transport is a SESSION server. `initialize` negotiates a version once,
 // `notifications/initialized` opens the session, and everything downstream reads session-scoped state
 // (the negotiated version, the client's log level, whether it declared roots). The 2026-07-28 revision
-// DELETES the session — every request carries its own protocol context in `params._meta`. The fix is
-// not a second server: it is to move the context from the session to the request, construct one
-// RequestEnv per request, and then have two ways of FILLING it — from session state (legacy) or from
+// DELETES the session — every request carries its own protocol context in `params._meta`. The design is
+// not a second server: it moves the context from the session to the request, constructs one
+// RequestEnv per request, and has two ways of FILLING it — from session state (legacy) or from
 // `params._meta` plus per-call narrowing arguments (modern). Everything downstream stays single-path.
 //
 // So this envelope is the POST-SUNSET architecture, arrived at early: at legacy removal the Era field,
@@ -24,7 +24,7 @@ import (
 
 // Era is which protocol revision family a request belongs to.
 //
-// SUNSET-PATH (MCP26-SUNSET; migration design §16.2). The Era field exists only for the
+// SUNSET-PATH (MCP26-SUNSET). The Era field exists only for the
 // transition window: once the legacy era is removed there is one era, and the field goes with it.
 type Era string
 
@@ -42,18 +42,14 @@ const (
 type RootSource string
 
 const (
-	// RootsUnknown is the zero value: provenance has not been plumbed through to this request yet.
-	// It is deliberately distinct from RootsExplicit — claiming "a human named these roots" when the
-	// question has not been asked would be exactly the silent-degradation shape this repo refuses.
-	// A request whose roots have been resolved by ResolveTrustedRoots carries a real answer instead.
+	// RootsUnknown is the zero value: the application supplied no provenance for this request. It is
+	// deliberately distinct from RootsExplicit — claiming "these roots were named" when the question
+	// has not been asked would be exactly the silent-degradation shape this repo refuses.
 	RootsUnknown RootSource = ""
 	// RootsNone means there is no trusted root at all, so every filesystem path is refused.
 	RootsNone RootSource = "none"
-	// RootsExplicit means a human named the roots (`--root`).
+	// RootsExplicit means the application named the roots explicitly.
 	RootsExplicit RootSource = "explicit"
-	// RootsInferredCwd means the roots were inferred from the launch directory rather than named.
-	// Under the modern era that is not a trusted root unless the operator waived it explicitly.
-	RootsInferredCwd RootSource = "inferred_cwd"
 )
 
 // TrustContext is the confinement an application computes for ONE request: the effective trusted

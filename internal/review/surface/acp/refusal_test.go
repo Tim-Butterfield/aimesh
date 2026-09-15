@@ -7,23 +7,15 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 )
 
-// The ACP half of the partial-refusal contract (design §13.4.3).
+// The ACP partial-refusal contract.
 //
-// `refusal` is an official ACP StopReason and this surface has always documented it as legal;
-// what it did not do was ever emit one — only `end_turn` and `cancelled`. A partially-refused
-// apply is exactly the case it is for.
+// A partially-refused apply answers with the official ACP StopReason `refusal`. Not `end_turn`: that
+// is the word for a turn that ended normally, and a host keying on stopReason alone would read it as
+// clean. Not a `-32000` halt: a halt is an ERROR response, and telling a caller the turn failed over a
+// write that committed would contradict the receipt.
 //
-// Why not `end_turn`: it is the word for a turn that ended normally, and a host keying on
-// stopReason alone would read it as clean. Why not a `-32000` halt: a halt is an ERROR response,
-// and telling a caller the turn failed over a write that committed is the worst of both — the
-// receipt exists and the caller has been told it does not.
-//
-// AGAINST THE OLD CODE BOTH TESTS FAIL: the surface emitted `end_turn`, and `_meta.reviewmesh`
-// carried no `outcome`, `applied`, `refused` or `refusals`.
-//
-// The turns below are FROM-RUN writes, because that is what an ACP apply turn now is: it applies the
-// decision set the `fromRun` run recorded rather than re-adjudicating. The rendering contract these
-// tests pin is unchanged by that; what changed is which half of the Manager produces the outcome.
+// The turns below are FROM-RUN writes, because that is what an ACP apply turn is: it applies the
+// decision set the `fromRun` run recorded rather than re-adjudicating.
 
 // refusedRemediation is a completed apply that wrote seven findings and refused one.
 func refusedRemediation() run.RemediateOutcome {

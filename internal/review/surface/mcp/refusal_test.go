@@ -9,16 +9,13 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// The MCP half of the partial-refusal contract (design §13.4.3).
+// The MCP half of the partial-refusal contract.
 //
 // A remediation that committed and refused one finding for a protected path must NOT read as a
 // clean success. `state` deliberately stays "complete" — the write did complete, and adding a
 // fifth value to one of the three run-status vocabularies already in this tree would make every
 // consumer's exhaustive switch wrong. The coarse signal goes where a consumer reads it without
 // parsing anything: `isError`.
-//
-// AGAINST THE OLD CODE EVERY TEST HERE FAILS: `isError` was false, and the payload carried no
-// `outcome`, no `counts` and no `refusals` at all.
 
 // oneRefusal is the protected-path refusal the fake remediation reports.
 func oneRefusal() []review.ApplyRefusal {
@@ -31,10 +28,10 @@ func oneRefusal() []review.ApplyRefusal {
 func TestRemediate_PartialRefusal_IsErrorAndCarriesTheSplit(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{refusals: oneRefusal()}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
-	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true})
+	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	if res.rpc != nil {
 		t.Fatalf("a domain outcome must not be a protocol error: %+v", res.rpc)
 	}
@@ -110,10 +107,10 @@ func TestRemediate_PartialRefusal_IsErrorAndCarriesTheSplit(t *testing.T) {
 func TestRunStatus_PartialRefusal_CannotReadAsClean(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{refusals: oneRefusal()}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
-	rem := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true})
+	rem := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	remID, _ := rem.structured["runId"].(string)
 	if remID == "" {
 		t.Fatalf("the remediation must return a runId: %+v", rem.structured)
@@ -143,9 +140,9 @@ func TestRunStatus_PartialRefusal_CannotReadAsClean(t *testing.T) {
 func TestRunResult_PartialRefusal_ReplaysIsError(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{refusals: oneRefusal()}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
-	rem := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true})
+	rem := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	remID, _ := rem.structured["runId"].(string)
 
 	got := c.tool(t, "review_run_result", map[string]any{"runId": remID})
@@ -161,10 +158,10 @@ func TestRunResult_PartialRefusal_ReplaysIsError(t *testing.T) {
 // `isError` has to mean something, which requires the clean case to stay clean.
 func TestRemediate_NoRefusals_StaysClean(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
-	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true})
+	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	if res.isError {
 		t.Fatalf("a clean remediation must not ride isError: %+v", res.structured)
 	}

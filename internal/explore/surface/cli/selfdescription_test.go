@@ -130,7 +130,7 @@ func TestUsage_StatesTheFailClosedAdapterPosture(t *testing.T) {
 	if !strings.Contains(s, "never silently substituted") {
 		t.Error("usage should state that an unrecognized adapter is refused, never silently substituted")
 	}
-	// The workbench is gone; the help must not advertise a command that no longer exists.
+	// The help must not advertise a web workbench command, which does not exist.
 	if strings.Contains(s, "  ui ") || strings.Contains(s, "workbench") {
 		t.Error("usage still advertises the removed web workbench")
 	}
@@ -167,12 +167,12 @@ func TestList_ResolvesThroughProfiles(t *testing.T) {
 	}
 }
 
-// `ui` is gone (the web workbench was removed whole), so it must be refused like any other unknown
-// command rather than lingering as an accepted no-op.
-func TestUI_IsNoLongerACommand(t *testing.T) {
+// `ui` is not a command, so it must be refused like any other unknown command rather than accepted as
+// a no-op.
+func TestUI_IsNotACommand(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := Run([]string{"ui"}, &out, &errb); code == 0 {
-		t.Fatal("`ui` must be refused — the workbench was removed")
+		t.Fatal("`ui` must be refused — there is no web workbench")
 	}
 	if !strings.Contains(errb.String(), "unknown command") {
 		t.Errorf("the refusal should read as an unknown command:\n%s", errb.String())

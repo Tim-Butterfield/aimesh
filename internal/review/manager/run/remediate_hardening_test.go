@@ -179,9 +179,9 @@ func TestRemediate_ModelCrossFileProposalNeverReachesAnotherFile(t *testing.T) {
 }
 
 // TestRemediate_UnpinnedTargetIsRefused is the limb that is reachable with NO model at all: a
-// caller whose Shown set is wider than its base-hash set. Before this rule, such a finding was
-// applied and committed having never been hash-verified — the staleness check simply had nothing
-// to say about a file it was never given.
+// caller whose Shown set is wider than its base-hash set. Without this rule such a finding would be
+// applied and committed having never been hash-verified — the staleness check has nothing to say
+// about a file it was never given.
 func TestRemediate_UnpinnedTargetIsRefused(t *testing.T) {
 	m, ws := remediateFixture(t, true)
 	before, _ := os.ReadFile(filepath.Join(ws, "sample.go"))

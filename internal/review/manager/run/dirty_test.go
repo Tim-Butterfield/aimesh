@@ -101,13 +101,12 @@ func TestProbeWorkspaceDirtiness_AnswersOnlyWhenItCan(t *testing.T) {
 
 // TestApply_ADirtyTreeIsRecordedNotRefused.
 //
-// This used to be a refusal. It is not any more: working on a tree with uncommitted changes is the
-// NORMAL state of the work, not an anomaly, and a gate that fires on the normal case is a flag every
-// single invocation has to carry — which is friction that stops people using the tool at all.
+// Working on a tree with uncommitted changes is the NORMAL state of the work, not an anomaly, and a
+// gate that fires on the normal case is a flag every single invocation has to carry — which is
+// friction that stops people using the tool at all.
 //
-// The harm the refusal cited was real but overstated. Our edits and the user's do end up in the same
-// tree, so the BLUNT undo (`git checkout -- .`) takes both. The precise undo has always existed and
-// is produced on this very path: `changes.patch` is a complete reverse-appliable delta of exactly
+// Our edits and the user's do end up in the same tree, so the BLUNT undo (`git checkout -- .`) takes
+// both. The precise undo is produced on this very path: `changes.patch` is a complete reverse-appliable delta of exactly
 // what this run wrote. So the fact is worth RECORDING and not worth refusing over.
 func TestApply_ADirtyTreeIsRecordedNotRefused(t *testing.T) {
 	m, ws := remediateFixture(t, true)
@@ -168,12 +167,7 @@ func TestApply_APlainFolderIsNotRefused(t *testing.T) {
 func TestEnsureDurableRunDir_OnlyForTheTreeWithNoOtherWayBack(t *testing.T) {
 	t.Run("no VCS and no init: the state dir is created", func(t *testing.T) {
 		ws := t.TempDir()
-		// The "no init" half of the premise is judged from the process cwd (localstate.ProjectHome
-		// walks up from it), so run from the workspace itself: otherwise an `.aimesh/` at the root of
-		// THIS repository — created by any `aimesh init` or apply run made here — satisfies the lookup
-		// and the test fails for a reason that has nothing to do with the code under test.
-		t.Chdir(ws)
-		got, ok := EnsureDurableRunDir(context.Background(), ws, "apply", localstate.RunDir(reviewComponent, ""))
+		got, ok := EnsureDurableRunDir(context.Background(), ws, "apply", localstate.TempRunDir(reviewComponent))
 		if !ok {
 			t.Fatal("the tree with no other way back must get a durable run directory")
 		}
@@ -202,8 +196,27 @@ func TestEnsureDurableRunDir_OnlyForTheTreeWithNoOtherWayBack(t *testing.T) {
 
 	t.Run("a report run is left alone", func(t *testing.T) {
 		ws := t.TempDir()
-		if _, ok := EnsureDurableRunDir(context.Background(), ws, "report", localstate.RunDir(reviewComponent, "")); ok {
+		if _, ok := EnsureDurableRunDir(context.Background(), ws, "report", localstate.TempRunDir(reviewComponent)); ok {
 			t.Error("a run that writes nothing needs no undo, so it needs no state directory")
+		}
+	})
+
+	t.Run("an existing state dir in the workspace is used", func(t *testing.T) {
+		ws := t.TempDir()
+		if err := os.Mkdir(filepath.Join(ws, localstate.HomeDirName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := EnsureDurableRunDir(context.Background(), ws, "apply", localstate.TempRunDir(reviewComponent))
+		want := filepath.Join(ws, localstate.HomeDirName, reviewComponent, localstate.RunsSubdir)
+		if !ok || got != want {
+			t.Errorf("dir = %q, %v; want %q", got, ok, want)
+		}
+	})
+
+	t.Run("a configured artifact directory is never relocated", func(t *testing.T) {
+		ws := t.TempDir()
+		if _, ok := EnsureDurableRunDir(context.Background(), ws, "apply", t.TempDir()); ok {
+			t.Error("a directory an operator chose must not be overruled")
 		}
 	})
 }

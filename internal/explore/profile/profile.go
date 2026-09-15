@@ -1,4 +1,4 @@
-// Package profile is exploremesh's MULTI-profile configuration container (design §7): a named set of
+// Package profile is exploremesh's MULTI-profile configuration container: a named set of
 // exploration profiles, each an ORDERED explorer roster (preference order) + a collator + a per-profile
 // default mode, plus the name of the profile a no-flag run binds to. It is the reviewmesh-style evolution
 // of the single roster.Roster — the app-side "grammar" that meshcore never learns — and it reuses
@@ -36,7 +36,7 @@ const CurrentSchemaVersion = 1
 // migrates into): the built-in demo `default`.
 const DefaultProfileName = "default"
 
-// Profile is one named exploration profile (design §7): an ORDERED explorer roster (the slice order is
+// Profile is one named exploration profile: an ORDERED explorer roster (the slice order is
 // PREFERENCE = selection priority), a single collator, and an OPTIONAL default mode that supplies the
 // exploration mode when a run omits --mode. It reuses roster.Roster's rules via Roster().
 type Profile struct {
@@ -44,8 +44,8 @@ type Profile struct {
 	// SelectTopN selects the top-N from. It is NOT the attribution order (the Plan canonicalizes that).
 	Explorers []roster.Explorer `json:"explorers"`
 	Collator  roster.Collator   `json:"collator"`
-	// Canonicalizers names the two identities that propose the canonicalization for a canonicalizing mode
-	// (design §4). EITHER empty — the host derives them — or exactly two; roster.ValidateCanonicalizers
+	// Canonicalizers names the two identities that propose the canonicalization for a canonicalizing mode.
+	// EITHER empty — the host derives them — or exactly two; roster.ValidateCanonicalizers
 	// states why one is refused. It lives on the profile beside the collator because it is the same kind of
 	// fact: a GOVERNED identity chosen before the run, not part of the task.
 	Canonicalizers []roster.Explorer `json:"canonicalizers,omitempty"`
@@ -91,7 +91,7 @@ func (p Profile) IsConfigured() bool {
 	return len(p.Explorers) > 0 || p.Collator != (roster.Collator{})
 }
 
-// Set is the full multi-profile container persisted as profiles.yaml (design §7): the schema version, the
+// Set is the full multi-profile container persisted as profiles.yaml: the schema version, the
 // name of the default profile a no-flag run binds to, and the named profiles. Profile ORDER within the
 // map is not load-bearing (the default is named, not positional); explorer order WITHIN a profile is.
 type Set struct {

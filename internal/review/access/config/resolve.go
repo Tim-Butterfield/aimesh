@@ -38,7 +38,21 @@ type ResolveRequest struct {
 	// config mid-task. A profile's own lanes stay held to the catalog: a config file declares the
 	// vocabulary it is then read against.
 	ReviewerPanel []review.SeatSpec
+	// ComposedRoles are the single-slot role seats (author_remediator, cross_check, verifier) a
+	// CALL composed on a surface that reads no saved configuration (MCP, ACP). When non-nil the
+	// request resolves against a profile built from these seats and ReviewerPanel alone: no saved
+	// or shipped profile is consulted, author_remediator is required, a role absent here is a step
+	// the run does not take, and each seat passes its model through exactly as a composed panel
+	// seat does. It is a separate field from AdapterOverride/ModelOverride on purpose — those carry
+	// the CLI's `--set` overrides of a saved profile's lanes, which stay held to the catalog.
+	ComposedRoles map[review.Role]review.SeatSpec
 }
+
+// Reason codes for a call-composed panel that cannot be resolved.
+const (
+	ReasonCallPanelMissingHost = "call_panel_missing_author_remediator"
+	ReasonCallPanelRoleInvalid = "call_panel_role_invalid"
+)
 
 var modeRank = map[review.Mode]int{
 	review.ModeReport: 0, review.ModePatch: 1, review.ModeApply: 2,
@@ -64,17 +78,11 @@ func maxMode(a, b review.Mode) review.Mode {
 // Resolve turns config + request into a RunPlan, or a Config fault if a profile,
 // model, or adapter cannot be resolved.
 func (c Config) Resolve(req ResolveRequest) (review.RunPlan, error) {
-	profName := c.selectProfile(req.Profile, req.Available)
-	prof, ok := c.Profiles[profName]
-	// The shipped-but-hidden fake-smoke profile is an INTERNAL test harness: without the internal
-	// gate (fake.Enabled — set by tests/golden/the ACP-validation parent, never by users) it fails
-	// resolution with the SAME unknown-profile error as any other unrecognized name.
-	if ok && IsHiddenProfile(profName) && !fake.Enabled() {
-		ok = false
+	prof, _, err := c.requestProfile(req)
+	if err != nil {
+		return review.RunPlan{}, err
 	}
-	if !ok {
-		return review.RunPlan{}, fault.New(fault.Config, fmt.Sprintf("profile %q not found in config%s", profName, ProfileNotFoundGuidance(profName)))
-	}
+	composed := req.ComposedRoles != nil
 
 	plan := review.RunPlan{Surface: req.Surface, Lanes: map[review.Role]review.LaneResolution{}}
 
@@ -82,31 +90,29 @@ func (c Config) Resolve(req ResolveRequest) (review.RunPlan, error) {
 		lane := prof.Lanes[roleName]
 		role := review.Role(roleName)
 
-		// A COMPOSED PANEL REPLACES THE PROFILE'S REVIEWER LANE, so do not demand that lane
-		// resolve first. It used to: `--reviewer adapter=…,model=…` against a profile whose
-		// `lanes.reviewer` is unconfigured failed with `no adapter resolvable for role "reviewer"`
-		// — refusing to use the panel the caller had just composed because of a lane it was about
-		// to overwrite (the alias is rebuilt from seat 1 below).
-		//
-		// That fired on exactly the fresh-install path the panel flags exist to serve: the flag's
-		// own help says a panel is composed OR selected, so a user who composes one should not also
-		// need a configured profile. It was masked by alphabetical lane order — `author_remediator`
-		// failed first, so the reviewer failure only appeared once that one was satisfied.
+		// A COMPOSED PANEL REPLACES THE PROFILE'S REVIEWER LANE, so that lane is not resolved here:
+		// a caller who composed a panel needs no configured reviewer lane, and the alias below is
+		// rebuilt from seat 1.
 		if role == review.RoleReviewer && len(req.ReviewerPanel) > 0 {
 			continue
 		}
 
-		adapter := lane.Adapter
-		if ov := req.AdapterOverride[role]; ov != "" {
-			adapter = ov
+		adapter, model, effort := lane.Adapter, lane.Model, ""
+		if composed {
+			// A call-composed role seat passes its model through, like a composed panel seat.
+			effort = req.ComposedRoles[role].Effort
+		} else {
+			// A saved profile's lane (and a CLI `--set` override of it) is held to the catalog: the
+			// config declares the vocabulary it is read against, and an unknown key there is a typo
+			// worth catching.
+			if ov := req.AdapterOverride[role]; ov != "" {
+				adapter = ov
+			}
+			if ov := req.ModelOverride[role]; ov != "" {
+				model = ov
+			}
 		}
-		model := lane.Model
-		if ov := req.ModelOverride[role]; ov != "" {
-			model = ov
-		}
-		// A ROLE LANE comes from the profile, so composed is false: the config declares the
-		// vocabulary it is read against, and an unknown key there is a typo worth catching.
-		res, err := c.resolveSeat(prof, role, fmt.Sprintf("role %q", roleName), lane.Execution, adapter, model, "", req.Available, false)
+		res, err := c.resolveSeat(prof, role, fmt.Sprintf("role %q", roleName), lane.Execution, adapter, model, effort, req.Available, composed, composed)
 		if err != nil {
 			return review.RunPlan{}, err
 		}
@@ -136,19 +142,10 @@ func (c Config) Resolve(req ResolveRequest) (review.RunPlan, error) {
 	// somewhere else.
 	cap := c.SurfaceCeiling(req.Surface)
 
-	// AN UNSPECIFIED MODE IS `report`, ON EVERY SURFACE. It used to be the CEILING, which meant the
-	// CLI — whose ceiling is `apply` so that `--apply` can work at all — WROTE to the user's tree
-	// when no mode flag was given. `aimesh review run .` modified files, and nothing in the command
-	// the user typed says "write".
-	//
-	// Naming the command is consent to REVIEW; it is not consent for a model to edit your files.
-	// The other two surfaces already refused that inference, and there is no reason a CLI user's
-	// consent should be read more broadly than an ACP host's.
-	//
-	// The CEILING is deliberately unchanged. Default and ceiling were the same value here, so
-	// lowering the ceiling to make the default safe would have clamped an explicit `--apply` down
-	// to `report` and broken writing entirely. They are two different questions: the ceiling is the
-	// most this surface may EVER do, the default is what it does when not told.
+	// AN UNSPECIFIED MODE IS `report`, ON EVERY SURFACE. Naming the command is consent to REVIEW; it
+	// is not consent for a model to edit files. The default and the ceiling answer different
+	// questions: the ceiling is the most this surface may ever do, the default is what it does when
+	// not told.
 	requested := req.Mode
 	if requested == "" {
 		requested = review.ModeReport
@@ -210,9 +207,11 @@ func (c Config) nearestCatalogKey(model string) string {
 }
 
 // composed is true when the CALLER supplied this seat at the surface (`--reviewer`, an MCP `panel`)
-// rather than a profile declaring it. It changes exactly one thing: an unknown model key is passed
-// through to the adapter instead of refused.
-func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, adapter, model, effortOverride string, available map[string]bool, composed bool) (review.LaneResolution, error) {
+// rather than a profile declaring it: an unknown model key is then passed through to the adapter
+// instead of refused. verbatim is true for a request composed on a surface that reads no saved
+// configuration (MCP, ACP): the model string is passed through even when it matches a catalog key, so a
+// caller's identifier is never rewritten through the catalog.
+func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, adapter, model, effortOverride string, available map[string]bool, composed, verbatim bool) (review.LaneResolution, error) {
 	if adapter == "" {
 		adapter = firstAvailableAdapter(c, prof.AdapterPreference, available)
 	}
@@ -223,6 +222,20 @@ func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, ad
 	if a, ok := c.Adapters[adapter]; !ok || !a.IsEnabled() {
 		return review.LaneResolution{}, fault.New(fault.Config, fmt.Sprintf("adapter %q (%s) is not configured/enabled", adapter, label)).
 			WithReason("lane_adapter_unconfigured")
+	}
+	if composed && verbatim {
+		// devin-cli encodes reasoning effort in its model identifier, so a separate effort cannot be
+		// applied without rewriting the caller's identifier. It is refused rather than dropped.
+		if adapter == "devin-cli" && effortOverride != "" {
+			return review.LaneResolution{}, fault.New(fault.Config, fmt.Sprintf(
+				"%s: devin-cli encodes effort in the model identifier; pass the full identifier (including its effort) as model and omit effort", label)).
+				WithReason("lane_effort_not_separable")
+		}
+		return review.LaneResolution{
+			Role: role, Execution: execution, Adapter: adapter,
+			Model: model, ModelArg: review.ModelArg(model), Effort: effortOverride,
+			ModelPassThrough: true,
+		}, nil
 	}
 	entry, ok := c.ModelCatalog[model]
 	if !ok {
@@ -301,11 +314,14 @@ func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, ad
 // seat that does not resolve. There is no clamping and no dropping anywhere in this function:
 // the count a caller asked for is the count that runs, or the run does not start.
 func (c Config) ResolvePanel(req ResolveRequest) ([]review.LaneResolution, error) {
-	profName := c.selectProfile(req.Profile, req.Available)
-	prof, ok := c.Profiles[profName]
-	if !ok && len(req.ReviewerPanel) == 0 {
-		return nil, fault.New(fault.Config, fmt.Sprintf("profile %q not found in config%s", profName, ProfileNotFoundGuidance(profName))).
-			WithReason("profile_not_found")
+	prof, profName, perr := c.requestProfile(req)
+	if perr != nil {
+		// A composed panel needs no saved profile for its seats, so a missing one only matters when
+		// the panel comes from the profile, or when the call composed its roles and got them wrong.
+		if req.ComposedRoles != nil || len(req.ReviewerPanel) == 0 {
+			return nil, perr
+		}
+		prof = Profile{}
 	}
 
 	// The seat list, from the invocation when it composed one, else from the profile.
@@ -361,7 +377,7 @@ func (c Config) ResolvePanel(req ResolveRequest) ([]review.LaneResolution, error
 				model = ov
 			}
 		}
-		res, err := c.resolveSeat(prof, review.RoleReviewer, label, exec, adapter, model, s.effort, req.Available, s.composed)
+		res, err := c.resolveSeat(prof, review.RoleReviewer, label, exec, adapter, model, s.effort, req.Available, s.composed, req.ComposedRoles != nil)
 		if err != nil {
 			failures = append(failures, err)
 			continue
@@ -416,6 +432,47 @@ func SeatID(i int) string {
 		return string(review.RoleReviewer)
 	}
 	return fmt.Sprintf("%s-%d", review.RoleReviewer, i+1)
+}
+
+// requestProfile returns the profile a request resolves against, and its name.
+//
+// A call-composed request (ComposedRoles non-nil) gets a profile built from its own seats and no
+// name: author_remediator runs as the host lane, cross_check and verifier run only when named, and
+// nothing is taken from any saved or shipped profile. Every other request selects a saved profile.
+func (c Config) requestProfile(req ResolveRequest) (Profile, string, error) {
+	if req.ComposedRoles != nil {
+		if _, ok := req.ComposedRoles[review.RoleAuthorRemediator]; !ok {
+			return Profile{}, "", fault.New(fault.Config, "a composed panel must name author_remediator: it is the host-adjudication seat whose judgment becomes the accepted set, and it is never defaulted").
+				WithReason(ReasonCallPanelMissingHost)
+		}
+		p := Profile{Lanes: map[string]Lane{}}
+		for role, seat := range req.ComposedRoles {
+			execution := "adapter"
+			switch role {
+			case review.RoleAuthorRemediator:
+				execution = "host"
+			case review.RoleCrossCheck, review.RoleVerifier:
+			default:
+				return Profile{}, "", fault.New(fault.Config, fmt.Sprintf("a composed panel cannot name role %q as a single seat; reviewers are the panel itself, and the single seats are author_remediator, cross_check and verifier", role)).
+					WithReason(ReasonCallPanelRoleInvalid)
+			}
+			p.Lanes[string(role)] = Lane{Execution: execution, Adapter: seat.Adapter, Model: seat.Model}
+		}
+		return p, "", nil
+	}
+	name := c.selectProfile(req.Profile, req.Available)
+	prof, ok := c.Profiles[name]
+	// The shipped-but-hidden fake-smoke profile is an INTERNAL test harness: without the internal
+	// gate (fake.Enabled — set by tests/golden/the ACP-validation parent, never by users) it fails
+	// resolution with the SAME unknown-profile error as any other unrecognized name.
+	if ok && IsHiddenProfile(name) && !fake.Enabled() {
+		ok = false
+	}
+	if !ok {
+		return Profile{}, name, fault.New(fault.Config, fmt.Sprintf("profile %q not found in config%s", name, ProfileNotFoundGuidance(name))).
+			WithReason("profile_not_found")
+	}
+	return prof, name, nil
 }
 
 func (c Config) selectProfile(invocation string, available map[string]bool) string {

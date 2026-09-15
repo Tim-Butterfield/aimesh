@@ -248,7 +248,11 @@ func devinRecipe() Recipe {
 		// This caps classification: a devin lane can be self_reported or unknown, never verified.
 		Evidence: core.EvidenceSelfReport,
 		// name-bound tier slug; read-only unconfirmed → reviewer use relies on containment
-		BuildArgs:     func(c model.Call) []string { return []string{"--model", string(c.ModelArg), "-p", c.Prompt} },
+		// Print mode cannot answer the CLI's workspace-trust prompt, and every call runs in a fresh
+		// isolated copy that is never trusted, so the check is skipped for this invocation only.
+		BuildArgs: func(c model.Call) []string {
+			return []string{"--model", string(c.ModelArg), "--respect-workspace-trust", "false", "-p", c.Prompt}
+		},
 		ParseIdentity: parseDevinSelfReport,
 		ParsePayload:  selfReportEnvelopePayload, // strip the identity wrapper before schema parsing
 	}

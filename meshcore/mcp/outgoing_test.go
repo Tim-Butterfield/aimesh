@@ -17,11 +17,10 @@ import (
 // These tests cover the direction this transport could not speak at all: SERVER→CLIENT requests, and the
 // one method that needs them — `roots/list`.
 //
-// Before this existed the server could only push notifications. It accepted the client's
-// `notifications/roots/list_changed` and could do nothing with it, and the intersection rule that both
-// governs and fails closed had nothing to intersect WITH: the launch-time roots were always the effective
-// set. Everything below asserts the plumbing, not the policy; the policy (startup ∩ client, never a union)
-// is asserted at the reviewmesh surface, which is the server that takes paths.
+// Without them a server could only push notifications, and a client's
+// `notifications/roots/list_changed` would reach nothing. Everything below asserts the plumbing, not
+// the policy; the policy (client roots only narrow, never a union) is asserted at the reviewmesh
+// surface, which is the server that takes paths.
 
 // rootsClient is a driving client that ANSWERS the server's requests. The client in server_test.go
 // deliberately discards any frame whose id it did not mint, which is exactly what made a server→client

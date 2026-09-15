@@ -1,9 +1,8 @@
 package cli
 
-// `aimesh review acp --root` — the CLI half of the ACP trusted-root model. Over ACP the caller is
-// a peer process, so the consent that the CLI gets from a typed path argument has to be given
-// at LAUNCH instead. These tests pin the launch-time guards, which run BEFORE any server is
-// started or any stdin is read (nothing here blocks on a stdio loop).
+// `aimesh review acp --root` — the operator's optional ceiling on the paths ACP turns declare. These
+// tests pin the launch-time guards, which run BEFORE any server is started or any stdin is read
+// (nothing here blocks on a stdio loop).
 
 import (
 	"os"
@@ -14,8 +13,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// A bad trusted-root set FAILS THE LAUNCH with a usage exit and a message naming the remedy —
-// it never starts a server that would then refuse every request one at a time.
+// A bad --root FAILS THE LAUNCH with a usage exit and a message naming the problem — it never
+// starts a server that would then refuse every request one at a time.
 func TestACPRoots_BadRootSetFailsLaunch(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	ssh := filepath.Join(t.TempDir(), ".ssh")
@@ -27,7 +26,6 @@ func TestACPRoots_BadRootSetFailsLaunch(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no default and no root", []string{"acp", "--no-default-root"}, "--root"},
 		{"nonexistent root", []string{"acp", "--root", missing}, "cannot be used"},
 		{"protected root", []string{"acp", "--root", ssh}, "protected path"},
 	}

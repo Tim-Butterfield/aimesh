@@ -29,7 +29,7 @@ import (
 // itself: "For backward compatibility with servers implementing earlier protocol versions, which do not
 // include `resultType`, clients **MUST** treat an absent `resultType` as `\"complete\"`."
 //
-// SUNSET-PATH (MCP26-SUNSET; migration design §16.2): at legacy removal the era branch is deleted
+// SUNSET-PATH (MCP26-SUNSET): at legacy removal the era branch is deleted
 // and the modern branch is what remains — this file gets shorter, not rewritten.
 //
 // The modern branch was UNREACHABLE when this file was written — no modern version was accepted, so
@@ -178,7 +178,7 @@ func (s *Server) resultAs(env *RequestEnv, resultType string, payload any) any {
 // and NOT the second, because a client "**MAY** serve stale responses if errors occur during
 // re-fetching". Omission is the reading that keeps the stronger prohibition, so omission is what this
 // does. It is currently unreachable: this transport produces no `InputRequiredResult` and therefore
-// never receives a retried request (migration design §11.3).
+// never receives a retried request.
 func (s *Server) hintFor(env *RequestEnv) *cacheHint {
 	if env.Retry {
 		return nil

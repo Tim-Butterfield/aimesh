@@ -1,6 +1,6 @@
 package mode
 
-// This file ships the AI-COLLAB COMPOSITION as a real, registered, runnable mode (design §11). The owner's
+// This file ships the AI-COLLAB COMPOSITION as a real, registered, runnable mode. The owner's
 // ai-collab decomposes into three stages exploremesh already has:
 //
 //	1. each agent SHORTLISTS its own findings, blind        → a blind round-1 findings fan-out
@@ -22,9 +22,9 @@ package mode
 import "github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 
 func init() {
-	// ai-collab (design §11). Two FIXED rounds — blind self-shortlist, then mediated cross-review — with the
+	// ai-collab. Two FIXED rounds — blind self-shortlist, then mediated cross-review — with the
 	// ranking-grade governance policy, because the register it produces is count-bearing exactly like
-	// Challenge's and §3 requires confirmation for EVERY count-bearing mode.
+	// Challenge's and confirmation is required for EVERY count-bearing mode.
 	register(ModeSpec{
 		Name:            AICollab,
 		FormulationFree: true,

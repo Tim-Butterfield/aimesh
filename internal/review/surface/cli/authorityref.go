@@ -2,15 +2,11 @@ package cli
 
 // ADDRESSING PART OF AN AUTHORITY DOCUMENT FROM THE COMMAND LINE.
 //
-// `--authority` declares a whole document. Declaring PART of one has always been possible, but only
-// through `--authority-manifest`: a JSON file naming explicit byte offsets. That is the right wire
-// format and the wrong thing to ask a person for. Measured, the cost of it was that someone who hit
-// the embedding budget copied a section into a temp file with a provenance comment instead — which
-// works, and silently changes what the reviewers were told is authoritative.
-//
-// The budget refusal now prints the offsets (see the authority package's outline), so half of that
-// cost is gone. This closes the other half: the offsets no longer have to be carried into a JSON file
-// by hand.
+// `--authority` declares a whole document. `--authority-manifest` declares PART of one: a JSON file
+// naming explicit byte offsets. That is the right wire format and the wrong thing to ask a person for —
+// someone asked for offsets tends to copy a section into a temp file instead, which silently changes
+// what the reviewers were told is authoritative. So a section or a byte range can be named on the
+// command line directly:
 //
 //	--authority spec.md#The Relevant Part     the named top-level section
 //	--authority spec.md:1012-3033             an explicit byte range, start inclusive, end exclusive

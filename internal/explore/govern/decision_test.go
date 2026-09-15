@@ -1,6 +1,6 @@
 package govern
 
-// Unit tests for the HOST-TALLIED DECISION (design §4). The end-to-end behavior is pinned in the pipeline's
+// Unit tests for the HOST-TALLIED DECISION. The end-to-end behavior is pinned in the pipeline's
 // adjudicative tests; these pin the rules that are easiest to get quietly wrong in isolation — the criterion
 // authorization event, the freeze's completeness, and the tally's refusal to run under an unfrozen framing.
 
@@ -44,7 +44,7 @@ func testPanel(t *testing.T) Panel {
 	return p.WithOutcome(Outcome{Dispatched: 3, Eligible: 3})
 }
 
-// TestCriterion_CollatorProposedRequiresAnAuthorizationEvent pins §4's rule: a criterion the COLLATOR proposed
+// TestCriterion_CollatorProposedRequiresAnAuthorizationEvent pins the rule: a criterion the COLLATOR proposed
 // is only usable with an EXPLICIT PERSISTED authorization event (actor, timestamp, criterion version, scope).
 // A missing one is an ERROR rather than a quiet downgrade to `explorer_proposed` — downgrading would launder
 // exactly the provenance the field exists to record.
@@ -87,7 +87,7 @@ func TestCriterion_CollatorProposedRequiresAnAuthorizationEvent(t *testing.T) {
 	}
 }
 
-// TestFreezeDecision_SealsEveryInputAndReadsThePanelPolicy pins the freeze: it fixes everything §4 lists,
+// TestFreezeDecision_SealsEveryInputAndReadsThePanelPolicy pins the freeze: it fixes every decision input,
 // it takes the quorum / tie rule / missing-response policy from the panel govern.Freeze already froze (so
 // they predate the ballot by an entire fan-out), and its hash covers all of it.
 func TestFreezeDecision_SealsEveryInputAndReadsThePanelPolicy(t *testing.T) {
@@ -270,10 +270,9 @@ func TestTally_BelowQuorumWithholdsTheRankedLabel(t *testing.T) {
 // of the prompt — and the argv-passing shell recipes (ollama, devin-cli, agy-cli, cursor-cli) hand that
 // prompt to their CLI as a POSITIONAL ARGUMENT. A leading `-` is then parsed as an option.
 //
-// Measured 2026-08-30: with a `-----` header, a live shortlist run lost 3 of 5 seats — devin-cli exited 2
-// printing its usage, cursor-cli exited 1 echoing prompt text — while the three PromptOnStdin recipes
-// (codex-cli, claude-code, gemini-cli) were unaffected. One ballot was cast, quorum failed, and every
-// ranked row came back withheld: a full panel spent for no usable ranking.
+// With a `-----` header those seats fail — the CLI prints its usage or echoes prompt text — while the
+// PromptOnStdin recipes (codex-cli, claude-code, gemini-cli) are unaffected, so quorum can fail and every
+// ranked row come back withheld: a full panel spent for no usable ranking.
 //
 // This is a governance property rather than cosmetics. A header that silently disenfranchises every
 // argv adapter biases the tally toward whichever providers happen to read their prompt from stdin.

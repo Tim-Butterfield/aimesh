@@ -176,7 +176,7 @@ func TestExplorerTaskPayload_CanonicalIsByteIdenticalAndHashes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A separately-constructed identical payload must serialize byte-identically (the §6.2 invariant).
+	// A separately-constructed identical payload must serialize byte-identically (every explorer receives identical bytes).
 	q := ExplorerTaskPayload{FinalPrompt: "explore X", ExpandedSchema: expandedOK()}
 	b, err := q.Canonical()
 	if err != nil {

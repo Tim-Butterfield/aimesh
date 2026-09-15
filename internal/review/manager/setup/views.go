@@ -813,7 +813,7 @@ func normalizeModelLabel(s string) string {
 // identifier (e.g. "codex-cli-compatible") is left untouched — only "Single-adapter smoke for
 // codex-cli." → "…for Codex."
 // The key set is DERIVED from adapterDisplayNames rather than restated, so a newly shipped adapter
-// cannot be silently omitted (cursor-cli was, before this was derived). Only HYPHENATED keys
+// cannot be silently omitted. Only HYPHENATED keys
 // participate: a bare-word key (`fake`, `ollama`) is an ordinary English word in prose, and rewriting
 // every occurrence of "fake" would edit sentences rather than resolve an adapter reference.
 var descKeyRe = buildDescKeyRe()

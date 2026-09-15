@@ -5,18 +5,17 @@ import (
 )
 
 // Explore's persisted state lives in its own component directory under the SHARED `.aimesh/` state
-// root: `.aimesh/explore/`. It used to sit in an app-private `~/.exploremesh/` with its own
-// EXPLOREMESH_HOME override, from when explore was a separate application; both are gone. One state
+// root: `.aimesh/explore/`. One state
 // root with a component subdirectory per domain means one `init`, one VCS exclusion, and one home
 // override (localstate.HomeEnvVar) instead of three that had to agree.
 //
 // The UI writes here and a no---roster `explore`/`acp` run reads the SAME resolution, so the workbench
-// and a run bind to one file (design §F10).
+// and a run bind to one file.
 const (
 	// ComponentName is explore's subdirectory of the shared `.aimesh/` state root.
 	ComponentName = "explore"
 	// FileName is the roster file's name. Retained for an EXPLICIT `--roster <path>`, which is still a
-	// supported per-invocation input; it is no longer a discovered location (see profile.Discover).
+	// supported per-invocation input; it is not a discovered location (see profile.Discover).
 	FileName = "roster.yaml"
 )
 

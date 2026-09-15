@@ -95,10 +95,10 @@ func IsExcluded(rel string) bool {
 // matters under five that never do.
 //
 // The CLIENT-CONFIG family is different, and it is the reason this exists. `.claude`, `.cursor`,
-// `.codex`, `.gemini`, `.vscode`, `.idea`, `.windsurf` and `.aimesh` now hold rules, prompts and
-// hooks that ARE source — a user can reasonably point a review at a repository expecting those to be
-// judged, and before this they were dropped in silence. That is the surprise worth spending a line
-// on, and `--allow-protected-paths` is what a reader does about it.
+// `.codex`, `.gemini`, `.vscode`, `.idea`, `.windsurf` and `.aimesh` hold rules, prompts and hooks
+// that ARE source — a user can reasonably point a review at a repository expecting those to be judged,
+// so dropping them silently would be a surprise. That is worth spending a line on, and
+// `--allow-protected-paths` is what a reader does about it.
 func noteworthyExclusion(rel string) bool {
 	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
 		if part == "" || part == "." || part == ".." {
@@ -197,11 +197,11 @@ func SafeRel(rel string) bool { return safeRel(rel) }
 // CONTENT, so choosing a DESCENDANT of one as the workspace root must be refused rather
 // than silently stripping the protection.
 //
-// This is the fix for the basename-only hole: `IsExcluded` and `excludedTarget` judge
+// This guards the basename-only hole: `IsExcluded` and `excludedTarget` judge
 // components RELATIVE to the root, so a root of `/trusted/.vscode` makes `mcp.json` an
 // ordinary relative file — and `.vscode/mcp.json` routinely carries MCP server env vars
 // (API keys). The `.env`/`.ssh` families are already refused because they are read-DENIED
-// (see scope.DeniedRead), but this family is read-ALLOWED and was therefore reachable this
+// (see scope.DeniedRead), but this family is read-ALLOWED and would otherwise be reachable this
 // way. `docs/security.md` promises these are "never copied or accepted as a target"; that
 // promise is only true if the ANCESTORS of the root are judged too.
 //

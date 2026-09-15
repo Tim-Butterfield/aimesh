@@ -24,7 +24,7 @@
     },
     "refusals": {
       "type": "array",
-      "description": "Findings the write path declined because their target is a PROTECTED PATH (the non-overridable write denylist). Present on a patch/apply run, empty when nothing was refused — \"nothing was refused\" is a checkable statement and an absent key is not. Nothing was written to any of these paths, and every other accepted finding was applied normally: one out-of-bounds target no longer discards the run. Re-running refuses them identically; this is not a retryable failure.",
+      "description": "Findings the write path declined because their target is a PROTECTED PATH (the non-overridable write denylist). Present on a patch/apply run, empty when nothing was refused — \"nothing was refused\" is a checkable statement and an absent key is not. Nothing was written to any of these paths, and every other accepted finding was applied normally: one out-of-bounds target does not discard the run. Re-running refuses them identically; this is not a retryable failure.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -349,6 +349,11 @@
               "effort": { "type": "string" }
             }
           }
+        },
+        "skippedSteps": {
+          "type": "array",
+          "description": "The optional steps (cross_check, verifier) this run will not take because no lane is assigned to them. Absent when every optional step runs.",
+          "items": {"type": "string", "enum": ["cross_check", "verifier"]}
         },
         "lanes": {
           "type": ["array", "null"],

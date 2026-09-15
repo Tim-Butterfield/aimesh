@@ -40,6 +40,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/acp"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/version"
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
+	"github.com/Tim-Butterfield/aimesh/meshcore/pathexpand"
 )
 
 // Run dispatches a subcommand and returns a process exit code.
@@ -116,9 +118,8 @@ usage:
   exploremesh export --sqlite <out.db> --run <run-dir> [--verify] [--force] [--json]
   exploremesh list [--json]
   exploremesh doctor [--profile <name> | --roster <path>] [--probe] [--probe-deep] [--json]
-  exploremesh acp [--framing newline|content-length] [--turn-timeout <dur>] [--roster <path>]
-  exploremesh mcp [--wait-seconds <n>] [--turn-timeout <dur>]
-                  [--no-capture] [--roster <path>]
+  exploremesh acp [--adapter <name>[=<path>] ...] [--framing newline|content-length] [--turn-timeout <dur>]
+  exploremesh mcp [--adapter <name>[=<path>] ...] [--wait-seconds <n>] [--turn-timeout <dur>] [--no-capture]
   exploremesh setup --adapter <name> --path <p>          |  setup --remove-adapter <name>
   exploremesh setup --acp detect --path <p> [--acp-arg <a> ...]
   exploremesh setup --acp add --path <p> [--name <k>] [--title <t>] [--acp-arg <a> ...]
@@ -184,15 +185,17 @@ commands:
             (as in reviewmesh) — save the panel you want as "default"; there is no set-default
   acp       run as a local ACP (Agent Client Protocol) agent over stdio so another tool can drive one
             exploration; the task PURPOSE comes from the prompt and the CRITERIA from _meta.exploremesh,
-            which may also SELECT the panel (profile: <name>, count: <n>|"all"), COMPOSE an ad-hoc one
-            (panel: {explorers[], collator}) from the configured adapters, and capture the run (dumpRun)
+            which also COMPOSES the panel (panel: {explorers[], collator}) from the adapters named at
+            launch (--adapter or AIMESH_ADAPTERS) and may capture the run (dumpRun). It reads no saved
+            configuration
   mcp       run as a local MCP (Model Context Protocol) server over stdio so an MCP agent can drive
             explorations. Tools: explore / explore_challenge / explore_compare / explore_forecast (each
             SPENDS: it launches the configured model CLIs), plus read-only list / doctor / run_status /
             run_result. Calls are JOB-SHAPED — a run that outlives --wait-seconds is handed back as
             {runId, state:"running"} and fetched with run_result. Concurrency within one run is set per call with maxParallel.
-            Every run is captured to a run directory unless --no-capture. A call SELECTS
-            or COMPOSES from the configured adapters; it can never change any configuration
+            Every run is captured to a run directory unless --no-capture. Each call COMPOSES its panel
+            from the adapters named at launch (--adapter or AIMESH_ADAPTERS); it reads no saved
+            configuration and can never change any
   init      create a local .aimesh/ state directory (adapter locations, run artifacts), VCS-excluded
 
 modes:
@@ -277,7 +280,7 @@ var errProfileUnconfigured = fault.New(fault.Config, "profile is unconfigured")
 // resolveRun resolves the run plan by the precedence --roster (a raw single roster file) > --profile (a
 // named profile from the profiles file) > the default profile, then applies --count (top-N by preference).
 // count is the raw flag value: "" or "all" selects every explorer, an integer selects the top-N (out of
-// range / <2 is a clear error — never clamped, §7). --roster and --profile are mutually exclusive (the
+// range / <2 is a clear error — never clamped). --roster and --profile are mutually exclusive (the
 // caller enforces this before calling).
 func resolveRun(rosterPath, profileName, count string) (resolvedRun, error) {
 	src, mode, label, err := resolveSource(rosterPath, profileName)
@@ -347,7 +350,7 @@ func resolveSource(rosterPath, profileName string) (r roster.Roster, defaultMode
 // printSelected states the panel a run will ACTUALLY execute, before any spend: its source (profile or
 // roster file), the selected explorers in attribution order, and the collator. When --count selected a
 // subset it also says how many configured explorers were left out — explorer order is SELECTION priority,
-// so reordering the full list can change WHICH explorers a subset selects (design §7) and a run must never
+// so reordering the full list can change WHICH explorers a subset selects and a run must never
 // leave that implicit. It writes to the diagnostic stream so it never contaminates --json stdout.
 func printSelected(w io.Writer, run resolvedRun) {
 	fmt.Fprintf(w, "panel: %d of %d explorer(s) from %s\n", run.selected, run.full, run.sourceLabel)
@@ -374,42 +377,10 @@ func printSelected(w io.Writer, run resolvedRun) {
 	}
 }
 
-// loadPlan resolves the executable plan for a surface that takes only an optional --roster (doctor, acp):
-// an explicit raw roster file, else the DEFAULT profile (profiles.yaml → a migrated legacy roster.yaml →
-// the built-in unconfigured default), with every explorer selected. It is profile-aware, so those
-// surfaces bind to the SAME config a no-flag `explore` does (§F10).
-func loadPlan(rosterPath string) (roster.Plan, error) {
-	run, err := resolveRun(rosterPath, "", "")
-	if err != nil {
-		return roster.Plan{}, err
-	}
-	return run.plan, nil
-}
-
-// unionPlan folds every profile's explorers + collator into base, producing a synthetic plan used ONLY to
-// build an adapter registry that covers every profile a surface can select at run time (the ACP agent).
-// The registry is keyed by adapter NAME, so a union changes nothing about how registry.Build resolves or
-// fails closed — it only widens the set of names checked. The result is NEVER executed as a panel.
-func unionPlan(base roster.Plan, set profile.Set) roster.Plan {
-	out := roster.Plan{Explorers: append(roster.AttributionOrdered(nil), base.Explorers...), Collator: base.Collator}
-	for _, name := range set.Names() {
-		p := set.Profiles[name]
-		out.Explorers = append(out.Explorers, p.Explorers...)
-		// A collator's adapter must resolve too; Build resolves by name, so carrying it as an explorer
-		// entry registers the same adapter (the synthetic plan is never run).
-		out.Explorers = append(out.Explorers, roster.Explorer{Adapter: p.Collator.Adapter, Model: p.Collator.Model, Effort: p.Collator.Effort})
-		// Same for a profile's CANONICALIZER adapters: a call may select that profile, so its canonicalizer
-		// adapters must be resolvable at startup or the run halts at pre-flight over a name the server could
-		// have bound.
-		out.Explorers = append(out.Explorers, p.Canonicalizers...)
-	}
-	return out
-}
-
 // namesPlan builds a SYNTHETIC plan whose only purpose is to make registry.Build resolve a set of adapter
 // NAMES (the registry is keyed by name; models are irrelevant to resolution). It is never executed as a
-// panel — it is how a surface that accepts an ad-hoc composition binds the full configured adapter set at
-// startup, so the composition can be checked against it without re-deriving adapter resolution rules.
+// panel — it is how an agent surface resolves the adapters it was launched with, so a composed panel can
+// be checked against them without re-deriving adapter resolution rules.
 func namesPlan(names []string) roster.Plan {
 	out := roster.Plan{}
 	for _, n := range names {
@@ -427,7 +398,7 @@ func runExplore(args []string, stdout, stderr io.Writer) int {
 	modeFlag := fs.String("mode", "", "exploration mode; unknown names are rejected. default: the profile's defaultMode, else map. known modes: "+strings.Join(mode.Names(), ", "))
 	priorContext := fs.String("prior-context", "", "optional prior context (e.g. a prior exploration's result)")
 	artifactPath := fs.String("artifact", "", "path to the ARTIFACT UNDER REVIEW (or - for stdin) — required by --mode challenge, ignored by modes that do not review one")
-	// The FIXED-SPACE declarations (design §3 Compare + Forecast rows): the option set / criteria /
+	// The FIXED-SPACE declarations: the option set / criteria /
 	// estimation target the user fixes BEFORE any explorer speaks. They are what make those modes need no
 	// canonicalizer, so they are required by those modes and ignored by every other.
 	optionSet := fs.String("options", "", "comma-separated DECLARED OPTION SET — required by --mode compare, which evaluates exactly these options")
@@ -472,7 +443,7 @@ func runExplore(args []string, stdout, stderr io.Writer) int {
 			*purpose = joined
 		}
 	}
-	// Ad-hoc by-identifier run (design §8): >=2 --explorer + a --collator build a one-off roster, bypassing
+	// Ad-hoc by-identifier run: >=2 --explorer + a --collator build a one-off roster, bypassing
 	// --roster/--profile (all mutually exclusive). --roster and --profile are also mutually exclusive.
 	adHoc := len(explorerSpecs) > 0 || strings.TrimSpace(*collatorSpec) != ""
 	if adHoc && (*rosterPath != "" || *profileName != "") {
@@ -517,7 +488,7 @@ func runExplore(args []string, stdout, stderr io.Writer) int {
 			return codeOf(err)
 		}
 	}
-	// The explicit CANONICALIZER identities (design §4), resolved BEFORE any spend. An explicit
+	// The explicit CANONICALIZER identities, resolved BEFORE any spend. An explicit
 	// --canonicalizer pair REPLACES whatever the resolved profile carries — same precedence as every other
 	// flag over its profile value — and a malformed pair (one entry, two identical identities) is a usage
 	// error here rather than a halt after a panel has been paid for.
@@ -544,7 +515,7 @@ func runExplore(args []string, stdout, stderr io.Writer) int {
 			return int(fault.Usage)
 		}
 	}
-	// The ARTIFACT UNDER REVIEW (design §3 Challenge row): read from a file, or from stdin for `-`, BEFORE any
+	// The ARTIFACT UNDER REVIEW: read from a file, or from stdin for `-`, BEFORE any
 	// spend. Read failures and an empty artifact are usage errors here rather than a halt mid-run.
 	artifact, aerr := readArtifact(*artifactPath, os.Stdin)
 	if aerr != nil {
@@ -593,7 +564,7 @@ func runExplore(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Print the SELECTED panel (attribution order) + warn when a --count subset drops explorers from the
-	// full profile — a reorder of the full list can change WHICH explorers a subset selects (design §7).
+	// full profile — a reorder of the full list can change WHICH explorers a subset selects.
 	printSelected(stderr, run)
 	paths, acpInsts, err := resolveAdapters()
 	if err != nil {
@@ -644,7 +615,7 @@ func runExplore(args []string, stdout, stderr io.Writer) int {
 			if rerr != nil {
 				status, faultMsg = "halted", rerr.Error()
 			}
-			// The DECLARED TASK travels with the dump: §9's derived export is built from the run directory
+			// The DECLARED TASK travels with the dump: the derived export is built from the run directory
 			// alone, and a fixed-space result cannot be reproduced without the space it was computed over.
 			if derr := capture.Dump(capture.Input{Run: run, Plan: plan, Result: res, Status: status, Fault: faultMsg, Task: raw}); derr != nil {
 				fmt.Fprintf(stderr, "aimesh explore: dump-run failed: %v\n", derr)
@@ -656,8 +627,8 @@ func runExplore(args []string, stdout, stderr io.Writer) int {
 
 	if rerr != nil {
 		// A halt still carries partial state; report it clearly. The exit code is the HALT'S OWN CLASS
-		// (the pipeline builds its halts as *fault.Fault values), so a halted `explore` is now
-		// distinguishable by class instead of collapsing to the old undifferentiated 1.
+		// (the pipeline builds its halts as *fault.Fault values), so a halted `explore` is
+		// distinguishable by class rather than a generic 1.
 		fmt.Fprintf(stderr, "aimesh explore: exploration halted: %v\n", rerr)
 		printPartial(stderr, res)
 		return codeOf(rerr)
@@ -1109,76 +1080,38 @@ func probeProjection(checks []mdoctor.Check, recorded map[string]model.ProbeResu
 	return out
 }
 
-// runACP runs exploremesh as a local ACP agent over stdio: it resolves the roster + adapters exactly as
-// `explore`/`doctor` do (explicit --roster, else the discovered/user roster, else the built-in unconfigured default),
-// builds the registry, and serves the ACP protocol until `exit`/EOF. The exploration TASK arrives per
-// `session/prompt` (purpose from the prompt, criteria from `_meta.exploremesh`); the CONFIG is the bound
-// profile set — a prompt may only SELECT within it (`_meta.exploremesh.profile`/`count`), never supply a
-// new roster. A durable session store under <AIMESH_HOME>/.exploremesh/acp-sessions enables session
-// resume across a restart (best-effort — resume is simply unsupported if the home cannot be resolved).
+// runACP runs exploremesh as a local ACP agent over stdio until `exit` or EOF. Its adapters come from the
+// launch arguments alone; each `session/prompt` carries the task (purpose from the prompt, criteria and
+// panel from `_meta.exploremesh`). A session store under <AIMESH_HOME>/.aimesh/explore/acp-sessions enables
+// resume across a restart when the home can be resolved.
 func runACP(args []string, out, errw io.Writer) int {
 	fs := flag.NewFlagSet("acp", flag.ContinueOnError)
 	fs.SetOutput(errw)
 	cliflags.Style(fs, "aimesh explore acp")
 	framing := fs.String("framing", acp.FramingNewline, "wire framing: newline | content-length")
 	turnTimeout := fs.Duration("turn-timeout", 10*time.Minute, "total wall-clock budget for one exploration turn")
-	rosterPath := fs.String("roster", "", "optional roster file (YAML/JSON); default is the discovered profile set (profiles.yaml, a migrated legacy roster.yaml, else the unconfigured default)")
+	// The adapters come from the launch arguments alone: this agent reads no aimesh configuration, so it
+	// works on a fresh install, and every prompt composes its own panel from them.
+	adapters := launchflags.RegisterAdapters(fs)
 	if err := fs.Parse(args); err != nil {
 		return int(fault.Usage)
 	}
-	// The DEFAULT panel (an explicit raw --roster, else the default profile) — what a prompt naming
-	// neither a profile nor a count runs.
-	plan, err := loadPlan(*rosterPath)
+	set, err := adapters.Resolve(pathexpand.OS())
 	if err != nil {
 		fmt.Fprintf(errw, "aimesh explore acp: %v\n", err)
 		return codeOf(err)
 	}
-	// Bind the PROFILE SET a `session/prompt` may select from (design §7). An explicit --roster is a
-	// single ANONYMOUS roster: no named profiles, so `_meta.exploremesh.profile` naming anything is
-	// invalid-params. Otherwise it is the same set a no-flag `explore` binds to.
-	var set profile.Set
-	if *rosterPath == "" {
-		cwd, cerr := os.Getwd()
-		if cerr != nil {
-			fmt.Fprintf(errw, "aimesh explore acp: %v\n", cerr)
-			return int(fault.Internal)
-		}
-		if set, err = profile.Resolve(cwd); err != nil {
-			fmt.Fprintf(errw, "aimesh explore acp: %v\n", err)
-			return codeOf(err)
-		}
+	if set.Empty() {
+		fmt.Fprintln(errw, noAdapterNotice("acp"))
 	}
-	paths, acpInsts, err := resolveAdapters()
+	reg, err := launchRegistry(set)
 	if err != nil {
 		fmt.Fprintf(errw, "aimesh explore acp: %v\n", err)
 		return codeOf(err)
-	}
-	// Build the registry over EVERY bound profile's adapters, not just the default panel's: any profile
-	// is selectable per prompt, so an unconfigured adapter in one of them must fail closed BEFORE serving
-	// rather than mid-turn. With one profile (or an explicit --roster) this is exactly the default plan.
-	reg, unknown := registry.Build(unionPlan(plan, set), paths, acpInsts, 0)
-	if len(unknown) > 0 {
-		// Fail closed BEFORE serving: an unrecognized adapter is a config error, not a silent substitute.
-		fmt.Fprintf(errw, "aimesh explore acp: unknown adapter(s) in the roster: %s — configure them (setup) or fix the roster\n", strings.Join(unknown, ", "))
-		return int(fault.Config)
-	}
-	// WIDEN the registry to every CONFIGURED adapter (not just the ones a bound profile happens to name),
-	// because a prompt may now COMPOSE an ad-hoc panel (`_meta.exploremesh.panel`). The widening is
-	// name-resolution only — no process starts and nothing is spent — and it is what makes
-	// compose-not-configure a real boundary rather than an accident of which profiles exist: the prompt
-	// may select any adapter the OPERATOR configured, and nothing outside that set.
-	adapterNames := configuredAdapterNames(acpInsts)
-	wide, _ := registry.Build(namesPlan(adapterNames), paths, acpInsts, 0)
-	for name, a := range wide {
-		if _, have := reg[name]; !have {
-			reg[name] = a
-		}
 	}
 	srv := &acp.Server{
 		Explorer:    acp.NewPipelineExplorer(reg),
-		Plan:        plan,
-		Profiles:    set,
-		Adapters:    adapterNames,
+		Adapters:    set,
 		Framing:     *framing,
 		TurnTimeout: *turnTimeout,
 	}
@@ -1228,8 +1161,8 @@ func runInit(args []string, mode localstate.InitMode, stdout, stderr io.Writer) 
 // and small enough that `--artifact -` on the wrong stream cannot swallow a pipe forever.
 const maxArtifactBytes = 1 << 20 // 1 MiB
 
-// readArtifact loads the ARTIFACT UNDER REVIEW from a path, or from `stdin` when the path is `-` (design §3
-// Challenge row). An empty flag yields an empty artifact — whether that is acceptable is the MODE's decision
+// readArtifact loads the ARTIFACT UNDER REVIEW from a path, or from `stdin` when the path is `-`.
+// An empty flag yields an empty artifact — whether that is acceptable is the MODE's decision
 // (ModeSpec.ValidateTask), not this reader's. A supplied-but-empty artifact IS an error here: the user asked
 // for a review of something and handed over nothing, which is a mistake worth naming rather than running.
 func readArtifact(path string, stdin io.Reader) (string, error) {
@@ -1396,7 +1329,7 @@ func printGovernanceHeader(w io.Writer, res pipeline.Result) {
 			res.Canonicalization.PartitionRevisionHash, res.Canonicalization.Ledger.Len())
 	} else if isFixedSpace(res) {
 		// A FIXED-SPACE result has no partition, and the header says so rather than omitting the line: an
-		// absent partition row and an unstated one read the same way to someone scanning output (design §9).
+		// absent partition row and an unstated one read the same way to someone scanning output.
 		fmt.Fprintln(w, "  partition revision: NONE — fixed space: the space was declared before any explorer spoke, so no canonicalizer ran and no entity resolution was performed")
 	}
 	if res.Governance != nil {
@@ -1425,7 +1358,7 @@ func isFixedSpace(res pipeline.Result) bool {
 }
 
 // printNarrative prints the quarantined model prose, LABELED as such so nothing in it can be read as a
-// governance value (design §0 F-C).
+// governance value.
 func printNarrative(w io.Writer, narrative []govern.Narrative) {
 	if len(narrative) == 0 {
 		return
@@ -1446,7 +1379,7 @@ func labelDisplay(l govern.Label) string {
 }
 
 // printMapSynthesis renders the Map mode's terminal CollatorOutput. Each finding shows the HOST-VALIDATED
-// `envelope#k` citations behind it (C1) — or, when none of the collator's citations resolved, the host's
+// `envelope#k` citations behind it — or, when none of the collator's citations resolved, the host's
 // UNCITED label. The label is printed rather than hidden because an unsourced conclusion presented like a
 // sourced one is the failure the citation pass exists to make visible.
 func printMapSynthesis(w io.Writer, out schema.CollatorOutput) {

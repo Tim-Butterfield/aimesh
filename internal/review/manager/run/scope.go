@@ -60,8 +60,7 @@ const (
 // vcsScopeTimeout bounds the diff call. A status that hangs must not hang the review.
 const vcsScopeTimeout = 30 * time.Second
 
-// Scope is how a run narrows what it reviews. The zero value reviews everything, which is what every
-// run did before this existed.
+// Scope is how a run narrows what it reviews. The zero value reviews everything.
 type Scope struct {
 	// Paths are workspace-relative paths or globs, as the operator gave them. A directory selects
 	// everything under it; `**` is not special beyond what path.Match does, so a glob that means to

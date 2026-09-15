@@ -1,9 +1,9 @@
 package schema
 
 // This file holds ExtractJSONObject: the narrow, enumerated-and-RECORDED repair pass exploremesh runs
-// over UNTRUSTED model output before it is unmarshaled (design §6.8 — model output is only ever parsed
-// as JSON data, never executed). A real 3-provider dogfood halted because one provider fenced its JSON
-// in a ```json … ``` block ("invalid character '`'"). The fix is extraction ONLY: strip a single code
+// over UNTRUSTED model output before it is unmarshaled (model output is only ever parsed
+// as JSON data, never executed). A provider can fence its JSON
+// in a ```json … ``` block ("invalid character '`'"). The repair is extraction ONLY: strip a single code
 // fence, trim surrounding prose to exactly one balanced top-level object, and RECORD each repair — it
 // deliberately does NOT coerce field types or permissively decode (schema type-variance tolerance is
 // out of scope). A clean input that is already exactly one object returns byte-identical bytes with an
@@ -40,7 +40,7 @@ func ExtractJSONObject(raw []byte) (obj []byte, repairs []string, err error) {
 	if len(b) == 0 {
 		return nil, nil, errors.New("no JSON object found (empty response)")
 	}
-	// A single wrapping markdown code fence (```json … ``` or ``` … ```) is the exact dogfood failure:
+	// A single wrapping markdown code fence (```json … ``` or ``` … ```) is the common provider failure:
 	// unwrap it before searching for the object.
 	if inner, ok := stripCodeFence(b); ok {
 		b = bytes.TrimSpace(inner)

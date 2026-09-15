@@ -1,7 +1,7 @@
-// Package pipeline is exploremesh's fan-out→collate engine (design §6.3, §6.7): the collator
+// Package pipeline is exploremesh's fan-out→collate engine: the collator
 // bookends the run (formulate + synthesize) around a blind, parallel explorer fan-out. All model
 // calls go through meshcore/model; model-identity is classified via meshcore/verify. Explorer and
-// collator output is UNTRUSTED and only ever parsed as JSON data, never executed (§6.8).
+// collator output is UNTRUSTED and only ever parsed as JSON data, never executed.
 package pipeline
 
 import (
@@ -38,9 +38,9 @@ type Registry map[string]model.Adapter
 const maxDroppedRaw = 64 << 10
 
 // Dropped records an explorer removed from the panel (failed/timed-out/schema-invalid) with an
-// audited reason — never a silent omission (§6.7). It also carries a BOUNDED copy of the raw body the
+// audited reason — never a silent omission. It also carries a BOUNDED copy of the raw body the
 // pipeline tried to parse plus its provenance, so a dropped/halted panel is reconstructable from the
-// dump alone (the exact gap a real 3-provider dogfood hit: --dump-run captured only the formulation).
+// dump alone.
 type Dropped struct {
 	Explorer schema.ExplorerIdentity
 	Reason   string
@@ -57,7 +57,7 @@ type Dropped struct {
 	// ExitCode + StderrExcerpt are the adapter PROCESS's failure signal (0 / "" when the call never ran, or
 	// ran and exited cleanly). A CLI that REFUSES a request typically writes the decisive error to stderr and
 	// exits non-zero while producing NO stdout — so without these an honest-but-useless "empty response"
-	// parse reason hides the actual cause (a real dogfood reported exactly that while the CLI had printed a
+	// parse reason hides the actual cause (for example, while the CLI printed a
 	// 400 "model is not supported on this account"). They are what make a dropped panel self-diagnosing.
 	ExitCode      int
 	StderrExcerpt string
@@ -145,9 +145,9 @@ func newDrop(id schema.ExplorerIdentity, reason string, raw []byte, repairs []st
 // Result is the outcome, populated as far as the run progressed (so a halt still yields the
 // formulation state + any envelopes gathered, for audit).
 type Result struct {
-	// Mode is the app-owned mode this run EXECUTED (design §3), stamped by the pipeline rather than echoed
+	// Mode is the app-owned mode this run EXECUTED, stamped by the pipeline rather than echoed
 	// from the task, so a recorded run says which contract produced it even when the task defaulted the mode.
-	// It exists because §9's derived export is built from the run directory alone: a run dir that does not
+	// It exists because the derived evidence export is built from the run directory alone: a run dir that does not
 	// record which mode made it is not a system of record.
 	Mode           string `json:"mode,omitempty"`
 	Formulation    schema.Formulation
@@ -155,54 +155,54 @@ type Result struct {
 	CollatorCaveat string
 	Envelopes      []schema.Envelope // explorer envelopes (verified + weak), in stable order
 	Dropped        []Dropped
-	// Output is the mode's terminal collator output (design §3): Map → schema.CollatorOutput,
+	// Output is the mode's terminal collator output: Map → schema.CollatorOutput,
 	// Synthesize → schema.SynthesizeOutput, carried behind the mode.ModeOutput marker interface. nil if
 	// the run halted before the collate step. It JSON-marshals as the concrete type (so --json / --dump-run
 	// persist whichever ran); the surfaces render Summary() with an optional type-switch for richer detail.
 	Output mode.ModeOutput
 	// Canonicalization is the append-only merge-ledger + surjectivity result for a CANONICALIZING mode
-	// (Catalog, design §4); nil for plain-collate modes (Map, Synthesize). It is present ONLY when the
+	// (Catalog); nil for plain-collate modes (Map, Synthesize). It is present ONLY when the
 	// surjectivity gate PASSED (canon.Canonicalize returns an error otherwise), so a non-nil value is a
-	// held partition. Persisted as an append-only merge-ledger.jsonl (§9). When a confirmation round ran it
+	// held partition. Persisted as an append-only merge-ledger.jsonl. When a confirmation round ran it
 	// is the CONFIRMED revision; the superseded provisional revision is retained in Provisional.
 	Canonicalization *canon.Result `json:"canonicalization,omitempty"`
 	// Provisional is the PRE-confirmation partition revision, retained unchanged when a confirmation round
-	// produced a new revision (design §4: a revision is a new entry, never an edit). nil when no confirmation
+	// produced a new revision (a revision is a new entry, never an edit). nil when no confirmation
 	// round ran.
 	Provisional *canon.Result `json:"provisional,omitempty"`
 	// Confirmation is the full binding-confirmation record (presentation order, typed challenges, versioned
 	// host resolutions, contested mappings). nil unless the mode's policy set Confirm.
 	Confirmation *canon.Confirmation `json:"confirmation,omitempty"`
-	// Preflight records the identity pre-flight verdicts taken BEFORE the fan-out (design §1), one per
+	// Preflight records the identity pre-flight verdicts taken BEFORE the fan-out, one per
 	// governed role (collator + each canonicalizer).
 	Preflight []PreflightRecord `json:"preflight,omitempty"`
-	// Panel is the FROZEN panel + counting policy hash + participation outcome (design §1). Frozen before any
+	// Panel is the FROZEN panel + counting policy hash + participation outcome. Frozen before any
 	// judgment is solicited; the dual denominators on every claim are derived from it.
 	Panel govern.Panel `json:"panel"`
 	// Rounds are the executed explorer rounds in order. Rounds[0] is the IMMUTABLE blind round 1 — the
-	// epistemic baseline every independence count is computed over (§0 F-A). Its envelopes are unexported
+	// epistemic baseline every independence count is computed over. Its envelopes are unexported
 	// inside round.Round, so no later stage can overwrite them.
 	Rounds []round.Round `json:"rounds,omitempty"`
-	// Mediations are the collator-mediated cross-review edges (design §1): the pooled confirmed-canonical
+	// Mediations are the collator-mediated cross-review edges: the pooled confirmed-canonical
 	// artifact and the exact digest shown to each explorer. Empty for a single-round run.
 	Mediations []round.Mediation `json:"mediations,omitempty"`
 	// Governance is the terminal governance surface: the frozen panel, every emitted claim pinned to its
-	// inputs, and the quarantined collatorNarrative (design §0 F-C/§4). nil for a mode that emits no counts.
+	// inputs, and the quarantined collatorNarrative. nil for a mode that emits no counts.
 	Governance *govern.Report `json:"governance,omitempty"`
-	// Decision is the HOST-TALLIED ballot decision (design §4), present ONLY for a ballot-bearing mode
+	// Decision is the HOST-TALLIED ballot decision, present ONLY for a ballot-bearing mode
 	// (Shortlist). It is set with its FROZEN inputs before the ballot round is dispatched and replaced by the
 	// full tally afterwards — so even a run that halts mid-ballot records the framing the panel was about to
 	// vote under.
 	Decision *govern.Decision `json:"decision,omitempty"`
 	// BallotNarrative is the voters' stated reasoning, quarantined out of the machine ballot record into the
-	// collatorNarrative namespace (§0 F-C) and folded into Governance.CollatorNarrative.
+	// collatorNarrative namespace and folded into Governance.CollatorNarrative.
 	BallotNarrative []govern.Narrative `json:"-"`
-	// Degraded is the PER MODE-CLASS degraded terminal artifact (design §1), populated when the collator
+	// Degraded is the PER MODE-CLASS degraded terminal artifact, populated when the collator
 	// became unavailable after the fan-out or an identity halt fired — so a halted run still carries a usable
 	// terminal artifact built from the blind round-1 envelopes.
 	Degraded *schema.DegradedOutput `json:"degraded,omitempty"`
-	// CanonicalizerStatus/Caveat govern the DECOUPLED, separately-identity-verified canonicalizer call
-	// (design §0 F-A): its own identity verdict, distinct from the collate call. Empty for non-
+	// CanonicalizerStatus/Caveat govern the DECOUPLED, separately-identity-verified canonicalizer call:
+	// its own identity verdict, distinct from the collate call. Empty for non-
 	// canonicalizing modes.
 	CanonicalizerStatus schema.IdentityStatus `json:"canonicalizerStatus,omitempty"`
 	CanonicalizerCaveat string                `json:"canonicalizerCaveat,omitempty"`
@@ -268,7 +268,7 @@ func Run(ctx context.Context, reg Registry, plan roster.Plan, raw schema.RawTask
 	if err := raw.Validate(); err != nil {
 		return res, err
 	}
-	// Resolve the app-owned mode (design §3): an empty task mode defaults to Map; an unknown mode is a
+	// Resolve the app-owned mode: an empty task mode defaults to Map; an unknown mode is a
 	// config error listing the known modes. The mode governs whether round-1 is formulation-free.
 	spec, ok := mode.Resolve(raw.Mode)
 	if !ok {
@@ -312,6 +312,11 @@ type Options struct {
 	// stopping after it would spend; the shape therefore says nothing between here and the first call is a
 	// configuration question, and does not claim the collator replied. See Shape.
 	DryRun bool
+	// VerifyReadiness asks every distinct (adapter, model, effort) the panel names whether it can do real
+	// work — a bounded one-token invocation in a throwaway directory — before the identity pre-flight, and
+	// halts the run if any cannot. It SPENDS one call per target whose adapter supports a deep probe, so it
+	// is opt-in; a dry run prices those calls in its Shape and performs none of them.
+	VerifyReadiness bool
 }
 
 // RunSpec is Run with the mode contract passed EXPLICITLY instead of resolved from the registry. It is the
@@ -325,10 +330,10 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 	if err := raw.Validate(); err != nil {
 		return res, err
 	}
-	// The round count is FIXED by the mode contract (design §1): no data-dependent termination rule (a
+	// The round count is FIXED by the mode contract: no data-dependent termination rule (a
 	// canonical-set-delta rule is manipulable by an aggressively-merging canonicalizer), and a hard maximum
 	// that FAILS rather than clamps.
-	// The mode's app-owned TASK check (design §3), before anything is spent: a mode that needs an input the
+	// The mode's app-owned TASK check, before anything is spent: a mode that needs an input the
 	// base RawTask does not require — Challenge's ARTIFACT under review — refuses here rather than after a
 	// panel has been paid for. The surfaces run the same check earlier for a friendlier message; this one is
 	// the backstop no caller can skip.
@@ -350,10 +355,10 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 			return res, herr
 		}
 		if spec.Canonicalizing == nil {
-			// A later round is fed the pooled CONFIRMED-CANONICAL uniques (§1). Without a canonicalization step
+			// A later round is fed the pooled CONFIRMED-CANONICAL uniques. Without a canonicalization step
 			// there is no confirmed partition, and the host pooling free-form peer items itself would BE the
-			// entity-resolution judgment §0 F-B exists to keep visible and contestable. So it is refused.
-			herr := fault.New(fault.Config, fmt.Sprintf("mode %q declares %d rounds but is not canonicalizing — a later round may only carry the pooled CONFIRMED-canonical uniques (design §1); pooling un-canonicalized peer items would be covert entity resolution", spec.Name, rounds))
+			// entity-resolution judgment that must stay visible and contestable. So it is refused.
+			herr := fault.New(fault.Config, fmt.Sprintf("mode %q declares %d rounds but is not canonicalizing — a later round may only carry the pooled CONFIRMED-canonical uniques; pooling un-canonicalized peer items would be covert entity resolution", spec.Name, rounds))
 			emit(onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
 			return res, herr
 		}
@@ -372,7 +377,7 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 		emit(onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
 		return res, herr
 	}
-	// FORMULATION is APP-OWNED (design §3, §0 F-A): a mode supplies its own explorer prompt + explorer
+	// FORMULATION is APP-OWNED: a mode supplies its own explorer prompt + explorer
 	// schema, so the collator never authors the payload it will later be asked to collate. The
 	// There is NO collator-FORMULATED round-1 leg: every registered mode declares
 	// FormulationFree, so such a leg would be unreachable outside its own tests while `formulation:
@@ -380,7 +385,7 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 	// Refusing here — the same fail-closed posture as the terminal-contract check above — is honest about
 	// the capability the binary actually has, instead of carrying an untested model-call path for it.
 	if !spec.FormulationFree {
-		herr := fault.New(fault.Config, fmt.Sprintf("mode %q is not formulation-free — collator-formulated round-1 is not implemented; a mode must own its explorer prompt and schema (design §3)", spec.Name))
+		herr := fault.New(fault.Config, fmt.Sprintf("mode %q is not formulation-free — collator-formulated round-1 is not implemented; a mode must own its explorer prompt and schema", spec.Name))
 		emit(onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
 		return res, herr
 	}
@@ -400,7 +405,11 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 	// canonicalizer plan that cannot yield two independent ones fails HERE, at no cost, instead of at the
 	// pre-flight it would otherwise reach first.
 	if opts.DryRun {
-		shape, serr := shapeOf(plan, raw, spec, opts, rounds)
+		probes := 0
+		if opts.VerifyReadiness {
+			probes = len(readinessTargets(reg, plan))
+		}
+		shape, serr := shapeOf(plan, raw, spec, opts, rounds, probes)
 		if serr != nil {
 			emit(onEvent, "error", "halt", serr.Error(), map[string]any{"haltClass": haltClassOf(serr)})
 			return res, serr
@@ -413,7 +422,16 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 		return res, nil
 	}
 
-	// -- Phase 0: identity PRE-FLIGHT before the fan-out + the FROZEN panel (design §1) --
+	// -- READINESS (Options.VerifyReadiness): a bounded one-token call per distinct agent, before anything else
+	// is invoked, so an agent blocked on login, folder trust or model validity halts the run cheaply.
+	if opts.VerifyReadiness {
+		if herr := verifyReadiness(ctx, reg, plan, onEvent); herr != nil {
+			emit(onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
+			return res, herr
+		}
+	}
+
+	// -- Phase 0: identity PRE-FLIGHT before the fan-out + the FROZEN panel --
 	// Both happen before a single explorer token is spent: a provider that silently fell back is caught while
 	// it is still cheap, and the counting policy is hashed before any judgment could influence it.
 	if herr := run.preflightRoles(); herr != nil {
@@ -432,7 +450,7 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 	// -- Phase 1: build the shared explorer payload --
 	// FORMULATION-FREE (guaranteed by the contract check above): there is NO collator formulate call —
 	// explorers receive the mode's deterministic app-owned prompt + fixed schema, so the collator can
-	// never author the explorer schema (§0 F-A). The collator identity is therefore governed at the
+	// never author the explorer schema. The collator identity is therefore governed at the
 	// synthesize call, its only call, below.
 	emit(onEvent, "info", "formulate_start", "formulation-free ("+spec.Name+"): building the app-owned explorer payload (no collator formulate call)", map[string]any{
 		"mode": spec.Name, "formulationFree": true, "explorers": len(plan.Explorers),
@@ -444,28 +462,28 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 	payload := res.Formulation.Payload
 	payloadHash, _ := payload.Hash()
 
-	// -- Phase 2: BLIND round-1 fan-out — every explorer gets the byte-identical payload (§6.2). These
-	// envelopes are the EPISTEMIC BASELINE: they are recorded as an immutable round (§1) and are the only
-	// evidence any independence count is ever computed over (§0 F-A).
+	// -- Phase 2: BLIND round-1 fan-out — every explorer gets the byte-identical payload. These
+	// envelopes are the EPISTEMIC BASELINE: they are recorded as an immutable round and are the only
+	// evidence any independence count is ever computed over.
 	envs, drops, halt := run.fanout(1, schema.PhaseExplore, payload, payloadHash)
 	res.Dropped = append(res.Dropped, drops...)
 	res.Envelopes = append(res.Envelopes, envs...)
 	if halt != nil {
-		// A proven identity mismatch on ANY explorer halts the run (no silent fallback, §6.2/§6.7). The blind
-		// artifacts gathered so far remain valid, so the degraded terminal artifact is emitted (§1).
+		// A proven identity mismatch on ANY explorer halts the run (no silent fallback). The blind
+		// artifacts gathered so far remain valid, so the degraded terminal artifact is emitted.
 		emit(onEvent, "error", "halt", "explorer identity halt: "+halt.Error(), map[string]any{"haltClass": haltClassOf(halt)})
 		res.Degraded = run.degrade(schema.DegradedIdentityHalt, halt.Error())
 		return res, halt
 	}
 	res.Rounds = append(res.Rounds, round.NewRound(1, true, payloadHash, res.Envelopes, nil))
 
-	// -- Minimum-viable panel: ≥2 RESPONDING explorers for primary synthesis (§6.7) --
+	// -- Minimum-viable panel: ≥2 RESPONDING explorers for primary synthesis --
 	// The bar is multiplicity, not provenance: a one-response panel is not a panel. Model identity is NOT
 	// consulted — a response's content determines whether it is worth anything, and a recorded identity
-	// (verified, self-reported, unknown, or a proven mismatch) never promotes or demotes it. See
-	// ../../../docs/model-identity.md.
+	// (verified, self-reported, unknown, or a proven mismatch) never promotes or demotes it. See.
+	// ./../../docs/model-identity.md.
 	//
-	// Abstentions ARE separated: an explorer that explicitly declines (§1's deliberate abstention) is kept in
+	// Abstentions ARE separated: an explorer that explicitly declines (a deliberate abstention) is kept in
 	// the record but contributes no position, so it is excluded from the primary panel AND from the
 	// respondents denominator — which is exactly why both denominators are always reported. That is a
 	// judgment the explorer itself made about the question, not a judgment the host made about the explorer.
@@ -484,7 +502,7 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 		emit(onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
 		return res, herr
 	}
-	// The participation OUTCOME is layered onto the frozen panel (design §1): distinct tallies, because a
+	// The participation OUTCOME is layered onto the frozen panel: distinct tallies, because a
 	// technical absence and a deliberate abstention mean different things.
 	res.Panel = pan.WithOutcome(govern.Outcome{
 		Dispatched:           len(plan.Explorers),
@@ -493,7 +511,7 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 		DeliberateAbstention: len(abstained),
 	})
 
-	// -- Phase 3+4 (CANONICALIZING modes, §4): canonicalize (single or DUAL) → optional binding CONFIRMATION
+	// -- Phase 3+4 (CANONICALIZING modes): canonicalize (single or DUAL) → optional binding CONFIRMATION
 	// round → optional collator-mediated LATER ROUNDS → governance claims → collate into the mode output.
 	// This path REPLACES the plain collate below for a mode that sets Canonicalizing (mutually exclusive with
 	// Collator).
@@ -501,7 +519,7 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 		return run.canonicalizingPath(primary, payloadHash, rounds)
 	}
 
-	// -- Phase 3+4 (FIXED-SPACE modes, §3 Compare/Forecast rows): the HOST computes the entire result from
+	// -- Phase 3+4 (FIXED-SPACE modes): the HOST computes the entire result from
 	// the blind round-1 artifacts and the terminal collate call contributes NARRATIVE only. It is checked
 	// after the canonicalizing branch and before the plain collate for the same reason those two are mutually
 	// exclusive — a mode sets exactly one terminal contract.
@@ -533,7 +551,7 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 		herr := fault.Wrap(fault.Internal, "collator synthesize failed (raw explorer responses preserved for re-run)", serr)
 		emit(onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
 		// The collator became UNAVAILABLE after the fan-out: emit the per-mode-class degraded terminal
-		// artifact (design §1) so the paid-for blind round-1 evidence is still delivered.
+		// artifact so the paid-for blind round-1 evidence is still delivered.
 		res.Degraded = run.degrade(schema.DegradedCollatorUnavailable, serr.Error())
 		return res, herr
 	}
@@ -542,13 +560,13 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 	cstatus, _ := classify(collAdapter, sres, plan.Collator.Model, plan.Collator.Adapter)
 	res.CollatorStatus = cstatus
 	res.CollatorCaveat = collatorIdentityCaveat(cstatus)
-	// SAME-IDENTITY invariant (§1): the collate call must resolve to the model pinned at pre-flight/formulate.
+	// SAME-IDENTITY invariant: the collate call must resolve to the model pinned at pre-flight/formulate.
 	if herr := run.ids.observe("collator", sres.ActualModel); herr != nil {
 		emit(onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
 		res.Degraded = run.degrade(schema.DegradedIdentityHalt, herr.Error())
 		return res, herr
 	}
-	// Parse + validate via the mode's app-owned collator contract (design §3). Map yields a
+	// Parse + validate via the mode's app-owned collator contract. Map yields a
 	// CollatorOutput; Synthesize yields a SynthesizeOutput. The pipeline persists whichever ran behind
 	// mode.ModeOutput.
 	out, oerr := spec.Collator.Parse(responseBody(sres))
@@ -560,7 +578,7 @@ func RunSpec(ctx context.Context, reg Registry, plan roster.Plan, raw schema.Raw
 		res.Degraded = run.degrade(schema.DegradedCollatorUnavailable, "collator output invalid: "+oerr.Error())
 		return res, herr
 	}
-	// The HOST-AUTHORITATIVE citation pass (design §3 C1): the collator was asked to cite the
+	// The HOST-AUTHORITATIVE citation pass: the collator was asked to cite the
 	// `envelope#k` aliases behind each finding, and here the host checks what it actually cited against
 	// the aliases THIS panel produced — keeping the refs that resolve, dropping the ones that do not, and
 	// setting the `uncited` label itself. It runs INSIDE Run rather than in the CLI so every surface
@@ -627,7 +645,7 @@ func haltClassOf(err error) string {
 	return "internal"
 }
 
-// CanonicalizerRecord is one canonicalizer call's governance record (design §4): its role label, the identity
+// CanonicalizerRecord is one canonicalizer call's governance record: its role label, the identity
 // it was verified as, and the identity verdict. The DUAL path produces two records — that is how "which two
 // independent judgments produced this partition" is answerable from the Result alone.
 type CanonicalizerRecord struct {
@@ -641,9 +659,9 @@ type CanonicalizerRecord struct {
 }
 
 // canonicalizerCall adapts a mode's CanonicalizingContract + ONE canonicalizer identity into a
-// canon.CanonicalizerCall (design §4): it renders the canonicalizer prompt, makes the DECOUPLED canonicalizer
+// canon.CanonicalizerCall: it renders the canonicalizer prompt, makes the DECOUPLED canonicalizer
 // model call (its own role label, Phase PhaseCanonicalize, isolated WorkDir), classifies its identity
-// SEPARATELY (§0 F-A) and records it, enforces the same-identity invariant for that role, and parses the
+// SEPARATELY and records it, enforces the same-identity invariant for that role, and parses the
 // proposal. The single path builds ONE of these against the collator's adapter/model — a distinct call, never
 // the collate call. The DUAL path builds TWO against two independent identities and hands both to
 // canon.CanonicalizeDual.
@@ -686,7 +704,7 @@ func (c *canonicalizerCall) Propose(ctx context.Context, noms []canon.Nomination
 		c.res.CanonicalizerCalls = append(c.res.CanonicalizerCalls, rec)
 		return canon.Proposal{}, fault.Wrap(fault.Internal, "canonicalizer call failed (raw explorer nominations preserved)", ierr)
 	}
-	// SEPARATE identity classification (decoupled from the collate call, §0 F-A). It is RECORDED on the call
+	// SEPARATE identity classification (decoupled from the collate call). It is RECORDED on the call
 	// record and never gates the proposal.
 	status, _ := classify(c.adapter, r, c.identity.Model, c.identity.Adapter)
 	rec.Status = status
@@ -698,7 +716,7 @@ func (c *canonicalizerCall) Propose(ctx context.Context, noms []canon.Nomination
 	if c.primary {
 		c.res.CanonicalizerCaveat = caveat
 	}
-	// SAME-IDENTITY invariant PER canonicalizer (§1): each canonicalizer's role was pinned at pre-flight, so a
+	// SAME-IDENTITY invariant PER canonicalizer: each canonicalizer's role was pinned at pre-flight, so a
 	// swap between the probe and the proposal call halts.
 	if ierr := c.ids.observe(c.role, r.ActualModel); ierr != nil {
 		c.res.CanonicalizerCalls = append(c.res.CanonicalizerCalls, rec)
@@ -712,7 +730,7 @@ func (c *canonicalizerCall) Propose(ctx context.Context, noms []canon.Nomination
 }
 
 // explorerOutcome is one explorer call's result: exactly one of env / drop / halt is meaningful, plus the
-// model the call RESOLVED to (fed to the same-identity invariant, §1 — a role that resolves to a different
+// model the call RESOLVED to (fed to the same-identity invariant — a role that resolves to a different
 // model mid-exploration halts).
 type explorerOutcome struct {
 	env           schema.Envelope
@@ -746,7 +764,7 @@ func runExplorer(ctx context.Context, reg Registry, ex roster.Explorer, phase st
 		o.drop = newDrop(ex.Identity(), "invoke failed: "+err.Error(), nil, nil).withResult(r)
 		return
 	}
-	// Untrusted model output: extract the single JSON object first (a real dogfood halt was a response
+	// Untrusted model output: extract the single JSON object first (a response may arrive
 	// fenced in ```json …), recording any enumerated repairs, THEN unmarshal + schema-validate the
 	// extracted bytes. On any failure drop with the reason AND the bounded raw body for --dump-run.
 	body := responseBody(r)

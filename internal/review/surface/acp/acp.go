@@ -24,12 +24,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 	"github.com/Tim-Butterfield/aimesh/internal/review/engine/authority"
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 	"github.com/Tim-Butterfield/aimesh/meshcore/audit"
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
-	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 	// schema.Fingerprint is the HOST-COMPUTED finding identity. It is imported here so this surface
 	// computes it with the same function the write path does — two spellings of one identity is how a
@@ -72,10 +72,11 @@ const (
 // cycle is exactly what would make the applied set something other than the inspected set.
 type Reviewer interface {
 	RunContext(ctx context.Context, r run.Request) (review.RunOutcome, error)
-	// ReadDecisionSet resolves a peer-supplied run handle to the decision set that run recorded,
-	// VERIFYING the handle against the agent's own artifact directory rather than trusting it as a
-	// path. It returns the set and the canonical run directory. See run.ReadDecisionSet.
-	ReadDecisionSet(handle string) (*run.StoredDecisionSet, string, error)
+	// ReadDecisionSetFor resolves a peer-supplied run handle for a run over workspace to the decision
+	// set that run recorded, VERIFYING the handle against that workspace's run-record locations rather
+	// than trusting it as a path. It returns the set and the canonical run directory. See
+	// run.ReadDecisionSetFor.
+	ReadDecisionSetFor(workspace, handle string) (*run.StoredDecisionSet, string, error)
 	// Remediate applies an ALREADY-ADJUDICATED decision set through the one governed write path —
 	// the same function the CLI and MCP reach. Nothing is re-reviewed and nothing is re-judged.
 	Remediate(ctx context.Context, r run.RemediateRequest) (run.RemediateOutcome, error)
@@ -91,16 +92,13 @@ type Server struct {
 	// error (false). Wired from config.Surfaces.DegradeWhenModeUnavailable.
 	DegradeWhenModeUnavailable bool
 
-	// PolicyCeiling is the CONFIG write-authority ceiling for the ACP surface
-	// (`surfaces.defaultModeBySurface.acp`; the shipped seed is `report`) — deliberate,
-	// user-visible policy, NOT a host capability. It narrows the connection ceiling, so a
-	// fully write-capable host cannot reach a live workspace write unless the user's config
-	// opts the ACP surface in. The resolver caps the mode by the same policy; applying it
-	// HERE too is what makes the cap visible to the host (a `mode_degraded` warn, or a
-	// pre-run usage error when degradation is disabled) instead of a silent downgrade the
-	// host only discovers in the result. An empty or unrecognized value narrows nothing (the
-	// caller — see cli.runACP — is responsible for failing closed on a malformed policy).
-	PolicyCeiling review.Mode
+	// Adapters are the adapters this agent was launched with (`--adapter`). A turn's panel may name
+	// only these; empty means every review turn is refused until the operator names one.
+	Adapters launchflags.Set
+	// AllowWrites is the operator's `--allow-writes` grant. Without it aimesh never changes project
+	// content: an `apply` turn is refused, and a `patch` turn supplies the complete diff for the agent
+	// to apply itself.
+	AllowWrites bool
 
 	// TurnTimeout bounds ONE prompt's wall clock (0 → DefaultTurnTimeout). It holds this surface to
 	// the same parity as `exploremesh acp`/`exploremesh mcp`, which bound a turn: without it an ACP
@@ -115,18 +113,10 @@ type Server struct {
 	// startup); a normal ACP client leaves it false, so no synthetic host call / extra spend occurs.
 	ValidateHostAdjudication bool
 
-	// Roots are the TRUSTED workspace roots of this connection — the directories a HUMAN
-	// authorized before any request arrived (`aimesh review acp --root <dir>`, or the launch
-	// cwd; see roots.go). They are the ONLY thing that makes a filesystem path readable over
-	// this surface: every request-supplied path (`session/prompt.workspace`, `session/new.cwd`,
-	// authority document paths) must resolve INSIDE them, so a request may only NARROW the set
-	// and can never authorize itself. Empty = fail CLOSED: every request path is refused (the
-	// `inlineWorkspace` path still works, because that content is materialized into a directory
-	// this process owns).
-	Roots []string
-
-	trustOnce sync.Once
-	trust     *scope.Resolver
+	// Ceiling is the operator's optional `--root` set: every path a turn declares must lie inside it.
+	// Empty means no ceiling. Each turn's scope is built from the paths THAT turn declares (see
+	// turnScope), so two sessions never share one.
+	Ceiling []string
 
 	// Sessions is the OPTIONAL durable session store enabling ACP v1 `session/resume` across
 	// an agent process restart. When nil, resume is unsupported: `sessionCapabilities.resume`
@@ -209,13 +199,6 @@ type reviewParams struct {
 type writeTurn struct {
 	FromRun string
 	Select  []string
-	// WorkspaceNamed records whether the host NAMED a workspace on this turn, as opposed to
-	// falling back to the session cwd or the process working directory. It matters only on a
-	// from-run write: a named workspace is an assertion about which tree is being changed and is
-	// checked against the source run's, while an implicit one asserts nothing and the source run's
-	// workspace simply stands. Refusing the implicit case would break the ordinary session shape
-	// (`session/new {cwd}`, then two prompts that name no workspace at all).
-	WorkspaceNamed bool
 }
 
 // acceptedFingerprints projects a run's ACCEPTED findings to the identifiers a later write turn can
@@ -262,16 +245,11 @@ type reviewmeshMeta struct {
 	// differs (a transport mechanic, the one kind of per-surface difference the
 	// surface-parity invariant allows).
 	Authority []review.AuthorityDoc `json:"authority"`
-	// Profile SELECTS a configured profile by name (absent/blank → the configured default),
-	// the ACP equivalent of the CLI's `--profile`.
-	Profile string `json:"profile,omitempty"`
-	// Panel COMPOSES an ad-hoc blind reviewer panel — the ACP equivalent of repeatable
-	// `--reviewer`. COMPOSE-NOT-CONFIGURE: a seat may only name an adapter and model the
-	// SERVER'S configuration already defines. There is deliberately no field here for a binary
-	// path, launch arguments, or an adapter definition: the absence IS the enforcement, so a
-	// prompt can order and select configured identities but can never introduce one. Naming
-	// both `profile` and `panel` is invalid params — a panel is composed OR selected.
-	Panel []review.SeatSpec `json:"panel,omitempty"`
+	// Panel is the seats this turn composes. See panelMeta.
+	Panel *panelMeta `json:"panel,omitempty"`
+	// Roots are EXTRA absolute directories this turn reads beside its workspace — for example the
+	// project folder that holds authority documents. See turnScope.
+	Roots []string `json:"roots,omitempty"`
 	// MaxParallel bounds how many of this turn's reviewer seats invoke their model CLI AT ONCE.
 	// Absent, the whole panel runs in parallel. It is per-turn rather than a server flag for the same
 	// reason it is per-call on MCP: the right number is a property of the machine the CLIs run on and
@@ -318,24 +296,14 @@ func parseReviewmeshMeta(raw json.RawMessage) (reviewmeshMeta, error) {
 	return rm, nil
 }
 
-// validateSelection enforces the run-forming rules a SURFACE owns for profile/panel selection,
-// pre-spend and fail-closed: the two selectors are mutually exclusive, the panel is bounded, and
-// each seat is structurally complete. It deliberately does NOT decide whether an adapter or model
-// exists — that is the resolver's single answer for every surface (config.ResolvePanel), so an
-// ACP prompt and a CLI invocation can never disagree about what resolves.
+// validateSelection enforces the panel's shape, pre-spend and fail-closed, when a turn names one.
+// Whether a panel is REQUIRED, and whether its adapters were launched, is decided where the turn
+// forms a run (resolvePanel): a `fromRun` turn applies a stored set and names no panel at all.
 func (rm reviewmeshMeta) validateSelection() (string, error) {
-	if rm.Profile != "" && len(rm.Panel) > 0 {
-		return "panel_and_profile", fmt.Errorf("_meta.reviewmesh names both `profile` and `panel` — a blind reviewer panel is composed OR selected, never half of each")
+	if rm.Panel == nil {
+		return "", nil
 	}
-	if len(rm.Panel) > review.MaxReviewerSeats {
-		return "panel_too_large", fmt.Errorf("_meta.reviewmesh.panel has %d seats, exceeding the cap of %d — each seat is a real model CLI, and the count is never trimmed for you", len(rm.Panel), review.MaxReviewerSeats)
-	}
-	for i, s := range rm.Panel {
-		if strings.TrimSpace(s.Adapter) == "" || strings.TrimSpace(s.Model) == "" {
-			return "panel_seat_incomplete", fmt.Errorf("_meta.reviewmesh.panel[%d] needs a non-empty `adapter` and `model` (example: {\"adapter\":\"codex-cli\",\"model\":\"codex-cli-default\"})", i)
-		}
-	}
-	return "", nil
+	return rm.Panel.validate()
 }
 
 // Serve reads/writes through the configured framing until `exit` or EOF.
@@ -413,7 +381,16 @@ func (s *Server) ServeFramed(f Framer) error {
 				// Zed supplies the workspace root in `params.cwd` (+ `mcpServers`); store it so a
 				// later session/prompt that omits `workspace` can fall back to it.
 				var sn sessionNewParams
-				_ = json.Unmarshal(req.Params, &sn)
+				if len(req.Params) > 0 {
+					if err := json.Unmarshal(req.Params, &sn); err != nil {
+						s.write(f, errResp(req.ID, codeInvalidParams, "invalid params: "+err.Error()))
+						continue
+					}
+				}
+				if msg, bad := relativeCWD(sn.CWD); bad {
+					s.write(f, errResp(req.ID, codeInvalidParams, msg, map[string]any{"reasonCode": ReasonCallPathRelative}))
+					continue
+				}
 				sid := s.newSession(sn.CWD)
 				s.persistSession(sid) // durable record for cross-restart resume (best-effort)
 				s.write(f, okResp(req.ID, map[string]any{"sessionId": sid}))
@@ -573,6 +550,9 @@ func (s *Server) initialize(id json.RawMessage, params json.RawMessage) *rpcResp
 		},
 		"agentCapabilities": agentCaps,
 		"authMethods":       []any{},
+		// Who performs writes, disclosed before the first prompt: `aimesh` when the operator launched
+		// this agent with --allow-writes, else `agent` — the host applies the diff a patch turn supplies.
+		"_meta": map[string]any{"reviewmesh": s.withWrites(map[string]any{})},
 	})
 }
 
@@ -594,22 +574,17 @@ func parseIntProtocolVersion(raw json.RawMessage) (int, bool) {
 	return int(i), true
 }
 
-// modeCeiling is the highest review mode the negotiated host capabilities permit: apply
-// needs FileWrite (it commits to the live workspace), patch needs DiffContext (it emits a
-// diff artifact), else report. Capping the effective mode to this ceiling guarantees a
-// read-only host can never produce a live workspace write.
+// modeCeiling is the highest review mode this connection permits. apply needs both the operator's
+// --allow-writes grant and a host that can write files; patch is always permitted, because it changes
+// no project content and supplies the diff for the agent to apply itself.
 func (s *Server) modeCeiling() review.Mode {
 	s.capMu.Lock()
 	caps := s.Caps
 	s.capMu.Unlock()
-	switch {
-	case caps.FileWrite:
+	if s.AllowWrites && caps.FileWrite {
 		return review.ModeApply
-	case caps.DiffContext:
-		return review.ModePatch
-	default:
-		return review.ModeReport
 	}
+	return review.ModePatch
 }
 
 var acpModeRank = map[review.Mode]int{review.ModeReport: 0, review.ModePatch: 1, review.ModeApply: 2}
@@ -659,7 +634,7 @@ type sessionPromptParams struct {
 	// does and does not guarantee.
 	FromRun string `json:"fromRun,omitempty"`
 	// Select is the selective-apply filter: host-computed fingerprints, from the report turn's
-	// response, naming which accepted findings to write (D8-A).
+	// response, naming which accepted findings to write.
 	//
 	// It is FUNCTIONAL, and it must stay DECLARED rather than merely unhandled: `json.Unmarshal`
 	// drops unknown fields silently, so a host that sent `select` to a server that did not implement
@@ -678,7 +653,7 @@ type sessionPromptParams struct {
 	Meta json.RawMessage `json:"_meta,omitempty"`
 }
 
-// requireRunHandle is the ACP half of the two-phase write rule (D5, migration design §9.4).
+// requireRunHandle is the ACP half of the two-phase write rule.
 //
 // THE PROBLEM. A write whose response is lost — cancelled, dropped, or killed with the process —
 // tells the caller nothing. If that same call was also the call that CREATED the run, the host is
@@ -700,24 +675,22 @@ type sessionPromptParams struct {
 //
 // THE HANDLE IS RESOLVED, NOT MERELY REQUIRED — and it is verified rather than trusted. This
 // function checks only that one is PRESENT, pre-spend; `fromRunWrite` then resolves it against this
-// agent's own artifact directory (run.ReadDecisionSet) and applies the decision set the named run
+// workspace's run records (run.ReadDecisionSetFor) and applies the decision set the named run
 // recorded. Two consequences worth stating in the same breath:
 //
 //   - A handle naming a directory this agent did not produce is refused with one uniform
 //     `run_handle_unknown`, decided LEXICALLY before the filesystem is consulted. A peer therefore
-//     still gets no existence oracle over arbitrary absolute paths — the property the earlier
-//     "never stat it" rule was protecting — while the handle it does hold now means something.
-//   - A host that fabricates a handle no longer merely fools itself into a full review; it is told
-//     no, before any spend.
+//     gets no existence oracle over arbitrary absolute paths.
+//   - A host that fabricates a handle is told no, before any spend.
 //
-// WHAT IS NOW GUARANTEED, and was not before: the applied set IS the inspected set. A write turn
+// WHAT IS GUARANTEED: the applied set IS the inspected set. A write turn
 // carrying `fromRun` applies the decision set the source run adjudicated — no reviewers, no second
 // adjudication that could differ from the one the host read in turn 1 — through the same governed
 // write path, with the source run's workspace-identity binding and its base-hash pins re-verified
 // before anything is written and again per destination inside the commit. A tree that has moved on
 // halts with `stale_decision_set`; it does not write.
 //
-// THAT IS WHAT `select` NOW MEANS HERE, and it is the sentence a host integrating selective apply
+// THAT IS WHAT `select` MEANS HERE, and it is the sentence a host integrating selective apply
 // needs: `select` narrows THE STORED SET. A fingerprint from turn 1's `accepted` list names the same
 // object in turn 2 because it is the same object — not because a fresh panel happened to raise it
 // again. A selector that names nothing in the stored accepted set lands in `selection.unmatched` and
@@ -849,9 +822,7 @@ func (s *Server) handleReview(ctx context.Context, req rpcRequest, notif bool, f
 	// no per-request permission cap. Its workspace is always a peer-named path, so it is
 	// always judged against the trusted roots.
 	return s.runAndRespond(ctx, req, notif, p.Workspace, false, p.Mode, "", "", rm,
-		// The compatibility method has no session, so its workspace is ALWAYS the one the peer
-		// named — there is no cwd to fall back to.
-		writeTurn{FromRun: p.FromRun, Select: p.Select, WorkspaceNamed: strings.TrimSpace(p.Workspace) != ""}, f)
+		writeTurn{FromRun: p.FromRun, Select: p.Select}, f)
 }
 
 func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif bool, f Framer, sessionID string) *rpcResponse {
@@ -869,10 +840,6 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif 
 	// ownedWorkspace records that WE created that directory, so it needs no trusted root —
 	// the content came over the wire, not off this machine's filesystem.
 	ownedWorkspace := false
-	// Recorded BEFORE the cwd fallback below rewrites p.Workspace: "the host named this tree" and
-	// "the host named nothing and we resolved one" are different assertions, and only the first is
-	// checked against a source run's workspace on a from-run write.
-	workspaceNamed := strings.TrimSpace(p.Workspace) != ""
 	if len(p.InlineWorkspace) > 0 {
 		if p.Workspace != "" {
 			if notif {
@@ -891,18 +858,12 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif 
 		p.Workspace = dir
 		ownedWorkspace = true
 	}
-	// Workspace resolution (ACP session only — the global CLI is unaffected): an explicit
-	// `workspace` wins; otherwise fall back to the cwd the host supplied at session/new
-	// (Zed's `params.cwd`); otherwise the ACP process working directory. If none resolves,
-	// runAndRespond returns the existing "workspace is required" error. NONE of these
-	// SELECTS anything: whatever wins is still judged against the trusted roots in
-	// runAndRespond, so a host-supplied cwd cannot widen what this agent may read.
+	// Workspace resolution: an explicit `workspace` wins; otherwise the cwd the host supplied at
+	// session/new (Zed's `params.cwd`). Nothing is inferred from where this process started. If
+	// neither is set, runAndRespond returns "workspace is required". Whichever wins is the turn's
+	// declared scope and is judged in runAndRespond.
 	if p.Workspace == "" {
-		if cwd := s.sessionCWD(sessionID); cwd != "" {
-			p.Workspace = cwd
-		} else if wd, err := os.Getwd(); err == nil {
-			p.Workspace = wd
-		}
+		p.Workspace = s.sessionCWD(sessionID)
 	}
 	// An omitted session/prompt mode defaults to the safest mode, `report` (read-only).
 	if p.Mode == "" {
@@ -937,51 +898,7 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, notif 
 		return errResp(req.ID, codeInvalidParams, "invalid params: "+serr.Error(), map[string]any{"reasonCode": reason})
 	}
 	return s.runAndRespond(ctx, req, notif, p.Workspace, ownedWorkspace, p.Mode, sessionID, permCeiling, rm,
-		writeTurn{FromRun: p.FromRun, Select: p.Select, WorkspaceNamed: workspaceNamed}, f)
-}
-
-// trusted returns THE resolver for this connection, built ONCE from the trusted roots. One
-// resolver governs every request-supplied path on this surface — the workspace, the session
-// cwd, and (through run.Request.TrustedRoots → authority.Input.Trust) the authority
-// documents — so confinement cannot diverge between two code paths that both take paths.
-//
-// A root that cannot be canonicalized does NOT degrade to "unrestricted": it yields the
-// zero resolver, which refuses everything. (The launching command validates roots first, so
-// this is the belt to that suspenders.)
-func (s *Server) trusted() *scope.Resolver {
-	s.trustOnce.Do(func() {
-		r, err := scope.New(s.Roots...)
-		if err != nil || r == nil {
-			s.trust = &scope.Resolver{} // fail CLOSED: no root is usable, so no path is
-			return
-		}
-		s.trust = r
-	})
-	return s.trust
-}
-
-// checkRequestPath judges ONE host-supplied path against the trusted roots. It returns a
-// *scope.Denial so the caller can attach the machine reason code to the protocol error.
-//
-// This is the whole G1 fix: the path in the request is EVIDENCE of what the peer wants, never
-// the authority for it. Previously the resolver was built FROM the requested path, so the
-// containment check compared the path with itself and always passed.
-func (s *Server) checkRequestPath(path string) error {
-	_, err := s.trusted().ResolveRead(path)
-	return err
-}
-
-// rootHint appends the operator-facing remedy to a confinement refusal, so a host user reads
-// "how do I allow this" rather than only "refused".
-func (s *Server) rootHint(err error) string {
-	switch scope.ReasonOf(err) {
-	case scope.ReasonNoRoots:
-		return " — this ACP agent has no trusted root, so it refuses every filesystem path; launch it as `aimesh review acp --root <project-dir>`"
-	case scope.ReasonOutsideRoot:
-		return fmt.Sprintf(" — the trusted roots of this agent are %s; a request may narrow them but never widen them (launch with `aimesh review acp --root <dir>` to add one)",
-			strings.Join(s.trusted().Roots(), ", "))
-	}
-	return ""
+		writeTurn{FromRun: p.FromRun, Select: p.Select}, f)
 }
 
 // runAndRespond drives a review for a workspace/mode and formats the ACP response —
@@ -990,9 +907,7 @@ func (s *Server) rootHint(err error) string {
 // notifications tagged with that session as the Manager logs events.
 //
 // ownedWorkspace marks a workspace this PROCESS created and filled (the materialized
-// `inlineWorkspace`): it is not a path the peer named, so the trusted-root check does not
-// apply to it — that is the documented zero-config path, and it stays available on a server
-// with no roots at all.
+// `inlineWorkspace`): it is not a path the peer named, so it consumes no scope.
 func (s *Server) runAndRespond(ctx context.Context, req rpcRequest, notif bool, workspace string, ownedWorkspace bool, mode, sessionID string, ceilingCap review.Mode, sel reviewmeshMeta, wt writeTurn, f Framer) *rpcResponse {
 	authDocs := sel.Authority
 	if workspace == "" {
@@ -1001,20 +916,17 @@ func (s *Server) runAndRespond(ctx context.Context, req rpcRequest, notif bool, 
 		}
 		return errResp(req.ID, codeInvalidParams, "invalid params: workspace is required")
 	}
-	// TRUSTED-ROOT CONFINEMENT. The workspace a peer named (an explicit `workspace` or the
-	// session cwd it supplied at session/new) must resolve INSIDE the roots a human
-	// authorized at launch. A path outside them — or any path at all when no root was
-	// established — is refused HERE, before any spend, with the machine reason code
-	// attached. The non-overridable read denylist still applies inside a trusted root, so a
-	// `.env` under an allowed project is refused just the same.
-	if !ownedWorkspace {
-		if err := s.checkRequestPath(workspace); err != nil {
-			if notif {
-				return nil
-			}
-			return errResp(req.ID, codeInvalidParams, "invalid params: "+err.Error()+s.rootHint(err),
-				map[string]any{"reasonCode": string(scope.ReasonOf(err))})
+	// PER-TURN SCOPE, before any spend. The workspace this turn declares (explicitly, or as the
+	// session cwd) and its extra `_meta.reviewmesh.roots` are the only directories it may read, each
+	// judged by turnScope. The non-overridable read denylist still applies inside them, so a `.env`
+	// under an allowed project is refused just the same.
+	turn, scopeReason, serr := s.turnScope(workspace, ownedWorkspace, sel.Roots)
+	if serr != nil {
+		if notif {
+			return nil
 		}
+		return errResp(req.ID, codeInvalidParams, "invalid params: "+serr.Error()+scopeHint(scopeReason),
+			map[string]any{"reasonCode": scopeReason})
 	}
 	// Mode gating (Client-side; the Manager/resolver stay unaware). Cap the requested mode to
 	// the effective ceiling: apply needs host write capability, patch needs diff capability,
@@ -1022,18 +934,17 @@ func (s *Server) runAndRespond(ctx context.Context, req rpcRequest, notif bool, 
 	// ceiling, degrade to it (with a reason) when DegradeWhenModeUnavailable, else fail with a
 	// usage error before any run.
 	requested := review.Mode(mode)
-	// Effective ceiling = connection capability, narrowed by the config policy ceiling for the
-	// ACP surface, then by any per-request permission cap (e.g. the host denied write/patch for
-	// this prompt). The narrowest wins; nothing here can ever WIDEN a ceiling.
+	// Effective ceiling = the connection's (the launch write grant and the host's capability), narrowed
+	// by any per-request permission cap (e.g. the host denied write/patch for this prompt). The
+	// narrowest wins; nothing here can ever WIDEN a ceiling.
 	ceiling := s.modeCeiling()
-	if _, known := acpModeRank[s.PolicyCeiling]; known {
-		ceiling = minMode(s.PolicyCeiling, ceiling)
-	}
 	if ceilingCap != "" {
 		ceiling = minMode(ceilingCap, ceiling)
 	}
 	if requested == "" {
-		requested = ceiling
+		// An omitted mode is report on every entry point: naming a review is consent to review, not
+		// consent for anything to be written.
+		requested = review.ModeReport
 	} else if _, ok := acpModeRank[requested]; !ok {
 		// Reject an unknown mode here, before any run — the resolver does not validate modes,
 		// so an unknown mode would otherwise reach the Manager and run patch-like work.
@@ -1042,10 +953,21 @@ func (s *Server) runAndRespond(ctx context.Context, req rpcRequest, notif bool, 
 		}
 		return errResp(req.ID, codeInvalidParams, "invalid mode: "+string(requested), map[string]any{"mode": string(requested)})
 	}
+	// An apply turn on an agent launched without --allow-writes is REFUSED rather than degraded: the
+	// write grant is the operator's decision, and a turn that asked to write must learn that aimesh
+	// will not, and that a patch turn supplies the diff for the host to apply itself.
+	if requested == review.ModeApply && !s.AllowWrites {
+		if notif {
+			return nil
+		}
+		return errResp(req.ID, codeInvalidParams,
+			"invalid params: this agent was launched without --allow-writes, so aimesh does not change project content and `mode: \"apply\"` is refused. Send `mode: \"patch\"` to receive the complete diff and apply it yourself.",
+			map[string]any{"reasonCode": ReasonWritesNotGranted, "requestedMode": string(requested)})
+	}
 	effective := minMode(requested, ceiling)
 	degradeReason := ""
 	if effective != requested {
-		degradeReason = fmt.Sprintf("requested mode %q exceeds the effective ceiling %q (host capability, per-request permission, config surface policy)", requested, ceiling)
+		degradeReason = fmt.Sprintf("requested mode %q exceeds the effective ceiling %q (host capability, per-request permission)", requested, ceiling)
 		if !s.DegradeWhenModeUnavailable {
 			if notif {
 				return nil
@@ -1104,27 +1026,31 @@ func (s *Server) runAndRespond(ctx context.Context, req rpcRequest, notif bool, 
 	// nothing is hidden.
 	if strings.TrimSpace(wt.FromRun) != "" && (effective == review.ModePatch || effective == review.ModeApply) {
 		return s.fromRunWrite(ctx, req, notif, workspace, ownedWorkspace, effective, requested,
-			degradeReason, sessionID, sel, wt, f)
+			degradeReason, sessionID, sel, wt, turn, f)
 	}
-	// The SAME trusted resolver governs authority paths: an authority `path` is a request
-	// path like any other, so it may narrow the trusted roots but never widen them (a peer
-	// cannot declare `/etc/shadow` as "authority" and have the declaration authorize itself).
-	if _, rerr := authority.Resolve(authority.Input{Docs: authDocs, Mode: effective, Workspace: workspace, Trust: s.trusted()}); rerr != nil {
+	// A review turn composes its own panel, resolved before any authority document is read.
+	reviewers, roles, panelReason, perr := s.resolvePanel(sel.Panel)
+	if perr != nil {
+		if notif {
+			return nil
+		}
+		return errResp(req.ID, codeInvalidParams, "invalid params: "+perr.Error(), map[string]any{"reasonCode": panelReason})
+	}
+	// The SAME turn resolver governs authority paths: an authority `path` is a request path like any
+	// other, so it must lie inside what this turn declared (a peer cannot declare `/etc/shadow` as
+	// "authority" and have the declaration authorize itself).
+	if _, rerr := authority.Resolve(authority.Input{Docs: authDocs, Mode: effective, Workspace: workspace, Trust: turn}); rerr != nil {
 		if notif {
 			return nil
 		}
 		return errResp(req.ID, codeInvalidParams, "invalid authority: "+rerr.Error(),
 			map[string]any{"reasonCode": fault.ReasonOf(rerr)})
 	}
-	// TrustedRoots ride the request so the Manager's AUTHORITATIVE authority resolution uses
-	// the same root set this surface just checked against — one model, no second code path.
-	// Profile/panel SELECTION rides the request. Resolution (does this profile exist? does this
-	// seat's adapter/model resolve? is the panel within 1..MaxReviewerSeats with no duplicate
-	// identity?) is the Manager's single answer for every surface, so an unknown profile or an
-	// unresolvable seat comes back as a config fault BEFORE any model call — the -32602 above
-	// covers only what this surface itself owns (mutual exclusion, bound, seat completeness).
+	// TrustedRoots ride the request so the Manager's AUTHORITATIVE authority resolution uses the
+	// same scope this surface just checked against — one model, no second code path. The composed
+	// seats ride it too; the Manager passes each seat's model identifier to its adapter verbatim.
 	rq := run.Request{Workspace: workspace, Mode: effective, Surface: "acp", Authority: authDocs,
-		Profile: sel.Profile, ReviewerPanel: sel.Panel, MaxParallel: sel.MaxParallel,
+		ReviewerPanel: reviewers, ComposedRoles: roles, MaxParallel: sel.MaxParallel,
 		// Per-turn, like maxParallel: pricing is a question about THIS request.
 		DryRun:          sel.DryRun,
 		VerifyReadiness: sel.VerifyReadiness,
@@ -1143,7 +1069,7 @@ func (s *Server) runAndRespond(ctx context.Context, req rpcRequest, notif bool, 
 		VerifyTimeout:       s.VerifyTimeout,
 		VerifyBaseline:      s.VerifyBaseline,
 		AllowProtectedPaths: s.AllowProtectedPaths,
-		TrustedRoots:        s.trusted().Roots(), ValidateHostAdjudication: s.ValidateHostAdjudication}
+		TrustedRoots:        turn.Roots(), ValidateHostAdjudication: s.ValidateHostAdjudication}
 	if sessionID != "" {
 		// In-process progress sink → session/update notifications. Gated on the run context
 		// so nothing is emitted after cancellation (preserving no-write-after-cancel and
@@ -1171,7 +1097,7 @@ func (s *Server) runAndRespond(ctx context.Context, req rpcRequest, notif bool, 
 	// + `_meta.reviewmesh`); the compatibility `review` method keeps the flat reviewmesh shape.
 	isSession := sessionID != ""
 	if errors.Is(err, context.Canceled) {
-		rm := map[string]any{"status": "cancelled", "runDir": out.RunDir}
+		rm := s.withWrites(map[string]any{"status": "cancelled", "runDir": out.RunDir})
 		if isSession {
 			return okResp(req.ID, promptResponse("cancelled", rm))
 		}
@@ -1207,17 +1133,16 @@ func (s *Server) runAndRespond(ctx context.Context, req rpcRequest, notif bool, 
 		}
 		return errResp(req.ID, codeReviewHalt, "review halted: "+err.Error(), data)
 	}
-	rm := map[string]any{
+	rm := s.withWrites(map[string]any{
 		"status":   out.Status,
 		"mode":     string(out.Mode),
 		"findings": len(out.Findings),
 		"runDir":   out.RunDir,
-	}
-	// THE REPORT TURN'S RESPONSE CARRIES A FINGERPRINT PER ACCEPTED FINDING (migration design §9.4.2).
+	})
+	// THE REPORT TURN'S RESPONSE CARRIES A FINGERPRINT PER ACCEPTED FINDING.
 	//
 	// This is the channel that makes selective apply expressible on this surface at all. A caller
-	// cannot select on values it was never told, ACP has no lookup method to fetch them from, and with
-	// a one-shot write there was no moment at which we could have told it. The response to the host's
+	// cannot select on values it was never told, and ACP has no lookup method to fetch them from. The response to the host's
 	// own report request is that moment — and it is the one channel with a delivery property, which is
 	// why the run handle rides it too rather than a `session/update`.
 	//
@@ -1463,6 +1388,9 @@ func (s *Server) handleSessionResume(req rpcRequest) *rpcResponse {
 	}
 	// Prefer a host-supplied cwd on reconnect (authoritative for this run); else the persisted
 	// cwd. Restore the in-process handle keyed by the resumed id.
+	if msg, bad := relativeCWD(p.CWD); bad {
+		return errResp(req.ID, codeInvalidParams, msg, map[string]any{"reasonCode": ReasonCallPathRelative})
+	}
 	cwd := rec.CWD
 	if c := cleanSessionCWD(p.CWD); c != "" {
 		cwd = c
@@ -1500,22 +1428,26 @@ func parseSessionNum(id string) int {
 	return n
 }
 
-// cleanSessionCWD normalizes a host-supplied workspace cwd: trim, `filepath.Clean`, and
-// resolve a relative path against the ACP process working directory (`filepath.Abs`). It
-// writes nothing and does not stat the path (the Manager's preflight validates existence).
-// An empty input yields an empty result (no cwd stored).
+// cleanSessionCWD normalizes a host-supplied workspace cwd: trim and `filepath.Clean`. A relative
+// cwd is kept as sent, never resolved against this process's working directory, so a turn that falls
+// back to it is refused as a relative path. It writes nothing and does not stat the path. An empty
+// input yields an empty result (no cwd stored).
+// relativeCWD reports whether a host-supplied session cwd is present but not absolute, with the refusal
+// message. This agent shares no working directory with its host, so a relative cwd has no meaning.
+func relativeCWD(raw string) (string, bool) {
+	c := strings.TrimSpace(raw)
+	if c == "" || filepath.IsAbs(c) {
+		return "", false
+	}
+	return fmt.Sprintf("invalid params: cwd %q is not an absolute path; send the absolute workspace directory", raw), true
+}
+
 func cleanSessionCWD(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
-	clean := filepath.Clean(raw)
-	if !filepath.IsAbs(clean) {
-		if abs, err := filepath.Abs(clean); err == nil {
-			clean = abs
-		}
-	}
-	return clean
+	return filepath.Clean(raw)
 }
 
 // putSession registers the in-flight run for a session id. It returns false if the

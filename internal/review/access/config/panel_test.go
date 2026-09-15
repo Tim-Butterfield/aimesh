@@ -159,9 +159,8 @@ func TestResolvePanel_FailsClosed(t *testing.T) {
 // TestResolvePanel_ReportsEveryUnresolvableSeat: one refusal names ALL of them.
 //
 // Resolution is pure configuration lookup — no process, no spend — so every blocker is knowable in
-// one pass. Reporting only the first made an N-seat panel with N bad seats cost N round trips: fix,
-// re-run, meet the next one. A session driving the CLI burned three runs on three independently
-// knowable blockers before this changed.
+// one pass. Reporting only the first would make an N-seat panel with N bad seats cost N round trips:
+// fix, re-run, meet the next one.
 func TestResolvePanel_ReportsEveryUnresolvableSeat(t *testing.T) {
 	c := panelTestConfig()
 	c.Profiles["p"] = Profile{Reviewers: []Lane{

@@ -121,7 +121,7 @@ func TestFake_PanelDisagreesPerMode(t *testing.T) {
 }
 
 // TestFake_AbstentionValidAgainstEveryModeSchema pins the Abstain scenario's stated contract: a
-// DELIBERATE abstention is a schema-VALID response in EVERY mode carrying the reserved marker (§1) —
+// DELIBERATE abstention is a schema-VALID response in EVERY mode carrying the reserved marker —
 // that is what makes it a recorded position rather than a dropped explorer, and what keeps it out of the
 // denominator by the marker rather than by an empty field.
 func TestFake_AbstentionValidAgainstEveryModeSchema(t *testing.T) {

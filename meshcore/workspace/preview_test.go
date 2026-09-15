@@ -92,13 +92,11 @@ func TestPreviewPayload_MatchesWhatTheRunWouldCarry(t *testing.T) {
 	}
 }
 
-// TestCollect_CarriesEveryFileWhole is the regression test for the coverage cap that used to live
-// here: 50 files, 8 KiB per file, 64 KiB total, none of them justified anywhere. Pointed at a real
-// repository those constants meant a review saw ten files in path order and never reached any
-// source at all — findings it could not have made were indistinguishable from findings it did not
-// find. aimesh cannot know a model's context limit and must not approximate one.
+// TestCollect_CarriesEveryFileWhole: collection has no coverage cap. A cap would make findings a
+// review could not have made indistinguishable from findings it did not find, and aimesh cannot know
+// a model's context limit and must not approximate one.
 //
-// The fixture's big.txt is 20 KiB, well past the old per-file clip, and must arrive whole.
+// The fixture's big.txt is 20 KiB and must arrive whole.
 func TestCollect_CarriesEveryFileWhole(t *testing.T) {
 	live := previewTree(t)
 	const bigSize = 20 << 10

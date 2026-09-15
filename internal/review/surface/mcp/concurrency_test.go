@@ -80,7 +80,7 @@ func TestRemediate_ConcurrentSameSourceRunAppliesOnce(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &delayedReviewer{delay: 250 * time.Millisecond}
 	s := newServer(t, rv, func(s *mcp.Server) {
-		s.Roots, s.AllowRemediate = []string{ws}, true
+		s.Ceiling, s.AllowWrites = []string{ws}, true
 		// Nothing here bounds admission — there is no server-wide governor — so all eight calls reach
 		// the source-run guard. That is exactly what this test needs: a cap would have hidden part of
 		// a broken guard behind "run refused" instead of exposing it as a second write.
@@ -91,7 +91,7 @@ func TestRemediate_ConcurrentSameSourceRunAppliesOnce(t *testing.T) {
 	const callers = 8
 	results := raceToolCalls(t, c, callers, "review_remediate", func(i int) map[string]any {
 		return map[string]any{
-			"fromRun": runID, "output": "apply", "allowWrite": true,
+			"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true,
 			"idempotencyKey": string(rune('a'+i)) + "-key",
 		}
 	})
@@ -134,10 +134,10 @@ func TestRemediate_ConcurrentSameSourceRunAppliesOnce(t *testing.T) {
 func TestRemediate_WorkspaceIdentityRidesTheDecisionSet(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
-	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "patch", "allowWrite": true})
+	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "patch", "allowWrite": true})
 	if res.isError || res.rpc != nil {
 		t.Fatalf("remediate failed: %+v %+v", res.structured, res.rpc)
 	}

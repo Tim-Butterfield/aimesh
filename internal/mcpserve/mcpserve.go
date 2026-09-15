@@ -153,8 +153,9 @@ func (s *Server) instructions() string {
 	b.WriteString("expensive to get wrong (identity is recorded but never acted on, the containment copy, the\n")
 	b.WriteString("write denylist, apply semantics) are stated there and nowhere shorter.\n\n")
 	if s.Only.servesReview() {
-		b.WriteString("review_* — review a workspace. review_report writes NOTHING. review_remediate WRITES and is\n")
-		b.WriteString("listed only when the operator launched with --allow-remediate.\n")
+		b.WriteString("review_* — review a workspace. review_report changes no project content. review_remediate\n")
+		b.WriteString("supplies the diff (output=patch) on every server, and applies it (output=apply) only when the\n")
+		b.WriteString("operator launched with --allow-writes; review_doctor reports which.\n")
 	}
 	if s.Only.servesExplore() {
 		b.WriteString("explore  — run a blind multi-model exploration. `mode` is required and decides which other\n")

@@ -183,9 +183,8 @@ func TestInit_RequireFolderRefusesInsideARepo(t *testing.T) {
 
 // --- version ----------------------------------------------------------------------------------
 
-// `aimesh --version` must name AIMESH. The root delegated the whole line to the review domain's
-// version package, so the first command the quick start tells a new user to run answered
-// "reviewmesh dev" — naming a binary that no longer exists, from the one that does.
+// `aimesh --version` must name AIMESH, not a domain: it is the first command the quick start tells a
+// new user to run, and it must name the binary they ran.
 func TestVersion_NamesTheBinaryNotADomain(t *testing.T) {
 	for _, a := range []string{"--version", "version"} {
 		code, out, errb := run(t, a)

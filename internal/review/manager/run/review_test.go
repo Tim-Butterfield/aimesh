@@ -515,7 +515,7 @@ func TestIdentity_SharedCaveatPolicy(t *testing.T) {
 	// A STRONG-evidence MISMATCH — the strongest identity signal there is, a provider envelope naming a
 	// model we did not ask for — is a prominent caveat on EVERY surface, and the findings are kept. What
 	// a reviewer FOUND is what decides whether it matters; a wrong label on the author cannot make a real
-	// defect false. (This used to be a Class-E halt that discarded the whole review.)
+	// defect false.
 	for _, surface := range []string{"cli", "acp"} {
 		t.Run(surface+" strong mismatch → caveat, findings kept", func(t *testing.T) {
 			m := build("mismatchid", map[string]model.Adapter{"mismatchid": mismatchFake{}})
@@ -1198,7 +1198,7 @@ func (selfCritiqueHostFake) Invoke(ctx context.Context, c model.Call) (model.Res
 
 // TestFinalSelfCritique_OverturnsWrongRejection pins M5: a finding the host rejected as invalid is
 // re-checked in the dismissal-verification pass and overturned (surfaced report-only), so a wrong
-// rejection no longer silently drops a real finding.
+// rejection does not silently drop a real finding.
 func TestFinalSelfCritique_OverturnsWrongRejection(t *testing.T) {
 	cfg := config.Default()
 	cfg.Adapters["rev-cli"] = config.Adapter{ModelIdentity: "invocation_tag"}

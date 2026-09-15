@@ -12,10 +12,9 @@ import (
 
 // Snippet is one whole workspace file gathered for a reviewer prompt.
 //
-// WHOLE, not bounded. This package used to clip a file at 8 KiB and stop collecting at 50 files
-// or 64 KiB total, which made a review's COVERAGE an artifact of three constants nobody had
-// written a reason for: pointed at this repository, a review saw ten files in path order and
-// never reached any source at all. The constants are gone.
+// WHOLE, not bounded. A per-file clip or a file-count cap would make a review's COVERAGE an artifact
+// of constants no one can justify: a large repository would be reviewed through its first few files
+// in path order, never reaching the source at all.
 //
 // The reasoning is the rule ReadUnder already states one file over: a truncated artifact that
 // still parses is worse than an error. A clipped review is exactly that — it returns findings, it

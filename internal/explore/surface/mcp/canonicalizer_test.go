@@ -1,6 +1,6 @@
 package mcp_test
 
-// MCP surface parity for the CANONICALIZER spec (design §4): the `canonicalizers` argument is the MCP
+// MCP surface parity for the CANONICALIZER spec: the `canonicalizers` argument is the MCP
 // analogue of the CLI's repeatable `--canonicalizer` and ACP's `_meta.exploremesh.canonicalizers`. Same
 // rule on all three: 0 or 2 entries, never 1; two distinct identities; compose-not-configure.
 
@@ -68,10 +68,10 @@ func TestCanonicalizers_FailClosedRefusals(t *testing.T) {
 			map[string]any{"adapter": "fake", "model": "twin", "effort": "high"},
 			map[string]any{"adapter": "fake", "model": "twin", "effort": "low"},
 		}, "independent"},
-		{"unconfigured adapter", []any{
+		{"adapter not launched", []any{
 			map[string]any{"adapter": "brand-new-cli", "model": "a"},
 			map[string]any{"adapter": "fake", "model": "b"},
-		}, "not configured"},
+		}, "was not launched with"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,54 +91,5 @@ func TestCanonicalizers_FailClosedRefusals(t *testing.T) {
 				t.Errorf("refusal %q must address the field", err.Error())
 			}
 		})
-	}
-}
-
-// TestCanonicalizers_ListReportsProfileSpec pins the read-only projection: `list` says, per profile,
-// which canonicalizers it names and whether it names any at all.
-func TestCanonicalizers_ListReportsProfileSpec(t *testing.T) {
-	s := connect(t, newServer(t, &fakeExplorer{}))
-	out := structured(t, call(t, s, "explore_list", map[string]any{}))
-	profiles, _ := out["profiles"].(map[string]any)
-	rows, _ := profiles["profiles"].([]any)
-	if len(rows) == 0 {
-		t.Fatal("list reported no profiles")
-	}
-	seen := map[string]string{}
-	for _, r := range rows {
-		row, _ := r.(map[string]any)
-		name, _ := row["name"].(string)
-		src, _ := row["canonicalizerSource"].(string)
-		if src != "explicit" && src != "derived" {
-			t.Errorf("profile %q must state its canonicalizer source, got %q", name, src)
-		}
-		if _, has := row["canonicalizers"]; !has {
-			t.Errorf("profile %q must carry a canonicalizers list (empty when derived)", name)
-		}
-		seen[name] = src
-	}
-	if seen["pair"] != "explicit" || seen["default"] != "derived" {
-		t.Errorf("sources = %v, want pair explicit (it names them) and default derived", seen)
-	}
-}
-
-// TestCanonicalizers_ProfileSpecReachesTheRun pins that selecting a profile that names canonicalizers is
-// enough — no per-call argument is needed for a configured governance rule to apply.
-func TestCanonicalizers_ProfileSpecReachesTheRun(t *testing.T) {
-	exp := &fakeExplorer{}
-	s := connect(t, newServer(t, exp))
-	res := call(t, s, "explore", exploreArgs(map[string]any{"panel": map[string]any{"profile": "pair"}}))
-	if res.IsError {
-		t.Fatalf("profile selection failed: %s", textOf(res))
-	}
-	plan := exp.plan()
-	if len(plan.Canonicalizers) != 2 || plan.Canonicalizers[0].Model != "canon-p1" {
-		t.Fatalf("executed plan carried %+v, want the profile's canonicalizers", plan.Canonicalizers)
-	}
-	out := structured(t, res)
-	panel, _ := out["panel"].(map[string]any)
-	exec, _ := panel["executed"].(map[string]any)
-	if exec["canonicalizerSource"] != "explicit" {
-		t.Errorf("a profile-supplied pair must echo source explicit, got %v", exec["canonicalizerSource"])
 	}
 }

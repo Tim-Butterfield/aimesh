@@ -14,7 +14,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
 )
 
-// This file holds the AD-HOC by-identifier run surface (design §8): repeatable `--explorer` /
+// This file holds the AD-HOC by-identifier run surface: repeatable `--explorer` /
 // `--collator` structured specs on `explore`, which build a one-off roster bypassing --roster/profile.
 // The specs use a STRUCTURED `adapter=<n>,model=<m>[,effort=<e>]` grammar — deliberately NOT the
 // `adapter:model` colon shorthand, which is UNSAFE because model tags contain colons (e.g. llama3:8b).
@@ -97,7 +97,7 @@ func buildAdHocRoster(explorerSpecs []string, collatorSpec string) (roster.Roste
 }
 
 // buildCanonicalizers parses the repeatable `--canonicalizer adapter=<n>,model=<m>[,effort=<e>]` specs into
-// the explicit canonicalizer identities (design §4). It uses the SAME structured grammar as --explorer /
+// the explicit canonicalizer identities. It uses the SAME structured grammar as --explorer /
 // --collator — deliberately not the colon shorthand, which cannot represent a model tag containing a colon.
 //
 // The 0-or-2 rule (and the two-identical-identities refusal) is roster.ValidateCanonicalizers', so the CLI,

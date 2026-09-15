@@ -1,6 +1,6 @@
 package cli
 
-// CLI surface tests for the CANONICALIZER spec (design §4): `--canonicalizer` names the two identities
+// CLI surface tests for the CANONICALIZER spec: `--canonicalizer` names the two identities
 // that propose the canonicalization, `setup --canonicalizer` persists them on a profile, and the run
 // record says which identities held the merge-agreement rule AND who chose them.
 //
@@ -190,7 +190,7 @@ func TestSetup_RejectsHalfACanonicalizerSpec(t *testing.T) {
 }
 
 // TestDoctor_ReportsCanonicalizerResolution pins that `doctor` states which identities will hold the
-// merge-agreement rule — the seat whose selection previously had no visible source anywhere.
+// merge-agreement rule — the seat whose selection would otherwise have no visible source anywhere.
 func TestDoctor_ReportsCanonicalizerResolution(t *testing.T) {
 	var out, errb bytes.Buffer
 	if code := Run([]string{"doctor"}, &out, &errb); code != 0 {
