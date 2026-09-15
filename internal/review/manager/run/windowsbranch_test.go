@@ -7,8 +7,8 @@ import (
 
 // `sameCanonicalPath` is the path half of the reviewed-root IDENTITY check: before a remediation opens
 // its write window it re-resolves the workspace and requires it to be the tree the review judged. The
-// device+inode half is platform-independent; this half folds case only on Windows, and until now that
-// branch was compiled on every machine and executed on none.
+// device+inode half is platform-independent; this half folds case only on Windows, and this test
+// executes that branch on every machine rather than only on Windows.
 //
 // Both directions are load-bearing. Failing to fold on Windows would halt a legitimate remediation
 // because the operator typed `c:\proj` where the review recorded `C:\Proj`; folding off Windows would

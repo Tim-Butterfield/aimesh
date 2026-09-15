@@ -1,14 +1,11 @@
 package acp
 
-// The ACP half of the governed-write convergence, proven END TO END: a real run.Manager behind
-// real JSON-RPC frames, a real workspace, and a real live write.
+// The ACP governed write, proven END TO END: a real run.Manager behind real JSON-RPC frames, a real
+// workspace, and a real live write.
 //
-// `docs/acp.md` states no-write-after-cancel as a standing ACP guarantee. Before this convergence
-// it was a race: the ACP apply went through `handleMode`, which read `ctx.Err()` and then called an
-// unpinned `ws.Commit` — two acts, with a cancellation able to land between them — and which
-// verified nothing about the destination's content. Both properties are now the same single
-// function every surface uses, and these tests hold ACP to them over the wire rather than by
-// assertion in a design document.
+// `docs/acp.md` states no-write-after-cancel as a standing ACP guarantee, and every write verifies the
+// destination's content before it commits. Both properties live in the single governed write path
+// every surface uses; these tests hold ACP to them over the wire.
 //
 // Determinism comes from the author_remediator lane: `gateHost` blocks inside the remediation model
 // call, which is the last thing that happens before the write window opens. That is a real place
@@ -28,7 +25,6 @@ import (
 	"time"
 
 	"github.com/Tim-Butterfield/aimesh/internal/review"
-	"github.com/Tim-Butterfield/aimesh/internal/review/access/config"
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
@@ -42,7 +38,7 @@ type gateHost struct {
 	release chan struct{}
 }
 
-func (gateHost) Name() string              { return "gate-host" }
+func (gateHost) Name() string              { return hostAdapter }
 func (gateHost) Available() (bool, string) { return true, "ok" }
 
 func (g gateHost) Invoke(ctx context.Context, c model.Call) (model.Result, error) {
@@ -62,9 +58,9 @@ func (g gateHost) Invoke(ctx context.Context, c model.Call) (model.Result, error
 	}
 }
 
-// acpApplyHarness builds an ACP server whose Manager really writes: the config ceiling for the acp
-// surface is widened to `apply` (the documented, config-visible opt-in) and the host advertises
-// write capability, so nothing between the request and the live tree is stubbed.
+// acpApplyHarness builds an ACP server whose Manager really writes: the agent is launched with
+// --allow-writes and the host advertises write capability, so nothing between the request and the
+// live tree is stubbed.
 func acpApplyHarness(t *testing.T) (*Server, *gateHost, string, string) {
 	t.Helper()
 	t.Setenv(fake.EnvVar, "1")
@@ -76,40 +72,19 @@ func acpApplyHarness(t *testing.T) (*Server, *gateHost, string, string) {
 		t.Fatal(err)
 	}
 
-	cfg := config.Default()
-	cfg.Adapters["gate-host"] = config.Adapter{ModelIdentity: "invocation_tag"}
-	cfg.ModelCatalog["gate-model"] = config.CatalogEntry{
-		Provider: "x", CanonicalModel: "mm",
-		Adapters: map[string]config.AdapterModel{"gate-host": {ModelArg: "mm"}},
-	}
-	cfg.Profiles["acp-write"] = config.Profile{
-		Description:       "acp governed-write harness",
-		AdapterPreference: []string{"gate-host", "fake"},
-		Lanes: map[string]config.Lane{
-			"author_remediator": {Execution: "host", Adapter: "gate-host", Model: "gate-model"},
-			"reviewer":          {Execution: "adapter", Adapter: "fake", Model: "fake-model"},
-		},
-	}
-	cfg.DefaultProfile = "acp-write"
-	// The documented opt-in: `surfaces: {defaultModeBySurface: {acp: apply}}`. Without it the
-	// Manager's own ceiling caps this run to report and nothing is under test.
-	cfg.Surfaces.DefaultModeBySurface["acp"] = "apply"
-	one := 1
-	cfg.Review.MaxOuterCycles = &one // one write window, so the assertions are unambiguous
-
 	g := &gateHost{reached: make(chan struct{}), release: make(chan struct{})}
 	mgr := &run.Manager{
-		Cfg: cfg,
+		Cfg: launchConfig(),
 		Adapters: map[string]model.Adapter{
-			"fake": fake.New(fake.Valid), "gate-host": g,
+			"fake": fake.New(fake.Valid), hostAdapter: g,
 		},
 		ArtifactDir: t.TempDir(), TempBase: t.TempDir(),
 	}
 	srv := &Server{
-		Manager:       mgr,
-		Caps:          review.SurfaceCaps{FileRead: true, FileWrite: true},
-		PolicyCeiling: review.ModeApply,
-		Roots:         []string{os.TempDir(), ws},
+		Manager:     mgr,
+		Caps:        review.SurfaceCaps{FileRead: true, FileWrite: true},
+		Adapters:    harnessAdapters(t),
+		AllowWrites: true,
 	}
 	return srv, g, ws, file
 }
@@ -199,7 +174,7 @@ func (s *acpSession) newSession(ws string) {
 func (s *acpSession) promptReport(ws string) string {
 	s.t.Helper()
 	s.send(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":` +
-		strconv.Quote(ws) + `,"mode":"report"}}`)
+		strconv.Quote(ws) + `,"mode":"report",` + hostPanelMeta + `}}`)
 	resp := s.awaitID(2)
 	res, ok := resp["result"].(map[string]any)
 	if !ok {
@@ -232,12 +207,7 @@ func (s *acpSession) promptApply(ws, fromRun string) {
 // The cancel is delivered — and ACKNOWLEDGED by the server — while the run is blocked inside its
 // remediation model call, so it is in force before the write window is reached. The run must answer
 // `stopReason: cancelled` AND leave the workspace untouched; those two facts are decided once,
-// together, under the write window's lock.
-//
-// AGAINST THE OLD CODE THIS TEST FAILS: `handleMode` checked `ctx.Err()` and then called
-// `ws.Commit`. Cancelling here (before the check) would still return "cancelled" — but there was no
-// receipt at all, so the receipt assertion fails outright, and the guarantee was a two-act race
-// rather than a gate. Reverting the delegation reproduces both.
+// together, under the write window's lock, and the receipt records it.
 func TestACPApply_CancelDuringTheRunNeverCommits(t *testing.T) {
 	srv, g, ws, file := acpApplyHarness(t)
 	before, _ := os.ReadFile(file)
@@ -280,13 +250,10 @@ func TestACPApply_CancelDuringTheRunNeverCommits(t *testing.T) {
 	}
 }
 
-// TestACPApply_ConcurrentInPlaceEditIsRefused is the same data-loss defect the CLI test stages,
-// proven on ACP: the file is saved in place while the run is mid-remediation, so the staged bytes
-// derive from content that no longer exists.
-//
-// AGAINST THE OLD CODE THIS TEST FAILS: the ACP path committed with an unpinned `ws.Commit`, the
-// destination's inode was unchanged by an in-place save, and the human's edit was silently replaced
-// by the model's fix. The run returned success.
+// TestACPApply_ConcurrentInPlaceEditIsRefused stages the data-loss case the CLI test stages, on ACP:
+// the file is saved in place while the run is mid-remediation, so the staged bytes derive from content
+// that no longer exists. An in-place save leaves the inode unchanged, so only the content pin catches
+// it — and the write halts rather than replacing the human's edit.
 func TestACPApply_ConcurrentInPlaceEditIsRefused(t *testing.T) {
 	srv, g, ws, file := acpApplyHarness(t)
 	const concurrent = "package main\n\nfunc main() { /* a human was here */ }\n"

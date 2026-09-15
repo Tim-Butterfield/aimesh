@@ -9,6 +9,36 @@
 
 This page documents **current behavior**.
 
+## Saved configuration is CLI-only
+
+Everything below — the review `config.yaml` layers, explore `profiles.yaml`, and the shared
+`adapters.yaml`, at user and project scope — is read by the **CLI** surfaces (`aimesh review …`,
+`aimesh explore …`, `doctor`, `list`, `setup`). The **MCP and ACP servers read none of it**. They are
+configured entirely by their launch arguments, which live in the host's own configuration (an IDE's or
+agent's MCP server entry), plus what each call declares:
+
+| Launch argument | Meaning |
+|---|---|
+| `--adapter <name>[=<path>]` (repeatable) or `AIMESH_ADAPTERS` | the only adapters a call may use; see [adapters.md → Which adapters are available where](adapters.md#which-adapters-are-available-where) |
+| `--allow-writes` | review may apply accepted findings to a workspace; without it the diff is supplied and the agent applies it |
+| `--root <dir>` (repeatable, optional) | a ceiling every path a call declares must lie inside |
+| `--allow-broad-root`, `--allow-protected-paths`, `--verify-cmd`, `--turn-timeout`, `--wait-seconds`, `--protocol`, `--framing`, `--no-capture` | operator waivers and budgets, as documented in [mcp.md](mcp.md) and [acp.md](acp.md) |
+
+```json
+{
+  "mcpServers": {
+    "aimesh": {
+      "command": "aimesh",
+      "args": ["mcp", "--adapter", "claude-code", "--adapter", "devin-cli=%LOCALAPPDATA%\\devin\\cli\\bin\\devin.exe"]
+    }
+  }
+}
+```
+
+aimesh never edits a host's configuration file; the host's agent or the user does. A workspace's
+`.aimesh/` directory may still hold run records for an MCP/ACP run, but it is never read as
+configuration. Panels, models and scope are per call.
+
 ## reviewmesh: file locations & precedence
 
 Resolution order, highest priority first:
@@ -46,42 +76,30 @@ The single `config.yaml` file contains sections owned by different layers of the
 
 ### Surface ceilings and capabilities
 
-A **surface** is where a run was driven from — `cli`, `ci`, `acp`, `mcp`. Each has a **write-authority
-ceiling**: a request may resolve narrower than its surface's ceiling, never wider.
+A **surface** is where a run was driven from. The CLI surfaces `cli` and `ci` each have a
+**write-authority ceiling** in config: a request may resolve narrower than its surface's ceiling, never
+wider. The agent surfaces `acp` and `mcp` read no configuration; their writes are gated by the
+`--allow-writes` launch grant, and a `surfaces` entry naming them has no effect.
 
 ```yaml
 surfaces:
   defaultModeBySurface:      # shipped seed
     cli: apply
     ci: report
-    acp: report
-    mcp: report
   capabilitiesBySurface:     # not seeded — grants are explicit
-    mcp: [allowRemediate]
+    ci: [allowRemediate]
   degradeWhenModeUnavailable: true    # default true
 ```
 
-- **`defaultModeBySurface`** is the **ceiling — not the default**, despite the name (which is kept for
-  config compatibility). A run that names **no mode gets `report` on every surface**; these entries bound
-  what a surface may do when it *is* asked. So `cli: apply` means "`--apply` is permitted here", **not**
-  "`aimesh review run .` writes" — an unadorned run reports and writes nothing.
-
-  The two were once the same value, which is how the plain CLI command came to modify a user's tree
-  without being told to. They are different questions: the ceiling is the most a surface may **ever** do;
-  the default is what it does when not told. `acp` and `mcp` sit at `report` because both are driven by an
-  external caller — an ACP host, or a client *model* — so even an explicit write request there is refused
-  until the ceiling is deliberately widened. A surface with **no** entry keeps the historical fall-through
-  ceiling of `apply`; a surface that must fail closed therefore ships with an explicit `report` entry
-  rather than relying on the absence of one.
-- **`capabilitiesBySurface`** grants named policy capabilities to a surface. The only capability today is
-  **`allowRemediate`**, which **raises** that surface's ceiling to `apply`. It is deliberately part of the
-  config store rather than an out-of-band launch exception: the ceiling is computed *from* this config
-  (`config.SurfaceCeiling`), so a grant raises the ceiling instead of stepping around it — a ceiling a flag
-  could bypass would not be a ceiling, it would be a default.
-- **`aimesh review mcp --allow-remediate`** grants `allowRemediate` on the `mcp` surface **in that server
-  process's own config snapshot**. It writes nothing to disk; an operator who wants it for every MCP server
-  they launch sets it in config instead. Without the capability the `review_remediate` tool is not listed at
-  all, and with it every call must still pass `allowWrite: true`. See [mcp.md](mcp.md#review_remediate--the-double-opt-in).
+- **`defaultModeBySurface`** is the **ceiling — not the default**, despite the name. A run that names
+  **no mode gets `report`**; these entries bound what a surface may do when it *is* asked. So `cli: apply`
+  means "`--apply` is permitted here", **not** "`aimesh review run .` writes" — an unadorned run reports and
+  writes nothing. The ceiling is the most a surface may **ever** do; the default is what it does when not
+  told. A surface with **no** entry resolves to a ceiling of `apply`, so a surface that must fail closed
+  ships with an explicit `report` entry, as `ci` does.
+- **`capabilitiesBySurface`** grants named policy capabilities to a surface. The only capability is
+  **`allowRemediate`**, which **raises** that surface's ceiling to `apply`. The ceiling is computed *from*
+  this config (`config.SurfaceCeiling`), so a grant raises the ceiling instead of stepping around it.
 - **`degradeWhenModeUnavailable`** (default `true`) decides what happens when a request exceeds the
   effective ceiling: degrade it and say so (a `mode_degraded` warning plus `modeDegraded`/`requestedMode`/
   `modeReason` on the result), or refuse the request outright before anything is spent.
@@ -89,14 +107,13 @@ surfaces:
 Effective mode is always `min(requested, surface-capability, policy)` — see
 [acp.md → Mode gating](acp.md#mode-gating-reviewmesh-only).
 
-**There are no reserved-for-later sections.** Earlier drafts accepted `policy` (including `policy.providerDiversity`), `validation`, `containment`, `audit`, and `timeouts` as free-form maps that nothing read. They are **gone**: reviewmesh does not accept-and-ignore settings, so those keys now fail strict parsing with a configuration error (exit 3) instead of silently having no effect. The concepts they named are live but not config-driven — reviewer containment and the run-directory base (default `.aimesh/review/runs/` when a `.aimesh/` state directory exists, else the OS temp directory; overridable only with `REVIEWMESH_ARTIFACT_DIR`) are hardcoded Go behavior, and provider diversity is an advisory note when you create a single-adapter profile, not an enforced policy.
+**There are no reserved-for-later sections.** reviewmesh does not accept-and-ignore settings, so keys such as `policy`, `validation`, `containment`, `audit` and `timeouts` fail strict parsing with a configuration error (exit 3) instead of silently having no effect. The concepts those names suggest are live but not config-driven — reviewer containment and the run-directory base (default `.aimesh/review/runs/` when a `.aimesh/` state directory exists, else the OS temp directory; overridable only with `REVIEWMESH_ARTIFACT_DIR`) are hardcoded Go behavior, and provider diversity is an advisory note when you create a single-adapter profile, not an enforced policy.
 
-Two keys survived that rule by accident and have since gone the same way: `defaults.autoDetect` and
-`profiles.<name>.lanes.<role>.optional` parsed and merged across layers while being read by **nothing**.
-Both are now rejected like any other unknown field. (Adapter detection is a `setup`/`doctor` action a human
-runs, not a config-driven behavior; and whether a lane's phase runs is decided by the lane's **presence**,
-so a boolean saying "this one may be missing" added nothing to a map whose keys already say which lanes
-exist.) A test asserts both are refused — the rule is only worth stating if something checks it.
+The same rule refuses `defaults.autoDetect` and `profiles.<name>.lanes.<role>.optional`. Adapter
+detection is a `setup`/`doctor` action a human runs, not a config-driven behavior; and whether a lane's
+phase runs is decided by the lane's **presence**, so a boolean saying "this one may be missing" would add
+nothing to a map whose keys already say which lanes exist. A test asserts both are refused — the rule is
+only worth stating if something checks it.
 
 ### Profiles and the reviewer panel
 
@@ -122,14 +139,13 @@ profiles:
       verifier:          { execution: adapter, adapter: agy-cli, model: agy-cli-default }
 ```
 
-**Migration — `lanes.reviewer` is a panel of one.** The historical single-reviewer spelling is
-accepted verbatim and normalized on read to `reviewers[0]`; nothing about such a profile's behavior,
+**`lanes.reviewer` is a panel of one.** The single-reviewer spelling is accepted verbatim and normalized on read to `reviewers[0]`; nothing about such a profile's behavior,
 call ids, or artifacts changes. A config layer that names **both** `reviewers` and `lanes.reviewer`
 for the same profile is a **configuration error** — there must never be a question of which one won.
 Across layers there is no ambiguity to resolve: a layer supplying one spelling *replaces* the other
 (and a panel is replaced wholesale, never element-merged — a seat list is an ordered composition, not
 a bag of keyed settings), so the effective config always carries exactly one. Saving a panel through
-`setup` performs that migration in the same atomic write.
+`setup` writes the `reviewers` spelling and drops `lanes.reviewer` in the same atomic write.
 
 **Fail-closed panel rules**, all checked before anything is spent:
 
@@ -246,19 +262,19 @@ aimesh review setup   [--scope user|project] [--profile <name>]
 
 aimesh review config clean-model-keys [--apply]
 
-aimesh review acp     [--framing newline|content-length] [--root <dir> …]
-                    [--no-default-root] [--allow-broad-root] [--turn-timeout <dur>]
-aimesh review mcp     [--protocol dual|legacy] [--framing newline|content-length]
-                    [--root <dir> …] [--no-default-root] [--allow-broad-root]
-                    [--allow-inferred-root] [--allow-remediate]
-                   
+aimesh review acp     [--adapter <name>[=<path>] …] [--allow-writes]
+                    [--framing newline|content-length] [--root <dir> …]
+                    [--allow-broad-root] [--turn-timeout <dur>]
+aimesh review mcp     [--adapter <name>[=<path>] …] [--allow-writes]
+                    [--protocol dual|legacy] [--framing newline|content-length]
+                    [--root <dir> …] [--allow-broad-root]
                     [--wait-seconds <n>] [--turn-timeout <dur>]
 ```
 
 - `setup` writes/updates config; defaults to `--scope user` (`~/.aimesh/review/config.yaml`). `--adapter <name> --path <path>` records a validated binary path for an adapter not on `PATH`, patching only that field. `--interactive` runs a guided wizard (inspect config + detect adapters → choose profile → record adapter paths → per-role lane/model selection → confirm before writing). `--from user [--yes] [--include-adapter-paths]` promotes selected keys (`defaultProfile` always; `adapters.<name>.path` only with `--include-adapter-paths`) from user scope into `--scope project` — it never bulk-copies the user config or any secret, and requires confirmation (`--interactive` prompt, or `--yes`).
-- `review --reviewer adapter=<name>,model=<m>[,effort=<e>]` (repeatable, order-preserving) composes an **ad-hoc blind reviewer panel** for one run. The grammar is `key=value` — deliberately *not* the `adapter:model` colon shorthand, which is unsafe because model tags contain colons (`llama3:8b`). It may name only adapters and models the configuration already defines (compose-not-configure), and it is mutually exclusive with `--profile`: a panel is composed *or* selected. The same panel is expressible over ACP as `_meta.reviewmesh.panel`.
-- `mcp --protocol dual|legacy` (default `dual`, on **both** binaries) is the **protocol-era posture**. `dual` serves whichever era the first client opens with and latches it for the process lifetime; `legacy` makes the process a pre-`2026-07-28` server in every observable respect, including answering `server/discover` as an unknown method. `legacy` is a compatibility fallback for a host that mis-probes, not a conformant `2026-07-28` deployment. See [mcp.md § The two eras](mcp.md#the-two-eras-and-how-a-request-picks-one).
-- `aimesh review mcp --allow-inferred-root` is a **confinement waiver**, default off. On `2026-07-28` an *inferred* launch cwd is not a trusted root — that revision removed `roots/list`, so a client can no longer narrow the server for itself and an inferred root would silently widen what a modern client reaches. Without the flag, a modern client on an inferred cwd is refused every filesystem path (`scope_no_roots_configured`) and must use `--root` or `inlineWorkspace`. The waiver never overrides the degenerate-root rule or the denylist, and its state is reported by the `review_doctor` tool (`inferredRootWaived`) rather than only on stderr.
+- `review --reviewer adapter=<name>,model=<m>[,effort=<e>]` (repeatable, order-preserving) composes an **ad-hoc blind reviewer panel** for one run. The grammar is `key=value` — deliberately *not* the `adapter:model` colon shorthand, which is unsafe because model tags contain colons (`llama3:8b`). It may name only adapters and models the configuration already defines (compose-not-configure), and it is mutually exclusive with `--profile`: a panel is composed *or* selected. Over MCP and ACP a panel is always composed per call (see [review.md → Driving it over MCP or ACP](review.md#driving-it-over-mcp-or-acp)).
+- `mcp --protocol dual|legacy` (default `dual`, on **both** domains) is the **protocol-era posture**. `dual` serves whichever era the first client opens with and latches it for the process lifetime; `legacy` makes the process a pre-`2026-07-28` server in every observable respect, including answering `server/discover` as an unknown method. `legacy` is a compatibility fallback for a host that mis-probes, not a conformant `2026-07-28` deployment. See [mcp.md § The two eras](mcp.md#the-two-eras-and-how-a-request-picks-one).
+- `acp`/`mcp` `--adapter`, `--allow-writes` and `--root` are the launch configuration described in [Saved configuration is CLI-only](#saved-configuration-is-cli-only).
 - `config clean-model-keys` (preview by default; `--apply` to write) renames generated `modelCatalog` keys that an older UI build materialized with a redundant adapter-key prefix (e.g. `codex-cli-gpt-5.5-high`), in the user-layer config only, leaving hand-authored keys and keys defined in a higher layer for manual editing.
 
 **exploremesh** — there is no interactive setup wizard (reviewmesh's `setup --interactive` has no
@@ -275,9 +291,8 @@ aimesh explore setup   --acp detect|add|remove [--path <p>] [--name <k>] [--titl
 aimesh explore setup   --profile <name> --explorer adapter=<n>,model=<m>[,effort=<e>] …
                     --collator adapter=<n>,model=<m> [--default-mode <m>]
 aimesh explore setup   --delete-profile <name> --yes
-aimesh explore acp     [--framing newline|content-length] [--turn-timeout <dur>] [--roster <path>]
-aimesh explore mcp     [--protocol dual|legacy] [--roster <path>]
-                   
+aimesh explore acp     [--adapter <name>[=<path>] …] [--framing newline|content-length] [--turn-timeout <dur>]
+aimesh explore mcp     [--adapter <name>[=<path>] …] [--protocol dual|legacy]
                     [--wait-seconds <n>] [--turn-timeout <dur>] [--no-capture]
 aimesh explore export  --sqlite <out.db> --run <run-dir> [--verify] [--json]
 aimesh init [--require-repo | --require-folder]
@@ -294,7 +309,8 @@ aimesh init [--require-repo | --require-folder]
 
 | Variable | Effect |
 |---|---|
-| `AIMESH_HOME` | Overrides the base directory containing the user-scope `.aimesh/` — **one** variable for the whole tool. It covers the shared `adapters.yaml`, `review/config.yaml`, `explore/profiles.yaml`, and both ACP session stores. (Each domain used to carry its own home variable; three that had to be set together to get one hermetic run was a trap rather than a feature.) |
+| `AIMESH_HOME` | Overrides the base directory containing the user-scope `.aimesh/` — **one** variable for the whole tool. It covers the shared `adapters.yaml`, `review/config.yaml`, `explore/profiles.yaml`, and both ACP session stores. |
+| `AIMESH_ADAPTERS` | The environment form of `--adapter` for the MCP and ACP servers: entries separated by the OS path-list separator. See [adapters.md](adapters.md#naming-an-adapter-at-launch). |
 | `REVIEWMESH_ARTIFACT_DIR` | Where review writes run artifacts. It is the **only** way to relocate them — there is no `audit` config section. Unset, they follow the same rule as explore's below: `.aimesh/review/runs` when a state directory exists, else the OS temp directory. |
 | `EXPLOREMESH_ARTIFACT_DIR` | Where exploremesh writes captured run directories — for CLI `explore --dump-run`, ACP `_meta.exploremesh.dumpRun`, and `aimesh explore mcp`, which captures **by default** (`--no-capture` disables it). Unset, the default is the **project-local `.aimesh/explore/runs`** when a `.aimesh/` state directory exists (root-anchored from the cwd, exactly like project-scope adapter config; `init` / `repo init` creates it and `repo init` adds it to the VCS exclude file), and otherwise a subdirectory of the **OS temp directory**. It is deliberately never a relative path inside your repository — a relative default resolved against the process cwd creates a tree inside whatever checkout you happened to run from, and run artifacts embed verbatim copies of everything the models were shown. The wire `runId` is the run directory's name; the absolute path is never put on the wire. |
 
@@ -319,7 +335,7 @@ The default `go test ./...` spends no tokens and calls no real model — the her
 Config is split by ownership on disk, matching the code's boundary:
 
 - **`~/.aimesh/adapters.yaml`** — **shared, meshcore-owned, and the single source of truth for adapter
-  binary paths.** Both apps read it; `config.yaml` no longer carries adapter paths. Two sections:
+  binary paths.** Both apps read it; `config.yaml` carries no adapter paths. Two sections:
   - `adapters.<name>.path` — the machine-local "where is the binary" override for a CODE-OWNED recipe
     (claude-code, codex-cli, agy-cli, devin-cli, gemini-cli, cursor-cli, ollama). The value is
     **presence-aware**: an absent key inherits a lower layer; an explicit empty string is a deliberate

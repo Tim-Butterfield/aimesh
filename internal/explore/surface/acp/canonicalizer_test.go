@@ -1,8 +1,8 @@
 package acp_test
 
-// ACP surface parity for the CANONICALIZER spec (design §4): `_meta.exploremesh.canonicalizers` is the
-// ACP analogue of the CLI's repeatable `--canonicalizer` and MCP's `canonicalizers` argument. Same rule
-// on all three: 0 or 2 entries, never 1; two distinct identities; compose-not-configure.
+// The CANONICALIZER spec on ACP: `_meta.exploremesh.canonicalizers` is the ACP analogue of the
+// CLI's repeatable `--canonicalizer` and MCP's `canonicalizers` argument. Same rule on all three: 0 or 2
+// entries, never 1; two distinct identities; only adapters the agent was launched with.
 
 import (
 	"strings"
@@ -76,10 +76,10 @@ func TestCanonicalizers_FailClosedRefusals(t *testing.T) {
 			map[string]any{"adapter": "fake", "model": "b"},
 			map[string]any{"adapter": "fake", "model": "c"},
 		}, "exactly 2"},
-		{"unconfigured adapter", []any{
+		{"adapter not launched", []any{
 			map[string]any{"adapter": "brand-new-cli", "model": "a"},
 			map[string]any{"adapter": "fake", "model": "b"},
-		}, "not configured"},
+		}, "not launched with"},
 		{"blank model", []any{
 			map[string]any{"adapter": "fake", "model": ""},
 			map[string]any{"adapter": "fake", "model": "b"},

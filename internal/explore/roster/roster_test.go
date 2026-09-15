@@ -128,7 +128,7 @@ func TestSelectTopN_TakesFirstNByAuthoredOrder(t *testing.T) {
 	}
 }
 
-// TestSelectTopN_EnvelopeIDStability is the load-bearing decoupling (design §7): reordering the FULL
+// TestSelectTopN_EnvelopeIDStability is the load-bearing decoupling: reordering the FULL
 // explorer list must NOT change the Plan for an UNCHANGED selected set, so envelope IDs / attribution
 // stay reproducible across a preference reshuffle.
 func TestSelectTopN_EnvelopeIDStability(t *testing.T) {
@@ -166,7 +166,7 @@ func TestSelectTopN_EnvelopeIDStability(t *testing.T) {
 }
 
 // TestSelectTopN_RangeIsNeverClamped: n<2 is not a panel, and n>len is a clear out-of-range error that
-// says so — requested = executed (design §7).
+// says so — requested = executed.
 func TestSelectTopN_RangeIsNeverClamped(t *testing.T) {
 	r := four()
 	for _, n := range []int{-1, 0, 1} {

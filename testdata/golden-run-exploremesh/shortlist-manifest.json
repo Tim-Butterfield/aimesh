@@ -65,8 +65,8 @@
     },
     {
       "path": "canonicalizer-prompt.txt",
-      "bytes": 2121,
-      "sha256": "89d5744cc4c7e0823133b43c02089c4cb954ace3f5c2c3835645de1d76fdfab8"
+      "bytes": 2108,
+      "sha256": "332fa789c1ff17acad73e3fca4dffa55664390c7faa519dcc7298f76d4858a52"
     },
     {
       "path": "raw-canonicalization.txt",

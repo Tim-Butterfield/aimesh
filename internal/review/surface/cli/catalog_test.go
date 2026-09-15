@@ -8,9 +8,9 @@ import (
 
 // TestList_ShowsTheVocabularyItRequires.
 //
-// `--reviewer model=…` may only name a modelCatalog key, and `list` reported adapters and profiles but
-// never the catalog — so the only way to discover a valid value was to open the config file by hand.
-// An inventory that omits the one vocabulary its own flag enforces is the gap this closes.
+// `--reviewer model=…` may only name a modelCatalog key, so `list` reports the catalog beside adapters
+// and profiles: an inventory that omitted the one vocabulary its own flag enforces would leave opening
+// the config file by hand as the only way to discover a valid value.
 func TestList_ShowsTheVocabularyItRequires(t *testing.T) {
 	view := listView{
 		Catalog: []listCatalogEntry{{

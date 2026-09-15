@@ -50,7 +50,7 @@ func TestRun_HappyPath_SynthesisAndDisagreement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success, got halt: %v", err)
 	}
-	// Map is FORMULATION-FREE (§3): the collator's formulate step is skipped, so the payload is the
+	// Map is FORMULATION-FREE: the collator's formulate step is skipped, so the payload is the
 	// mode's app-owned prompt + fixed schema and the source records the formulation-free provenance.
 	if res.Formulation.Source != schema.FormulationFreeMap {
 		t.Errorf("expected formulation-free map source, got %q", res.Formulation.Source)
@@ -76,7 +76,7 @@ func TestRun_HappyPath_SynthesisAndDisagreement(t *testing.T) {
 	if len(res.Envelopes) != 2 {
 		t.Errorf("expected 2 envelopes, got %d", len(res.Envelopes))
 	}
-	// Every explorer received the SAME payload hash (the §6.2 byte-identity invariant).
+	// Every explorer received the SAME payload hash (the byte-identity invariant).
 	if res.Envelopes[0].PayloadHash == "" || res.Envelopes[0].PayloadHash != res.Envelopes[1].PayloadHash {
 		t.Errorf("explorers did not share one payload hash: %q vs %q", res.Envelopes[0].PayloadHash, res.Envelopes[1].PayloadHash)
 	}
@@ -100,7 +100,7 @@ func TestRun_ExplorerDropped_StillTwoVerified(t *testing.T) {
 }
 
 // TestRun_FencedExplorer_Recovered pins the extraction rule: an explorer that wraps VALID JSON in a ```json
-// fence (the real 3-provider dogfood halt) is recovered via extraction — kept in the panel with the
+// fence is recovered via extraction — kept in the panel with the
 // applied repair recorded on its envelope — not dropped on "invalid character '`'".
 func TestRun_FencedExplorer_Recovered(t *testing.T) {
 	reg, plan := env(t, []fake.Scenario{fake.Valid, fake.FencedResponse}, fake.Valid)
@@ -209,8 +209,8 @@ func TestRun_ExplicitMapMode_SameAsDefault(t *testing.T) {
 
 // --- Identity is recorded, never acted on (docs/model-identity.md) ---
 //
-// These four tests are the executable form of the rule. Each drives an identity outcome that USED to
-// stop the run — a weak collator, a proven collator mismatch, a proven explorer mismatch, a weak
+// These four tests are the executable form of the rule. Each drives an identity outcome that could
+// look like a reason to stop the run — a weak collator, a proven collator mismatch, a proven explorer mismatch, a weak
 // explorer — and asserts the run completes with the response used and the identity recorded as a
 // caveat. Whether a finding is worth anything is decided by its content; a label about which model
 // produced it cannot make a real finding false, and (per the codex echo test) that label cannot be
@@ -402,8 +402,8 @@ func TestEnvelopeID_DeterministicUnique(t *testing.T) {
 
 // refusingAdapter mimics a real CLI that REFUSES the request: it exits non-zero and writes the decisive
 // error to STDERR after a banner, while producing NO stdout — and it returns no Go error (exactly how the
-// shell adapter reports a non-zero exit that is not a spawn failure). This is the real codex behavior a
-// dogfood hit: `{"status":400,"message":"The 'gpt-5-codex' model is not supported …"}`.
+// shell adapter reports a non-zero exit that is not a spawn failure). This is how a real codex CLI refuses
+// an unsupported model: `{"status":400,"message":"The 'gpt-5-codex' model is not supported …"}`.
 type refusingAdapter struct{}
 
 func (refusingAdapter) Name() string                    { return "refuser" }
@@ -606,7 +606,7 @@ func TestRun_MapMode_ProducesCollatorOutput(t *testing.T) {
 // TestRun_SynthesizeMode_ProducesSynthesizeOutput exercises the new Synthesize mode end-to-end on fakes:
 // the collate step selects/composes over the panel and yields a valid SynthesizeOutput (non-empty
 // artifact; provenance + minority populated by fakes that return distinct answers). It also pins that
-// Synthesize is formulation-free (no collator formulate call) — the app owns the round-1 contract (§5).
+// Synthesize is formulation-free (no collator formulate call) — the app owns the round-1 contract.
 func TestRun_SynthesizeMode_ProducesSynthesizeOutput(t *testing.T) {
 	reg, plan := env(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	res, err := runMode(t, reg, plan, "synthesize")

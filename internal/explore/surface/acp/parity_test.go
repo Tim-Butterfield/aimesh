@@ -11,26 +11,20 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/acp/testhost"
 )
 
-// This file covers the two SURFACE-PARITY gaps the MCP design's parity invariant obligated for the ACP
-// surface (mcp-design.md §Surface-parity, audit 2026-07-27):
+// This file covers the ACP forms of two capabilities every surface carries:
 //
-//  1. AD-HOC PANEL COMPOSITION (`_meta.exploremesh.panel`). The CLI has `--explorer/--collator` and the
-//     MCP surface has `panel`; ACP had profile/count only, so the same run-forming capability was
-//     expressible on two surfaces out of three. It is compose-not-configure everywhere: the composition
-//     selects from the adapter set the agent bound at STARTUP and can never introduce an adapter.
-//  2. RUN CAPTURE (`_meta.exploremesh.dumpRun`). `--dump-run` was CLI-only, so an ACP-driven exploration
-//     left NO disk record — and the run record is what every governance claim is checkable against. Which
-//     surface asked for the run cannot decide whether the audit record exists.
+//  1. PANEL COMPOSITION (`_meta.exploremesh.panel`) — the CLI's `--explorer/--collator` and MCP's `panel`.
+//     A composition names only adapters the agent was launched with and can never introduce one.
+//  2. RUN CAPTURE (`_meta.exploremesh.dumpRun`) — the CLI's `--dump-run`: the run record every governance
+//     claim is checkable against.
 
-// serveWith wires a server with an explicit configured-adapter set (the startup-bound set an ad-hoc
-// composition may draw from).
+// serveWith wires a server launched with exactly the named adapters.
 func serveWith(t *testing.T, exp acp.Explorer, adapters []string) (*testhost.Client, func()) {
 	t.Helper()
 	t.Setenv("AIMESH_HOME", t.TempDir())
-	t.Setenv("AIMESH_HOME", t.TempDir())
 	sr, cw := io.Pipe()
 	cr, sw := io.Pipe()
-	srv := &acp.Server{Explorer: exp, Plan: testPlan(t), Adapters: adapters, Framing: acp.FramingNewline}
+	srv := &acp.Server{Explorer: exp, Adapters: launchSet(t, adapters...), Framing: acp.FramingNewline}
 	done := make(chan struct{})
 	go func() { _ = srv.Serve(sr, sw); close(done) }()
 	client := testhost.NewClient(acp.FramingNewline, cr, cw)
@@ -59,9 +53,12 @@ func paritySession(t *testing.T, c *testhost.Client) string {
 	return sid
 }
 
+// promptWith sends a prompt carrying em plus the required criteria. A prompt that names no panel gets the
+// default test panel; a "panel" key set to nil sends none.
 func promptWith(t *testing.T, c *testhost.Client, sid string, em map[string]any) *testhost.Response {
 	t.Helper()
 	em["criteria"] = []any{"cost", "latency"}
+	em = withPanel(em)
 	resp, err := c.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "choose a datastore"}},
@@ -112,7 +109,7 @@ func TestParity_AdHocPanelIsFailClosedAndComposeNotConfigure(t *testing.T) {
 	defer stop()
 	sid := paritySession(t, c)
 
-	// An adapter outside the STARTUP-BOUND set: refused, and the refusal names the configured set.
+	// An adapter the agent was not launched with: refused, and the refusal names the launched set.
 	resp := promptWith(t, c, sid, map[string]any{"panel": map[string]any{
 		"explorers": []any{
 			map[string]any{"adapter": "brand-new-cli", "model": "x1"},
@@ -121,21 +118,10 @@ func TestParity_AdHocPanelIsFailClosedAndComposeNotConfigure(t *testing.T) {
 		"collator": map[string]any{"adapter": "fake", "model": "xc"},
 	}})
 	if resp.Error == nil {
-		t.Fatal("an unconfigured adapter must be refused")
+		t.Fatal("an adapter the agent was not launched with must be refused")
 	}
-	if want := "claude-code"; !strings.Contains(resp.Error.Message, want) || !strings.Contains(resp.Error.Message, "not configured") {
-		t.Errorf("refusal must name the configured set, got %q", resp.Error.Message)
-	}
-
-	// Ad-hoc composition and profile/count selection are mutually exclusive.
-	resp = promptWith(t, c, sid, map[string]any{
-		"count": 2,
-		"panel": map[string]any{
-			"explorers": []any{map[string]any{"adapter": "fake", "model": "x1"}, map[string]any{"adapter": "fake", "model": "x2"}},
-			"collator":  map[string]any{"adapter": "fake", "model": "xc"},
-		}})
-	if resp.Error == nil || !strings.Contains(resp.Error.Message, "cannot be combined") {
-		t.Errorf("panel + count together must be refused, got %+v", resp.Error)
+	if want := "claude-code, fake"; !strings.Contains(resp.Error.Message, want) || !strings.Contains(resp.Error.Message, "not launched with") {
+		t.Errorf("refusal must name the launched set, got %q", resp.Error.Message)
 	}
 
 	// A one-seat panel is refused (a panel needs something to be blind about).
@@ -156,9 +142,8 @@ func TestParity_AdHocPanelIsFailClosedAndComposeNotConfigure(t *testing.T) {
 	}
 }
 
-// With NO configured adapter set bound, composition is refused outright rather than trusted — "no
-// configured set" must not read as "any adapter is fine".
-func TestParity_AdHocPanelRefusedWithoutABoundAdapterSet(t *testing.T) {
+// An agent launched with NO adapter refuses every composition and says how to name one.
+func TestParity_AdHocPanelRefusedWithoutALaunchedAdapter(t *testing.T) {
 	c, stop := serveWith(t, &fakeExplorer{}, nil)
 	defer stop()
 	sid := paritySession(t, c)
@@ -166,8 +151,8 @@ func TestParity_AdHocPanelRefusedWithoutABoundAdapterSet(t *testing.T) {
 		"explorers": []any{map[string]any{"adapter": "fake", "model": "x1"}, map[string]any{"adapter": "fake", "model": "x2"}},
 		"collator":  map[string]any{"adapter": "fake", "model": "xc"},
 	}})
-	if resp.Error == nil || !strings.Contains(resp.Error.Message, "bound no configured adapter set") {
-		t.Errorf("composition without a bound set must be refused, got %+v", resp.Error)
+	if resp.Error == nil || !strings.Contains(resp.Error.Message, "launched with no adapter") || !strings.Contains(resp.Error.Message, "--adapter") {
+		t.Errorf("composition on an agent launched with no adapter must be refused naming --adapter, got %+v", resp.Error)
 	}
 }
 

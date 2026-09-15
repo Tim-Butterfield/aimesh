@@ -13,21 +13,16 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the check that was missing.
+// This file keeps every emitted `structuredContent` in step with the schema its own tool declares.
 //
 // Every tool here DECLARES an `outputSchema`, and the review one is a strict `oneOf` on `state`
 // precisely so that the governance-bearing fields can be `required` on the branch where a result
-// exists. But nothing validated an emitted `structuredContent` against the schema its own tool
-// advertised — so the declaration and the payload drifted, silently, in three places at once:
+// exists. Declaration and payload drift silently unless something checks them together, in shapes
+// such as: a CANCELLED call returning the *running* shape with `state` overwritten (which satisfies no
+// branch); `run_result` on a still-RUNNING review omitting the panel echo; `run_result` for a
+// REMEDIATION returning the receipt payload while declaring the report schema.
 //
-//  1. a CANCELLED call returned the *running* shape with `state` overwritten to "cancelled",
-//     which satisfied no branch: not `running` (the const said otherwise), not `complete`, and not
-//     the halt branch (no `exitCode`/`haltClass`/`reasonCode`);
-//  2. `run_result` on a still-RUNNING review omitted the panel echo;
-//  3. `run_result` for a REMEDIATION returned the receipt payload while declaring the report
-//     schema — a shape the declaration said could not occur.
-//
-// The fix is the branches and the payloads; THIS is the part that keeps them together. It walks
+// This file walks
 // every result builder in the package, at every state each can produce, and validates the payload
 // against the literal schema the tool declares. A new state, a new field, or a branch someone
 // loosens to make a payload fit now has to survive this table.
@@ -105,7 +100,7 @@ func conformanceReceipt(status string, committed bool) run.RemediateOutcome {
 }
 
 // conformancePartialRefusal is a COMMITTED write that refused one finding for a protected path —
-// the shape §13.4.3 specifies. It rides `isError: true` on a `state: "complete"` payload, which
+// the partial-refusal shape. It rides `isError: true` on a `state: "complete"` payload, which
 // is the combination most likely to be broken by a future edit that assumes the two move
 // together.
 func conformancePartialRefusal() run.RemediateOutcome {
@@ -229,10 +224,9 @@ func TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema(t *testing.T) {
 	}
 }
 
-// TestTheDriftTheSchemaNowCatches reconstructs the three payloads as they were emitted BEFORE this
-// fix and asserts the declared schema rejects each one. Without it the table above proves only that
+// TestTheDriftTheSchemaNowCatches constructs the three drifted payloads described at the top of this
+// file and asserts the declared schema rejects each one. Without it the table above proves only that
 // the current payloads pass — which a schema loose enough to accept anything would also achieve.
-// These three are the regression itself, kept executable.
 func TestTheDriftTheSchemaNowCatches(t *testing.T) {
 	report, err := jsonschema.Compile([]byte(reportResultSchema))
 	if err != nil {

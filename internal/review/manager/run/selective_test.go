@@ -12,12 +12,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// SELECTIVE APPLY, in the one governed write path every surface reaches (D8-A, design §13.3).
-//
-// AGAINST A TREE WITHOUT SELECTIVE APPLY every test here fails to COMPILE: `writeRequest.Select`,
-// `RemediateRequest.Select`, `review.ApplySelection`, `selectAccepted`, `ReasonSelectionEmpty`
-// and `ReasonSelectionMatchedNothing` did not exist. That is stated plainly rather than dressed up.
-// The MUTATION each test would catch is named on it, and each was run.
+// SELECTIVE APPLY, in the one governed write path every surface reaches. The MUTATION each test would
+// catch is named on it.
 //
 // The security property is the reason the write set is keyed the way it is, and it is asserted directly
 // by TestSelect_ModelAuthoredFindingIDIsNotASelector: the key is the HOST-COMPUTED fingerprint and

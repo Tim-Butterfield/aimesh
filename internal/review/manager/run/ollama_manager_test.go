@@ -269,7 +269,7 @@ func TestPreflight_AllLanesChecked(t *testing.T) {
 }
 
 func TestOllamaShell_IdentityMismatchIsACaveat(t *testing.T) {
-	// Two-call: the mismatch no longer stops the run, so it proceeds through host adjudication.
+	// Two-call: the mismatch does not stop the run, so it proceeds through host adjudication.
 	bin := fakeOllamaTwoCall(t, validReviewerResult, validHostAdjudication)
 	// a recipe whose identity extraction reports a different model than requested
 	recipe := shell.Recipes()["ollama"]

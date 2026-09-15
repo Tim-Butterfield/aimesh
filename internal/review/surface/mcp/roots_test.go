@@ -14,19 +14,15 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the LIVE `roots/list` round trip, end to end over the wire.
+// This file is the LIVE legacy `roots/list` round trip, end to end over the wire: a client that declares
+// the capability, answers the request, and changes its mind.
 //
-// The intersection rule and its fail-closed behavior were already implemented and tested — against a
-// field a test set by hand. Nothing populated it: the transport could not issue a server→client request,
-// so `roots/list` could not be asked for at all, and the server's launch-time roots were always the
-// effective set. These tests drive the real thing: a client that declares the capability, answers the
-// request, and changes its mind.
-//
-// The rule under test never varies. The effective set is startup ∩ client:
+// A path a call declares must lie inside the operator's --root ceiling AND inside the roots the client
+// declared:
 //
 //   - a client that NARROWS is honored;
 //   - a client that offers a WIDER root does NOT widen anything;
-//   - a DISJOINT client leaves no effective root, which refuses every path;
+//   - a DISJOINT client leaves no path admissible;
 //   - a client that declares nothing changes nothing;
 //   - a client that never answers changes nothing, and does not wedge the server.
 
@@ -96,7 +92,7 @@ func (c *rootedClient) call(t *testing.T, method string, params any) *response {
 // tool is the same convenience the other tests use, over this client.
 func (c *rootedClient) tool(t *testing.T, name string, args map[string]any) toolResult {
 	t.Helper()
-	resp := c.call(t, "tools/call", map[string]any{"name": name, "arguments": args})
+	resp := c.call(t, "tools/call", map[string]any{"name": name, "arguments": withPanel(name, args)})
 	if resp.Error != nil {
 		return toolResult{rpc: resp.Error}
 	}
@@ -249,7 +245,7 @@ func TestLiveRoots_AClientThatOffersASubsetNarrowsTheServer(t *testing.T) {
 	mkdirs(t, sub, other)
 
 	rv := &fakeReviewer{}
-	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{parent} }), true, true, []string{sub})
+	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{parent} }), true, true, []string{sub})
 
 	settleRoots(t, c, 1)
 	if res := c.tool(t, "review_report", map[string]any{"workspace": sub}); res.isError {
@@ -271,7 +267,7 @@ func TestLiveRoots_AClientThatOffersAWiderRootWidensNothing(t *testing.T) {
 
 	rv := &fakeReviewer{}
 	// The client declares the PARENT of the server's root, plus a wholly unrelated tree.
-	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{serverRoot} }),
+	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{serverRoot} }),
 		true, true, []string{parent, elsewhere})
 
 	settleRoots(t, c, 1)
@@ -293,7 +289,7 @@ func TestLiveRoots_AClientThatOffersAWiderRootWidensNothing(t *testing.T) {
 func TestLiveRoots_ADisjointClientLeavesNoEffectiveRootAndRefusesEverything(t *testing.T) {
 	serverRoot, clientRoot := t.TempDir(), t.TempDir()
 	rv := &fakeReviewer{}
-	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{serverRoot} }),
+	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{serverRoot} }),
 		true, true, []string{clientRoot})
 
 	settleRoots(t, c, 1)
@@ -312,7 +308,7 @@ func TestLiveRoots_ListChangedRefetchesAndRenarrows(t *testing.T) {
 	mkdirs(t, a, b)
 
 	rv := &fakeReviewer{}
-	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{parent} }), true, true, []string{a})
+	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{parent} }), true, true, []string{a})
 	settleRoots(t, c, 1)
 	if res := c.tool(t, "review_report", map[string]any{"workspace": b}); !res.isError {
 		t.Fatal("the client's first root set must have narrowed the server")
@@ -344,7 +340,7 @@ func TestLiveRoots_AClientDeclaringNoCapabilityChangesNothing(t *testing.T) {
 	rv := &fakeReviewer{}
 	// The client would have declared a narrower root — but it never declares the capability, so it is
 	// never asked and its opinion never arrives.
-	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{parent} }), false, true, []string{sub})
+	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{parent} }), false, true, []string{sub})
 	c.call(t, "tools/list", map[string]any{})
 	time.Sleep(150 * time.Millisecond)
 
@@ -361,7 +357,7 @@ func TestLiveRoots_AClientDeclaringNoCapabilityChangesNothing(t *testing.T) {
 func TestLiveRoots_AClientThatNeverAnswersLeavesTheServerUnchangedAndServing(t *testing.T) {
 	root := t.TempDir()
 	rv := &fakeReviewer{}
-	s := newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{root} })
+	s := newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{root} })
 	s.Core().RequestTimeout = 200 * time.Millisecond
 	c := serveRooted(t, s, true, false, nil)
 
@@ -385,7 +381,7 @@ func TestLiveRoots_ANonFileRootURIIsIgnoredAndTheIntersectionStaysClosed(t *test
 	rv := &fakeReviewer{}
 	sr, cw := io.Pipe()
 	cr, sw := io.Pipe()
-	s := newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{root} })
+	s := newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{root} })
 	done := make(chan struct{})
 	go func() { _ = s.Serve(sr, sw); close(done) }()
 	t.Cleanup(func() { _ = cw.Close(); <-done; _ = sw.Close() })

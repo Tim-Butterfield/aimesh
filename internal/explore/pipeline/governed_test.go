@@ -1,6 +1,6 @@
 package pipeline
 
-// End-to-end tests for the multi-round + ranking-grade governance machinery (design §0/§1/§4/§6).
+// End-to-end tests for the multi-round + ranking-grade governance machinery.
 // Everything here is hermetic — deterministic in-process fakes, no real CLI — and every test pins ONE
 // invariant from the design rather than the shape of the implementation.
 
@@ -146,7 +146,7 @@ func (s swappedIdentityAdapter) Invoke(ctx context.Context, call model.Call) (mo
 // resolves it to `claude-opus-4-1` on the pre-flight probe and to `claude-opus-4-5` afterwards. Both resolutions
 // alias-match the requested name, so per-call identity classification passes BOTH times (no mismatch) — the swap
 // is invisible to per-call verification and only the same-identity invariant catches it. That is exactly why the
-// invariant exists in addition to per-call classification (§1).
+// invariant exists in addition to per-call classification.
 type driftingAdapter struct {
 	inner model.Adapter
 	mu    sync.Mutex
@@ -203,7 +203,7 @@ func panelOf(t *testing.T, explorers []fake.Scenario, collator fake.Scenario) (R
 	return reg, plan
 }
 
-// --- 1. Typed round artifacts + the multi-round pipeline (design §6 + §1) ---
+// --- 1. Typed round artifacts + the multi-round pipeline ---
 
 // TestRunSpec_MultiRound_CarriesPriorArtifactAsUntrustedData pins the multi-round machinery: round 1 is BLIND
 // and immutable, round 2 is mediated, the round-2 prompt carries the prior artifact as explicitly-delimited
@@ -274,7 +274,7 @@ func TestRunSpec_MultiRound_CarriesPriorArtifactAsUntrustedData(t *testing.T) {
 	}
 }
 
-// TestRunSpec_IncompatibleRoundEdge_RejectedBeforeSpend pins §6's edge check: a later round that accepts a
+// TestRunSpec_IncompatibleRoundEdge_RejectedBeforeSpend pins the edge check: a later round that accepts a
 // DIFFERENT artifact kind is rejected BEFORE any round-2 model call — an incompatible edge must cost zero tokens.
 func TestRunSpec_IncompatibleRoundEdge_RejectedBeforeSpend(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
@@ -308,7 +308,7 @@ func TestRunSpec_IncompatibleRoundEdge_RejectedBeforeSpend(t *testing.T) {
 	}
 }
 
-// TestRunSpec_FixedRoundCount_TerminatesAndFailsOverCap pins §1's termination rule: the round count is FIXED by
+// TestRunSpec_FixedRoundCount_TerminatesAndFailsOverCap pins the termination rule: the round count is FIXED by
 // the mode contract (no data-dependent rule), it terminates exactly there, and a contract over the hard maximum
 // is an ERROR — never clamped.
 func TestRunSpec_FixedRoundCount_TerminatesAndFailsOverCap(t *testing.T) {
@@ -339,7 +339,7 @@ func TestRunSpec_FixedRoundCount_TerminatesAndFailsOverCap(t *testing.T) {
 	}
 }
 
-// --- 2. Dual-canonicalizer merge-agreement (design §0 F-B) ---
+// --- 2. Dual-canonicalizer merge-agreement ---
 
 // TestRunSpec_DualCanonicalizer_AgreedMergesHoldAndAgreedByRecorded: two independent canonicalizers that AGREE
 // produce the agreed partition, and every ledger row records BOTH proposing calls while the DECIDING call is the
@@ -498,7 +498,7 @@ func TestRunSpec_DualWithoutIndependentIdentity_FailsClosed(t *testing.T) {
 	}
 }
 
-// --- 3. Binding host-adjudicated confirmation round (design §4) ---
+// --- 3. Binding host-adjudicated confirmation round ---
 
 // TestRunSpec_Confirmation_WrongMergeSplitsAsNewRevision pins the confirmation round end-to-end: the provisional
 // partition is shown in a persisted randomized order, ONE explorer's typed wrong_merge splits the merge, and the
@@ -597,7 +597,7 @@ func TestRunSpec_Confirmation_NoChallenges_SettledAndCorroborated(t *testing.T) 
 	}
 }
 
-// --- 4. Anti-echo: counts stay over the immutable blind round 1 (design §0 F-A) ---
+// --- 4. Anti-echo: counts stay over the immutable blind round 1 ---
 
 // TestRunSpec_AntiEcho_LaterRoundNeverRaisesCounts is the anti-echo invariant end-to-end: round 2 is shown the
 // pooled canonical set and ECHOES it back, and no count moves — because independence counts are computed only
@@ -653,7 +653,7 @@ func TestRunSpec_AntiEcho_LaterRoundNeverRaisesCounts(t *testing.T) {
 	}
 }
 
-// --- 5. Robustness invariants (design §1) ---
+// --- 5. Robustness invariants ---
 
 // TestRun_Preflight_UnreachableRoleHaltsBeforeFanout: a collator that cannot be INVOKED at all is caught
 // by the pre-flight probe, before any explorer token is spent. That is what pre-flight is for — spending
@@ -712,7 +712,7 @@ func TestRun_Preflight_SwappedIdentityIsRecordedNotHalted(t *testing.T) {
 	}
 }
 
-// TestRun_MidRunIdentityChange_Halts pins the same-identity invariant (§1): a role that passes pre-flight and then
+// TestRun_MidRunIdentityChange_Halts pins the same-identity invariant: a role that passes pre-flight and then
 // resolves to a DIFFERENT model mid-exploration halts — artifacts from two different models cannot be honestly
 // combined into one result.
 func TestRun_MidRunIdentityChange_Halts(t *testing.T) {
@@ -747,7 +747,7 @@ func TestRun_MidRunIdentityChange_Halts(t *testing.T) {
 	}
 }
 
-// TestRun_DualDenominators_WithAbstainingExplorer pins §1's dual denominators end-to-end: an explorer that
+// TestRun_DualDenominators_WithAbstainingExplorer pins the dual denominators end-to-end: an explorer that
 // DELIBERATELY abstains leaves the PANEL denominator at 3 while the RESPONDENTS denominator drops to 2, with the
 // absence categories tallied distinctly.
 func TestRun_DualDenominators_WithAbstainingExplorer(t *testing.T) {
@@ -789,7 +789,7 @@ func TestRun_DualDenominators_WithAbstainingExplorer(t *testing.T) {
 	}
 }
 
-// TestRun_DegradedTerminalArtifact_EmergentSpaceIsRawAndLabeled pins §1's per-mode-class degraded artifact for an
+// TestRun_DegradedTerminalArtifact_EmergentSpaceIsRawAndLabeled pins the per-mode-class degraded artifact for an
 // EMERGENT-space mode: the raw attributed blind round-1 envelopes plus a MECHANICAL typed-claim index, labeled
 // `uncollated — no entity resolution performed`. It must NOT be a synthesized register (that would itself be
 // covert entity resolution by the host).

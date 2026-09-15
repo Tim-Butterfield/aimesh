@@ -251,8 +251,8 @@ func TestDryRun_RefusesAnInadmissibleWorkspace(t *testing.T) {
 	// A root INSIDE a protected family. Exclusion is judged on components relative to the root, so
 	// naming one as the root is what would strip its protection — hence the refusal.
 	//
-	// `.vscode`, deliberately, and NOT `.aimesh`: run artifacts are readable without a flag now, so
-	// `.aimesh` is no longer a refusal and would make this test assert nothing.
+	// `.vscode`, deliberately, and NOT `.aimesh`: run artifacts are readable without a flag, so
+	// `.aimesh` is not a refusal and would make this test assert nothing.
 	ws := filepath.Join(t.TempDir(), ".vscode", "temp", "sample")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)

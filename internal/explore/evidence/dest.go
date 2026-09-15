@@ -23,7 +23,7 @@ package evidence
 //     database is derived and a rebuild really is a rebuild — but the FILE is the user's, and a typo
 //     must not be the thing that discovers that.
 //   - ATOMIC REPLACE. The database is built into a temporary file in the destination's own directory,
-//     fsynced, and then renamed over the destination. An export killed halfway can no longer leave a
+//     fsynced, and then renamed over the destination. An export killed halfway cannot leave a
 //     truncated database where a valid one was: the rename is the only moment the destination changes,
 //     and it either happened or it did not.
 //   - A REGULAR FILE ONLY. A destination that is a directory, a symlink or a device is refused rather
@@ -212,8 +212,8 @@ func writeAtomic(runDir string, rec *runRecord, dest destination) (Summary, erro
 	tmp := f.Name()
 	_ = f.Close()
 	// The published database therefore inherits os.CreateTemp's 0600 rather than the 0644-and-umask a
-	// direct SQLite create used to produce. That is left as it is, deliberately: it is strictly TIGHTER
-	// than any previous outcome, it is what an evidence database full of prompts and model output should
+	// direct SQLite create would produce. That is deliberate: it is strictly TIGHTER
+	// than that, it is what an evidence database full of prompts and model output should
 	// be, and widening it back to 0644 here would ignore the operator's umask instead of respecting it.
 
 	// The temp sibling is judged by the SAME non-overridable denylist as the destination. It sits in a

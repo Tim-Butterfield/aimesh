@@ -61,7 +61,7 @@
     },
     "trace": {
       "type": "object",
-      "description": "The caller's W3C trace context, CARRIED VERBATIM from the request that started this run (MCP `2026-07-28` `_meta`: the unprefixed `traceparent`/`tracestate`/`baggage` keys). It is carried, never interpreted, and never validated — the spec's W3C-format MUST binds the sender, and of every reserved `_meta` key it says implementations MUST NOT make assumptions about the values, so a malformed value is recorded as it arrived. ABSENT when the caller sent none — every CLI run and every legacy-era request — so a run without one is byte-identical to a run written before this field existed. WHAT IT DOES NOT GIVE YOU: token counts or cost. No run in this repo records either; `measures` states that inside the record so a reader cannot mistake a correlated run for a metered one.",
+      "description": "The caller's W3C trace context, CARRIED VERBATIM from the request that started this run (MCP `2026-07-28` `_meta`: the unprefixed `traceparent`/`tracestate`/`baggage` keys). It is carried, never interpreted, and never validated — the spec's W3C-format MUST binds the sender, and of every reserved `_meta` key it says implementations MUST NOT make assumptions about the values, so a malformed value is recorded as it arrived. ABSENT when the caller sent none — every CLI run and every legacy-era request. WHAT IT DOES NOT GIVE YOU: token counts or cost. No run in this repo records either; `measures` states that inside the record so a reader cannot mistake a correlated run for a metered one.",
       "additionalProperties": false,
       "required": ["measures"],
       "properties": {
@@ -77,7 +77,7 @@
     },
     "halt": {
       "type": "object",
-      "description": "A machine-readable halt SUMMARY. The full record (with call id, exit code, timestamps and the human detail) is halt-record.json — this is the pointer-free summary a reader of run-state can act on. Previously this $ref'd halt-record.schema.json, which the written artifact never satisfied (it carries only the summary fields).",
+      "description": "A machine-readable halt SUMMARY. The full record (with call id, exit code, timestamps and the human detail) is halt-record.json — this is the pointer-free summary a reader of run-state can act on. It carries only the summary fields, so it does not $ref halt-record.schema.json.",
       "additionalProperties": false,
       "required": ["haltClass"],
       "properties": {

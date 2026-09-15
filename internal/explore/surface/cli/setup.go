@@ -17,10 +17,8 @@ import (
 
 // This file is exploremesh's HEADLESS configuration surface (`setup`) — the CLI path to everything the
 // config-only web workbench can do: record/clear a shell adapter's binary path, detect/add/remove a
-// user-defined ACP adapter, and create / delete a profile. Before it, the ONLY supported
-// ways to configure exploremesh were the built web UI (`ui`, which needs `make ui-build-exploremesh`)
-// and hand-editing YAML — so a headless install had no supported path at all, and NEITHER app could add
-// an ACP adapter from a terminal.
+// user-defined ACP adapter, and create / delete a profile — so a headless install has a supported
+// configuration path that is not hand-editing YAML.
 //
 // Every write goes through the SAME governed manager seams the workbench uses (ConfigureAdapterPath /
 // RemoveAdapter / DetectACP / SaveACP / RemoveACP / SaveProfile / DeleteProfile), so

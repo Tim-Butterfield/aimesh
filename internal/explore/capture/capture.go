@@ -32,14 +32,14 @@ import (
 // raw-formulation.txt nor formulate-prompt.txt is written. No registered mode takes the collator-formulated
 // leg, so those two files are written by NO run.
 //
-// v3: a run FREEZES its panel + counting policy before any judgment is solicited (design §1), so
+// v3: a run FREEZES its panel + counting policy before any judgment is solicited, so
 // `countingPolicyHash` is present on EVERY manifest, in every mode. The other governance fields (revision
 // chain, confirmation tallies, governance-claims hash, degraded class, round count) are omitempty and appear
 // only when the corresponding stage ran. The frozen policy hash is the evidence that the counting rules
 // predate the counts.
 //
 // v4: the run directory carries the run's DECLARED TASK (`task.json`) and the manifest carries the `mode`
-// the run executed. Both exist because §9's SQLite export is DERIVED FROM THE RUN DIRECTORY ALONE — and a
+// the run executed. Both exist because the SQLite export is DERIVED FROM THE RUN DIRECTORY ALONE — and a
 // run dir that does not record which mode produced it, or what the user actually asked for, is not a system
 // of record. These are capture-INDEX facts, not prompt/output/governance behavior, which is precisely what a
 // schemaVersion is for.
@@ -83,7 +83,7 @@ type AliasEntry struct {
 // repairs applied before the drop, and the bounded raw-body provenance (captured/full length, a
 // truncation flag, and both digests) plus the run-relative path of the raw file. RawPath is empty when
 // no body was captured (a drop before the model call). It makes a dropped/halted panel diagnosable from
-// the dump alone — the gap a real 3-provider dogfood hit.
+// the dump alone.
 type DropRecord struct {
 	Adapter     string   `json:"adapter"`
 	Model       string   `json:"model"`
@@ -109,8 +109,8 @@ type ManifestV1 struct {
 	RunID         string `json:"runId"`
 	Status        string `json:"status"` // "complete" | "halted"
 	Fault         string `json:"fault,omitempty"`
-	// Mode is the app-owned mode this run EXECUTED (design §3), stamped by the pipeline. It is what makes the
-	// run directory self-describing for the derived export (§9): every other field means something different
+	// Mode is the app-owned mode this run EXECUTED, stamped by the pipeline. It is what makes the
+	// run directory self-describing for the derived export: every other field means something different
 	// depending on which contract produced it. omitempty so a caller that supplies no result mode (a
 	// hand-built Input in a test) records exactly what it did before.
 	Mode           string                    `json:"mode,omitempty"`
@@ -121,7 +121,7 @@ type ManifestV1 struct {
 	Envelopes      []AliasEntry              `json:"envelopes"`
 	Dropped        []DropRecord              `json:"dropped,omitempty"`
 	Artifacts      []ArtifactEntry           `json:"artifacts"`
-	// Canonicalization fields (design §4): populated ONLY for a CANONICALIZING mode (Catalog). A
+	// Canonicalization fields: populated ONLY for a CANONICALIZING mode (Catalog). A
 	// non-zero PartitionRevisionHash means the surjectivity gate PASSED (canon.Canonicalize returns an
 	// error otherwise, so a recorded partition is a held one — Surjectivity is "holds"). LedgerRows is the
 	// append-only merge-ledger row count (one per raw nomination). omitempty ⇒ a plain-collate mode's
@@ -130,7 +130,7 @@ type ManifestV1 struct {
 	Surjectivity          string `json:"surjectivity,omitempty"`
 	LedgerRows            int    `json:"ledgerRows,omitempty"`
 	// Canonicalizers + CanonicalizerProvenance answer, from the manifest alone, "which identities decided
-	// which merges hold, and who chose them" (design §4). Provenance is `explicit` (a request or a profile
+	// which merges hold, and who chose them". Provenance is `explicit` (a request or a profile
 	// named them) or `derived` (the host picked them — slot a the collator, slot b the first explorer by
 	// PREFERENCE order that differs from it). Both are absent for a non-canonicalizing mode.
 	Canonicalizers          []schema.ExplorerIdentity `json:"canonicalizers,omitempty"`
@@ -139,7 +139,7 @@ type ManifestV1 struct {
 	// both slots ran one model behind two adapters. Every corroboration count in the run rests on the
 	// difference, so it belongs beside the identities rather than only on the live surfaces.
 	CanonicalizerIndependence string `json:"canonicalizerIndependence,omitempty"`
-	// Governance fields (design §1/§4/§9), all omitempty so a Map/Synthesize/Catalog manifest carries none of them:
+	// Governance fields, all omitempty so a Map/Synthesize/Catalog manifest carries none of them:
 	// the executed round count, the ledger revision + the revision it supersedes (a confirmation revision is a
 	// NEW entry — the prior one is retained on disk), the confirmation rule version + challenge/contested
 	// tallies, and the frozen counting-policy hash + emitted-claims hash. Together they make the governance
@@ -155,7 +155,7 @@ type ManifestV1 struct {
 	GovernanceClaimsHash  string `json:"governanceClaimsHash,omitempty"`
 	GovernanceClaims      int    `json:"governanceClaims,omitempty"`
 	DegradedTerminalClass string `json:"degradedTerminalClass,omitempty"`
-	// Ballot decision fields (design §4), all omitempty and present ONLY for a ballot-bearing mode — so a
+	// Ballot decision fields, all omitempty and present ONLY for a ballot-bearing mode — so a
 	// manifest for any other mode carries none of them. DecisionInputsHash is the hash
 	// of the inputs frozen BEFORE the ballot was solicited: it is what makes "the criteria predate the votes"
 	// checkable from the manifest alone.
@@ -222,7 +222,7 @@ const ArtifactSubdir = "explore"
 func DefaultArtifactDir() string { return localstate.RunDir(ArtifactSubdir, "") }
 
 // ArtifactDir resolves the base directory captured runs are written under. It is one function rather than
-// three copies of the same env lookup because run capture is now selectable from EVERY surface (CLI
+// three copies of the same env lookup because run capture is selectable from EVERY surface (CLI
 // `--dump-run`, ACP `_meta.exploremesh.dumpRun`, and by default for an MCP run) — and a surface that
 // resolved the directory differently would leave its runs somewhere the others cannot find.
 func ArtifactDir() string {
@@ -236,8 +236,8 @@ type Input struct {
 	Result pipeline.Result
 	Status string // "complete" | "halted"
 	Fault  string // populated when Status == "halted"
-	// Task is the user's DECLARED task (design §6.2), persisted as `task.json`. It is here for the derived
-	// SQLite export (§9): a fixed-space run's whole governance rides on the option set / criteria /
+	// Task is the user's DECLARED task, persisted as `task.json`. It is here for the derived
+	// SQLite export: a fixed-space run's whole governance rides on the option set / criteria /
 	// estimation target the USER declared, and a run directory that recorded the answers but not the
 	// question could not reproduce the result. The zero value writes nothing, so a caller that supplies no
 	// task records exactly what it did before.
@@ -284,7 +284,7 @@ func Dump(in Input) error {
 			return err
 		}
 	}
-	// The DECLARED TASK (§6.2/§9). Written first among the JSON artifacts because it is what every other
+	// The DECLARED TASK. Written first among the JSON artifacts because it is what every other
 	// artifact is an answer to — and, for a fixed-space mode, it carries the declared option set / criteria /
 	// estimation target the whole result is computed over.
 	if strings.TrimSpace(in.Task.Purpose) != "" {
@@ -301,9 +301,9 @@ func Dump(in Input) error {
 		}
 	}
 
-	// Canonicalizing modes (Catalog, §4): the canonicalizer prompt + its RAW output (retained even on a
+	// Canonicalizing modes (Catalog): the canonicalizer prompt + its RAW output (retained even on a
 	// parse failure), and the APPEND-ONLY merge-ledger as merge-ledger.jsonl — one JSON row per raw
-	// nomination → canonical ID decision, in the order the append-only ledger recorded them (§9's system
+	// nomination → canonical ID decision, in the order the append-only ledger recorded them (the system
 	// of record). Present only when a canonicalizing mode ran.
 	if r.CanonicalizerPrompt != "" {
 		if err := write("canonicalizer-prompt.txt", []byte(r.CanonicalizerPrompt)); err != nil {
@@ -321,7 +321,7 @@ func Dump(in Input) error {
 		}
 	}
 
-	// Governance artifacts (design §1/§4/§9), each written only when the stage ran — so a Map/Synthesize/
+	// Governance artifacts, each written only when the stage ran — so a Map/Synthesize/
 	// Catalog run's dump contains none of them. The provisional merge-ledger is written ALONGSIDE the confirmed one
 	// (never replaced): a confirmation revision is a new append-only entry and the superseded revision must stay
 	// readable, which is what makes the revision chain checkable after the fact.
@@ -365,7 +365,7 @@ func Dump(in Input) error {
 			return err
 		}
 	}
-	// The BALLOT decision (§9's decisions.json + ballots.json): the frozen+hashed inputs, every recorded
+	// The BALLOT decision (decisions.json + ballots.json): the frozen+hashed inputs, every recorded
 	// ballot, and the host tally. Written only for a ballot-bearing mode, so no other mode's dump contains
 	// it. It is written even when the run halted before the tally — the frozen inputs alone are the
 	// evidence that the framing predated the vote.
@@ -485,7 +485,7 @@ func Dump(in Input) error {
 }
 
 // ledgerJSONL renders a canonicalization revision's append-only merge-ledger as JSON Lines — one row per raw
-// nomination → canonical ID decision, in the exact order the ledger recorded them (§9's system of record).
+// nomination → canonical ID decision, in the exact order the ledger recorded them (system of record).
 func ledgerJSONL(res *canon.Result) []byte {
 	var buf bytes.Buffer
 	for _, row := range res.Ledger.Rows() {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -144,7 +145,7 @@ type Server struct {
 	// ProtocolLegacy the process is a pre-2026-07-28 server in every observable respect — see the
 	// constant's own comment for why `server/discover` must be an unknown method there.
 	//
-	// SUNSET-PATH (MCP26-SUNSET; migration design §16.2): the whole field goes with the era.
+	// SUNSET-PATH (MCP26-SUNSET): the whole field goes with the era.
 	Protocol ProtocolMode
 	// PageSize bounds one `tools/list` page. 0 (the default) returns every tool in one page with no
 	// nextCursor — the honest answer for a handful of tools. A non-zero value exercises real paging; a
@@ -243,7 +244,7 @@ type Server struct {
 	// The server→client request table (see outgoing.go). It has its own mutex because a Request may be
 	// issued from a handler goroutine while the read loop is delivering another one's response.
 	//
-	// SUNSET-PATH (MCP26-SUNSET; migration design §16.2). These four fields, the `OnRoots` and
+	// SUNSET-PATH (MCP26-SUNSET). These four fields, the `OnRoots` and
 	// `RequestTimeout` fields above, and the `closeOutgoing` / `deliver` / `refreshRoots` call sites
 	// in this file all belong to outgoing.go and are deleted WITH that file. They are named here
 	// because the checklist row says "file deleted outright" and the file's dependents live in this
@@ -350,7 +351,7 @@ func (s *Server) ServeFramed(f Framer) error {
 		// ADMISSION — step 1 of the era order finishes here (the envelope is now known valid), and
 		// steps 2–5 plus the latch happen inside admit. Three outcomes, and the third is the one that
 		// keeps the legacy surface byte-identical: a request carrying no modern `_meta` falls straight
-		// through to the switch below, exactly as before this file learned about eras.
+		// through to the switch below, unchanged by era handling.
 		if !notif {
 			menv, answer := s.admit(&req)
 			if answer != nil {
@@ -602,10 +603,10 @@ type clientCapabilities struct {
 	} `json:"roots,omitempty"`
 }
 
-// initialize answers the handshake: NEGOTIATE the protocol version (echo a supported one verbatim, refuse
-// anything else), declare capabilities, and return serverInfo + instructions.
+// initialize answers the handshake: NEGOTIATE the protocol version (echo a supported one verbatim, answer
+// any other with the latest supported version), declare capabilities, and return serverInfo + instructions.
 //
-// SUNSET-PATH (MCP26-SUNSET; migration design §16.2). THE WHOLE HANDSHAKE GOES WITH THE LEGACY ERA,
+// SUNSET-PATH (MCP26-SUNSET). THE WHOLE HANDSHAKE GOES WITH THE LEGACY ERA,
 // and this comment covers the block it anchors: `initialize`, `initializeParams`,
 // `clientCapabilities`, `markInitialized`, `rollbackInitialize`, `NegotiatedVersion`, the
 // `notifications/initialized` dispatch arm, and the session fields `initialized` / `handshook` /
@@ -627,20 +628,11 @@ func (s *Server) initialize(id json.RawMessage, params json.RawMessage) *rpcResp
 		}
 	}
 	want = strings.TrimSpace(want)
-	supported := false
-	for _, v := range SupportedProtocolVersions {
-		if v == want {
-			supported = true
-			break
-		}
-	}
-	if !supported {
-		// A clean refusal, not a silent downgrade. Answering with our own latest version (which the spec
-		// permits) would let an unsupported client believe the handshake succeeded.
-		return errResp(id, CodeInvalidParams, fmt.Sprintf(
-			"unsupported or missing protocolVersion %q: this server implements %s",
-			want, strings.Join(SupportedProtocolVersions, ", ")),
-			map[string]any{"supported": SupportedProtocolVersions, "latest": LatestProtocolVersion})
+	// Version negotiation per the MCP lifecycle: a supported version is echoed; any other is answered
+	// with the latest version this server supports, and the client decides whether to proceed. Refusing
+	// instead breaks clients that open with a newer revision than this server implements.
+	if !slices.Contains(SupportedProtocolVersions, want) {
+		want = LatestProtocolVersion
 	}
 	s.mu.Lock()
 	s.handshook = true
@@ -783,7 +775,7 @@ func (s *Server) setLevel(id json.RawMessage, params json.RawMessage) *rpcRespon
 
 // log emits `notifications/message` when the level is at or above the client's selected minimum.
 //
-// SUNSET-PATH (MCP26-SUNSET; migration design §16.2). THE WHOLE `notifications/message` PATH IS
+// SUNSET-PATH (MCP26-SUNSET). THE WHOLE `notifications/message` PATH IS
 // DELETED OUTRIGHT at legacy removal, not un-gated: `Server.log`, `Call.Log`'s body, `setLevel` and
 // `setLevelParams`, the session `level` field, and the `Level` vocabulary in mcp.go (the eight
 // constants, `levelRank`, `ValidLevel`, `LevelNames`). There is no modern path to collapse into —

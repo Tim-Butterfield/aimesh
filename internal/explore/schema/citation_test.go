@@ -106,7 +106,7 @@ func TestApplyCitations_KeepsValidDropsUnknown(t *testing.T) {
 		}
 	}
 	// Only `envelope#9` is DROPPED: it is a ref to this run that the host checked and rejected. The three
-	// free-text sources name things outside the run entirely, and those are now retained as unverified
+	// free-text sources name things outside the run entirely, and those are retained as unverified
 	// references rather than discarded — a pointer the host never looked at is a different fact from one
 	// it looked at and refused. See TestApplyCitations_ExternalReferencesAreLabeledNotDropped.
 	want := CitationReport{Findings: 4, Cited: 2, Uncited: 2, RefsKept: 3, RefsDropped: 1, RefsUnverified: 3}
@@ -118,8 +118,8 @@ func TestApplyCitations_KeepsValidDropsUnknown(t *testing.T) {
 // TestApplyCitations_ExternalReferencesAreLabeledNotDropped.
 //
 // exploremesh reads no filesystem — a deliberate posture, not a gap — so it cannot tell whether
-// `src/foo.rs` exists. The failure that posture used to permit was silent: the pointer was discarded,
-// and a reader saw a finding with no indication that it had ever named anything. Three statements have
+// `src/foo.rs` exists. The failure that posture would permit is silent: the pointer is discarded,
+// and a reader sees a finding with no indication that it ever named anything. Three statements have
 // to stay distinguishable, and each needs its own place:
 //
 //   - SOURCED — a ref that resolved to a response this panel produced (Sources).

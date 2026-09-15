@@ -44,9 +44,9 @@ func mergedProvisional(t *testing.T) Result {
 	return res
 }
 
-// TestPresent_RandomizedPersistedAndReproducible pins §4's presentation rule: the order covers every entity, is
+// TestPresent_RandomizedPersistedAndReproducible pins the presentation rule: the order covers every entity, is
 // DECORRELATED from the canonicalizer's cluster order, and is exactly reproducible from the persisted seed
-// material (so "what order was it shown in" is answerable later, §0 F-C).
+// material (so "what order was it shown in" is answerable later).
 func TestPresent_RandomizedPersistedAndReproducible(t *testing.T) {
 	res := provisional(t)
 	pres := Present(res, "payload-hash\x00"+res.PartitionRevisionHash)
@@ -148,7 +148,7 @@ func TestParseChallenges_TypedAndHostAttributed(t *testing.T) {
 	}
 }
 
-// TestConfirm_WrongMerge_SplitsAsNewRevision is the core §4 invariant: ONE wrong_merge flag splits the merge,
+// TestConfirm_WrongMerge_SplitsAsNewRevision is the core confirmation invariant: ONE wrong_merge flag splits the merge,
 // the split is a NEW append-only ledger revision chained to the one it supersedes, and the PRIOR revision is
 // retained untouched (never an in-place edit). The resolution records the versioned host rule.
 func TestConfirm_WrongMerge_SplitsAsNewRevision(t *testing.T) {
@@ -356,7 +356,7 @@ func TestConfirm_RequiresNominations(t *testing.T) {
 	}
 }
 
-// TestConfirmation_MarshalsFully pins the persisted confirmation record (§9): the presentation order, the typed
+// TestConfirmation_MarshalsFully pins the persisted confirmation record: the presentation order, the typed
 // challenges, the versioned resolutions, the contested mappings and the revision chain all serialize.
 func TestConfirmation_MarshalsFully(t *testing.T) {
 	prov := mergedProvisional(t)

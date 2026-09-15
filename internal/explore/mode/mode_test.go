@@ -21,7 +21,7 @@ func TestLookup_MapIsRegisteredAndFormulationFree(t *testing.T) {
 		t.Errorf("spec.Name = %q, want %q", spec.Name, Map)
 	}
 	if !spec.FormulationFree {
-		t.Error("map must be formulation-free (§3)")
+		t.Error("map must be formulation-free")
 	}
 	if spec.Objective != ObjectiveCollateOnly {
 		t.Errorf("map objective = %q, want collate_only", spec.Objective)
@@ -81,7 +81,7 @@ func TestLookup_SynthesizeRegisteredAndFormulationFree(t *testing.T) {
 		t.Fatalf("synthesize mode is not registered")
 	}
 	if !spec.FormulationFree {
-		t.Error("synthesize must be formulation-free (§5: the app owns the round-1 contract)")
+		t.Error("synthesize must be formulation-free (the app owns the round-1 contract)")
 	}
 	if spec.Objective != ObjectiveSelectCompose {
 		t.Errorf("synthesize objective = %q, want select_compose", spec.Objective)
@@ -198,7 +198,7 @@ func TestLookup_CatalogRegisteredAndCanonicalizing(t *testing.T) {
 		t.Fatalf("catalog mode is not registered")
 	}
 	if !spec.FormulationFree {
-		t.Error("catalog must be formulation-free (§5: the app owns the round-1 contract)")
+		t.Error("catalog must be formulation-free (the app owns the round-1 contract)")
 	}
 	if spec.Objective != ObjectiveCanonicalizeCollate {
 		t.Errorf("catalog objective = %q, want canonicalize_collate", spec.Objective)
@@ -344,7 +344,7 @@ func TestRegisteredModes_ObserveModesUnchanged(t *testing.T) {
 			t.Errorf("%s: an emergent-space mode declares no fixed-space contract", name)
 		}
 		if adjudicative[name] {
-			// §3: confirmation covers EVERY count-bearing mode — giving one of them a guard the others lack is
+			// Confirmation covers EVERY count-bearing mode — giving one of them a guard the others lack is
 			// exactly the asymmetry to avoid, so assert they all carry it.
 			if !spec.Canonicalization.Dual || !spec.Canonicalization.Confirm {
 				t.Errorf("%s: an adjudicative mode must take the ranking-grade policy (dual + confirm): %+v", name, spec.Canonicalization)

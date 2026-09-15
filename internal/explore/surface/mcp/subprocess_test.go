@@ -14,9 +14,6 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
-	"github.com/Tim-Butterfield/aimesh/meshcore/localstate"
 )
 
 // This file drives the REAL `exploremesh mcp` binary over real stdio with the official SDK client, and
@@ -69,29 +66,12 @@ type buildFailure struct {
 
 func (b *buildFailure) Error() string { return b.err.Error() + "\n" + b.out }
 
-// hermeticEnv isolates the child from the developer's real configuration and gives it an all-`fake`
-// profile: two in-process fake explorers + a fake collator. No real CLI is ever spawned.
+// hermeticEnv isolates the child from the developer's machine and unlocks the internal fake adapter, so a
+// child launched with `--adapter fake` runs in-process fake explorers and collator. No real CLI is spawned.
 func hermeticEnv(t *testing.T) []string {
 	t.Helper()
-	home := t.TempDir()
-	dir := filepath.Join(home, localstate.HomeDirName, roster.ComponentName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	const profiles = `schemaVersion: 1
-defaultProfile: default
-profiles:
-  default:
-    explorers:
-      - { adapter: fake, model: fake-a, effort: high }
-      - { adapter: fake, model: fake-b, effort: medium }
-    collator: { adapter: fake, model: fake-c, effort: high }
-`
-	if err := os.WriteFile(filepath.Join(dir, "profiles.yaml"), []byte(profiles), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	return append(os.Environ(),
-		"AIMESH_HOME="+home,
+		"AIMESH_HOME="+t.TempDir(),
 		"EXPLOREMESH_ARTIFACT_DIR="+t.TempDir(),
 		"AIMESH_INTERNAL_FAKE=1", // unlock the hidden internal fake harness for the child
 	)
@@ -109,9 +89,8 @@ func (t teeReadCloser) Close() error               { return t.c.Close() }
 
 func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 	bin := binary(t)
-	// The child runs in a THROWAWAY cwd: config resolution is root-anchored, so launching inside the
-	// checkout would bind it to this repo's project-scope config instead of the hermetic home.
-	cmd := exec.Command(bin, "explore", "mcp", "--wait-seconds", "60")
+	// The child runs in a THROWAWAY cwd so nothing about this checkout can reach it.
+	cmd := exec.Command(bin, "explore", "mcp", "--adapter", "fake", "--wait-seconds", "60")
 	cmd.Dir = t.TempDir()
 	cmd.Env = hermeticEnv(t)
 	// `stderr` must be the concurrency-safe buffer: os/exec copies the child's stderr on its own
@@ -183,6 +162,7 @@ func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 
 	params := &sdk.CallToolParams{Name: "explore", Arguments: map[string]any{
 		"purpose": "choose a datastore for the ingest service", "criteria": []string{"cost", "latency"}, "mode": "map",
+		"panel": defaultPanel(),
 	}}
 	params.Meta = sdk.Meta{"progressToken": "sub-1"}
 	res, err := session.CallTool(ctx, params)

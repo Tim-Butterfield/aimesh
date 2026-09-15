@@ -1,7 +1,6 @@
 package schema
 
-// This file holds the round-1 prompt of the shipped AI-COLLAB composition (design §11: "ai-collab
-// reproduced"). The owner's ai-collab decomposes into three exploremesh stages — each agent SHORTLISTS its
+// This file holds the round-1 prompt of the shipped AI-COLLAB composition. The owner's ai-collab decomposes into three exploremesh stages — each agent SHORTLISTS its
 // own findings blind, then the agents CHALLENGE each other's findings through the collator-mediated
 // cross-review, then one terminal collation — so the composition needs exactly one artifact of its own: a
 // blind round-1 prompt that asks for the agent's OWN findings about the task rather than an attack on a

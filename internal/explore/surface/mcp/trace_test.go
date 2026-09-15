@@ -44,6 +44,7 @@ func TestSubprocess_ModernTraceContextReachesTheRunRecord(t *testing.T) {
 		"name": "explore",
 		"arguments": map[string]any{
 			"purpose": "choose a datastore for the ingest service", "criteria": []string{"cost", "latency"}, "mode": "map",
+			"panel": defaultPanel(),
 		},
 		"_meta": mergeMeta(c.meta(nil), map[string]any{
 			"traceparent": wantParent, "tracestate": wantState, "baggage": wantBag,
@@ -86,6 +87,7 @@ func TestSubprocess_ModernTraceContextReachesTheRunRecord(t *testing.T) {
 		"name": "explore",
 		"arguments": map[string]any{
 			"purpose": "choose a queue", "criteria": []string{"cost"}, "mode": "map",
+			"panel": defaultPanel(),
 		},
 		"_meta": mergeMeta(c.meta(nil), map[string]any{"traceparent": malformed}),
 	})
@@ -113,6 +115,7 @@ func TestSubprocess_ARunWithoutTraceContextRecordsNoTraceBlock(t *testing.T) {
 		"name": "explore",
 		"arguments": map[string]any{
 			"purpose": "choose a datastore", "criteria": []string{"cost"}, "mode": "map",
+			"panel": defaultPanel(),
 		},
 		"_meta": c.meta(nil),
 	})
@@ -146,7 +149,7 @@ func readManifest(t *testing.T, path string) map[string]any {
 func startMCPWithArtifacts(t *testing.T, artifacts string, args ...string) (*modernClient, *lockedBuffer, func()) {
 	t.Helper()
 	bin := binary(t)
-	cmd := exec.Command(bin, append([]string{"explore", "mcp"}, args...)...)
+	cmd := exec.Command(bin, append([]string{"explore", "mcp", "--adapter", "fake"}, args...)...)
 	cmd.Dir = t.TempDir()
 	// hermeticEnv points the artifact dir at a temp dir it does not return; the entry is REPLACED
 	// rather than appended, because a duplicated key in an exec environment is resolved differently

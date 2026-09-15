@@ -166,14 +166,17 @@ func (c *Client) Notify(method string, params any) error {
 type Options struct {
 	// Framing is the wire framing ("" → the agent's default).
 	Framing string
-	// Dir is the child's working directory ("" inherits the parent's). It matters twice: it
-	// is where the child discovers project config, and — with no Roots — it is the trusted
-	// root the child adopts by default (consent by launch context).
+	// Dir is the child's working directory ("" inherits the parent's). The agent infers nothing
+	// from it: every turn declares its own absolute workspace.
 	Dir string
-	// Roots are the child's TRUSTED workspace roots (`--root`, repeatable). A driver that
-	// will send a workspace path must list it here: over ACP a request path is not its own
-	// consent, so an unlisted workspace is refused before any run.
+	// Adapters are the adapters the child is launched with (`--adapter`, repeatable). A review
+	// turn's panel may name only these.
+	Adapters []string
+	// Roots are the child's `--root` ceiling (repeatable): every workspace a turn declares must
+	// lie inside it. Empty means no ceiling.
 	Roots []string
+	// AllowWrites launches the child with `--allow-writes`, so an apply turn can write.
+	AllowWrites bool
 	// Env is passed verbatim (nil inherits the parent environment).
 	Env []string
 	// ErrSink receives the child's stderr (nil → discarded).
@@ -183,15 +186,13 @@ type Options struct {
 // Launch starts `<bin> acp [--framing <framing>]` as a subprocess and returns a Client
 // wired to its stdio plus a stop func that sends `exit` and waits for clean termination.
 // env (e.g. REVIEWMESH_ARTIFACT_DIR, REVIEWMESH_FAKE_SCENARIO) is passed verbatim; nil
-// inherits the parent environment. stderr is sent to errSink (nil → discarded). The child
-// adopts its own working directory as the trusted root; use LaunchWith to name roots.
+// inherits the parent environment. stderr is sent to errSink (nil → discarded). The child is
+// launched with no adapter; use LaunchWith to name adapters, a --root ceiling or --allow-writes.
 func Launch(bin, framing string, env []string, errSink io.Writer) (*Client, func() error, error) {
 	return LaunchWith(bin, Options{Framing: framing, Env: env, ErrSink: errSink})
 }
 
 // LaunchIn is Launch with an explicit child working directory (dir; "" inherits the parent cwd).
-// A caller that must isolate the child from a live project config (`<cwd>/.reviewmesh/…`) — e.g.
-// the web-UI ACP validator — passes a throwaway dir that contains no `.reviewmesh`.
 func LaunchIn(dir, bin, framing string, env []string, errSink io.Writer) (*Client, func() error, error) {
 	return LaunchWith(bin, Options{Framing: framing, Dir: dir, Env: env, ErrSink: errSink})
 }
@@ -203,8 +204,14 @@ func LaunchWith(bin string, o Options) (*Client, func() error, error) {
 	if framing != "" {
 		args = append(args, "--framing", framing)
 	}
+	for _, a := range o.Adapters {
+		args = append(args, "--adapter", a)
+	}
 	for _, r := range o.Roots {
 		args = append(args, "--root", r)
+	}
+	if o.AllowWrites {
+		args = append(args, "--allow-writes")
 	}
 	cmd := exec.Command(bin, args...)
 	cmd.Env = env

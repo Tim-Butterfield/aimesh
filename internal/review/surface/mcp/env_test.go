@@ -18,9 +18,9 @@ import (
 // the caller never asked for. The env captures the resolver once, when the call arrives, and the
 // write is recorded against that.
 //
-// The property is proved on the `fromRun` write, which is the only write this surface has: D5 removes
-// the FULL-CYCLE `review_remediate {workspace}` form (a write whose response is cancelled would leave
-// the caller holding no handle to the run it created).
+// The property is proved on the `fromRun` write, which is the only write this surface has: there is no
+// one-call review-and-write form (a write whose response is cancelled would leave the caller holding no
+// handle to the run it created).
 
 // gatedReviewer is the fake Manager with a gate: the phase under test blocks until the test releases
 // it, which is the window in which the client changes its roots.
@@ -43,7 +43,7 @@ func TestPerRequestTrust_TheWriteIsRecordedAgainstTheRootsTheCallArrivedWith(t *
 
 	rv := &gatedReviewer{entered: make(chan struct{}), release: make(chan struct{})}
 	s := newServer(t, rv, func(s *mcp.Server) {
-		s.Roots, s.AllowRemediate = []string{parent}, true
+		s.Ceiling, s.AllowWrites = []string{parent}, true
 	})
 	// The client declares the server's own root, so nothing is narrowed to begin with.
 	c := serveRooted(t, s, true, true, []string{parent})
@@ -63,7 +63,7 @@ func TestPerRequestTrust_TheWriteIsRecordedAgainstTheRootsTheCallArrivedWith(t *
 	done := make(chan toolResult, 1)
 	go func() {
 		done <- c.tool(t, "review_remediate", map[string]any{
-			"fromRun": runID, "output": "patch", "allowWrite": true, "waitSeconds": 30,
+			"fromRun": runID, "workspace": ws, "output": "patch", "allowWrite": true, "waitSeconds": 30,
 		})
 	}()
 

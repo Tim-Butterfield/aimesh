@@ -9,7 +9,7 @@ import (
 
 // TestRender_SelfReportWrapperGating proves the inline-identity instruction appears ONLY when the
 // Manager sets RequestSelfReportIdentity (weak self-report adapters), never otherwise (strong-evidence
-// adapters keep their unchanged prompt), and that a corrective retry restates the wrapper (guardrail G3).
+// adapters keep their unchanged prompt), and that a corrective retry restates the wrapper.
 func TestRender_SelfReportWrapperGating(t *testing.T) {
 	on := Render(Input{RequestSelfReportIdentity: true, Files: []FileSnippet{{Path: "a", Content: "b"}}})
 	if !strings.Contains(on, "reviewmeshIdentity") || !strings.Contains(on, "IDENTITY WRAPPER") {
@@ -57,7 +57,7 @@ func TestRender_CarriesFilesWholeWithNoTruncationMarker(t *testing.T) {
 		t.Error("the prompt does not carry the whole file")
 	}
 	if strings.Contains(out, "[truncated]") {
-		t.Error("the prompt claims a truncation that no longer happens")
+		t.Error("the prompt claims a truncation that does not happen")
 	}
 }
 

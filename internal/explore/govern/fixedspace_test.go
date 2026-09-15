@@ -1,6 +1,6 @@
 package govern
 
-// Unit tests for the FIXED-SPACE host arithmetic (design §3 Compare row). They build the evaluations
+// Unit tests for the FIXED-SPACE host arithmetic. They build the evaluations
 // directly rather than running a panel, because the rules being pinned here — dominance under a declared
 // direction, the gate's "exclusion requires no dissent", the withheld label on a split cell, the refusal to
 // rank without weights — are the parts a fixture could accidentally satisfy by luck.
@@ -206,7 +206,7 @@ func TestBuildMatrix_FilterGateExcludesOnlyWithoutDissent(t *testing.T) {
 	}
 }
 
-// TestBuildMatrix_NoWeightsNoRanking pins §3's rule and its inverse: no weights → no scalar ranking, WITH a
+// TestBuildMatrix_NoWeightsNoRanking pins the rule and its inverse: no weights → no scalar ranking, WITH a
 // stated reason; a weight on every scored criterion → a ranking under the versioned rule.
 func TestBuildMatrix_NoWeightsNoRanking(t *testing.T) {
 	baseline, panel := fixture(t)
@@ -305,7 +305,7 @@ func TestBuildMatrix_NoEvidenceIsReportedNotScored(t *testing.T) {
 // TestBuildMatrix_UnrecognizedEvaluationsAreRecordedNotReattached pins the one thing a fixed-space mode must
 // never do: guess what an explorer meant. An evaluation naming something outside the DECLARED space is
 // recorded as unrecognized — re-attaching it to the nearest declared name would be exactly the entity
-// resolution this mode is free of (§0 F-B).
+// resolution this mode is free of.
 func TestBuildMatrix_UnrecognizedEvaluationsAreRecordedNotReattached(t *testing.T) {
 	baseline, panel := fixture(t)
 	m, err := BuildMatrix(MatrixInput{
@@ -362,7 +362,7 @@ func TestBuildMatrix_AntiEchoAndPreconditions(t *testing.T) {
 	}
 }
 
-// TestFixedSpaceClaims_CarryTheNoPartitionStatement pins §0 F-C for the fixed-space path: a claim with no
+// TestFixedSpaceClaims_CarryTheNoPartitionStatement pins host-only governance values for the fixed-space path: a claim with no
 // partition says so, in words, rather than carrying an empty field a reader would have to interpret.
 func TestFixedSpaceClaims_CarryTheNoPartitionStatement(t *testing.T) {
 	baseline, panel := fixture(t)
@@ -396,7 +396,7 @@ func TestFixedSpaceClaims_CarryTheNoPartitionStatement(t *testing.T) {
 	if !strings.Contains(r, "NONE (fixed space") {
 		t.Errorf("rendering must name the absent partition rather than truncating the statement to a hash-shaped fragment: %q", r)
 	}
-	// §0 F-B: no count is ever rendered as independent consensus. The sanctioned sentence says the opposite.
+	// Honest labeling: no count is ever rendered as independent consensus. The sanctioned sentence says the opposite.
 	if strings.Contains(r, "independent consensus") || !strings.Contains(r, "not a consensus claim") {
 		t.Errorf("rendering must disclaim consensus, not assert it: %q", r)
 	}

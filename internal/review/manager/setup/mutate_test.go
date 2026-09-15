@@ -170,7 +170,7 @@ func mutMgr(t *testing.T) *Manager {
 		},
 		Out: io.Discard,
 		// Tests exercise the opt-in/smoke profiles (native-three-provider, fully-local-ollama,
-		// …) which are no longer in the shipped seed — merge them in as the example profiles a
+		// …) which are not in the shipped seed — merge them in as the example profiles a
 		// user would have created.
 		Cfg: config.WithExampleProfiles(config.Default()),
 	}

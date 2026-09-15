@@ -7,8 +7,8 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the `io.modelcontextprotocol/tasks` PROJECTION over this server's run registry
-// (migration design §12, product decision D7). It is the same projection reviewmesh carries, over
+// This file is the `io.modelcontextprotocol/tasks` PROJECTION over this server's run registry.
+// It is the same projection reviewmesh carries, over
 // the same job shape, and it is deliberately a sibling rather than shared code: the two registries
 // are separate types in separate modules, and the adapter is small enough that a shared abstraction
 // would cost more than the duplication it removed.

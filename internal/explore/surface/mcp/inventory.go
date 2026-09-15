@@ -4,34 +4,31 @@ import (
 	"regexp"
 
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
-
-	"github.com/Tim-Butterfield/aimesh/internal/explore/profile"
 )
 
 // This file is the SANITIZED configuration projection behind `explore_list` and `explore_doctor`.
 //
 // The sanitization is the point, not an afterthought. A tool result is inference input for a third party:
 // whatever these tools return is very likely to end up in someone else's model provider's logs. Adapter
-// IDENTIFIERS, selectable models, profile shapes and readiness booleans are what a caller needs in order
-// to compose a valid run. Binary paths, launch arguments and environment detail are what an attacker (or
-// an inattentive log retention policy) needs in order to map the operator's machine — and they buy the
-// caller nothing, because it cannot configure anything anyway.
+// IDENTIFIERS, their availability and the modes are what a caller needs in order to compose a valid run.
+// Binary paths, launch arguments and environment detail are what an attacker (or an inattentive log
+// retention policy) needs in order to map the operator's machine — and they buy the caller nothing.
 //
-// The projection types below carry NO path field at all. That is deliberate: a rule enforced by the type
-// system cannot be forgotten by the next person to add a field to the response.
+// The projection types below carry NO path field at all, so the rule is enforced by the type system.
 
-// AdapterFact is one configured adapter, projected to logical facts only.
+// AdapterFact is one adapter this server was launched with, projected to logical facts only.
 type AdapterFact struct {
 	Name string `json:"name"`
-	// DisplayName is the readable product name; Kind distinguishes a code-owned CLI recipe from a
-	// user-defined ACP instance (and, under the internal test gate only, the hidden fake).
-	DisplayName string `json:"displayName,omitempty"`
-	Kind        string `json:"kind"`
-	Configured  bool   `json:"configured"`
+	// Kind is "shell" for a built-in CLI recipe, or "fake" for the internal test adapter.
+	Kind string `json:"kind"`
+	// Available reports whether the adapter's CLI can be started right now; Reason says why not.
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+	// Source is where the operator named the adapter: "flag" or "env".
+	Source string `json:"source,omitempty"`
 	// IdentityEvidenceCapability is the adapter's DECLARED evidence tier, not a live verdict — proving a
 	// model's identity still takes a real call.
 	IdentityEvidenceCapability string `json:"identityEvidenceCapability,omitempty"`
-	SpecOnly                   bool   `json:"specOnly,omitempty"`
 }
 
 // ReadinessCheck is one static readiness result.
@@ -42,15 +39,13 @@ type ReadinessCheck struct {
 }
 
 // Config is the read-only configuration view the MCP server projects. It is an interface so the server
-// stays testable without a real home directory, and so the surface — not the caller — owns what a tool
-// result is allowed to contain.
+// stays testable without real CLIs, and so the surface — not the caller — owns what a tool result is
+// allowed to contain.
 type Config interface {
-	// Adapters lists the configured adapters.
+	// Adapters lists the adapters this server was launched with, with their availability now.
 	Adapters() []AdapterFact
-	// ProfileSet is the bound profile set (the panels a call may select by name).
-	ProfileSet() profile.Set
-	// Readiness runs the STATIC readiness checks. It starts no process and spends nothing — which is why
-	// `explore_doctor` can honestly carry readOnlyHint. The live `--probe` pass stays CLI-only.
+	// Readiness runs the STATIC readiness checks. It starts no model call and spends nothing — which is
+	// why `explore_doctor` can honestly carry readOnlyHint.
 	Readiness() (bool, []ReadinessCheck)
 }
 
@@ -72,60 +67,25 @@ func sanitizeDetail(s string) string {
 	return s
 }
 
-// listPayload builds the `explore_list` result: adapters, profiles, modes and the admission limits in force.
+// listPayload builds the `explore_list` result: the launched adapters, the modes and the admission limits.
 func (s *Server) listPayload() map[string]any {
 	adapters := make([]map[string]any, 0)
 	for _, a := range s.Config.Adapters() {
-		row := map[string]any{"name": a.Name, "kind": a.Kind, "configured": a.Configured}
-		if a.DisplayName != "" {
-			row["displayName"] = a.DisplayName
+		row := map[string]any{"name": a.Name, "kind": a.Kind, "available": a.Available}
+		if a.Reason != "" {
+			row["reason"] = sanitizeDetail(a.Reason)
+		}
+		if a.Source != "" {
+			row["source"] = a.Source
 		}
 		if a.IdentityEvidenceCapability != "" {
 			row["identityEvidenceCapability"] = a.IdentityEvidenceCapability
 		}
-		if a.SpecOnly {
-			row["specOnly"] = true
-		}
 		adapters = append(adapters, row)
-	}
-	set := s.Config.ProfileSet()
-	profiles := make([]map[string]any, 0, len(set.Profiles))
-	for _, name := range set.Names() {
-		p := set.Profiles[name]
-		seats := make([]map[string]any, 0, len(p.Explorers))
-		for _, e := range p.Explorers {
-			seats = append(seats, map[string]any{"adapter": e.Adapter, "model": e.Model, "effort": e.Effort})
-		}
-		canon := make([]map[string]any, 0, len(p.Canonicalizers))
-		for _, c := range p.Canonicalizers {
-			canon = append(canon, map[string]any{"adapter": c.Adapter, "model": c.Model, "effort": c.Effort})
-		}
-		canonSource := "derived"
-		if len(canon) > 0 {
-			canonSource = "explicit"
-		}
-		row := map[string]any{
-			"name":      name,
-			"isDefault": name == set.DefaultProfile,
-			// The AUTHORED order is the preference order a `count` selects the top-N from — reordering it
-			// changes WHICH explorers a subset picks, so it is reported as-authored, never sorted.
-			"explorers": seats,
-			"collator":  map[string]any{"adapter": p.Collator.Adapter, "model": p.Collator.Model, "effort": p.Collator.Effort},
-			// The canonicalizer identities this profile names, and — stated rather than inferred from an
-			// empty array — whether it names them at all. A caller composing a governed run needs to know
-			// that "no canonicalizers listed" means "the host will derive them", not "there are none".
-			"canonicalizers":      canon,
-			"canonicalizerSource": canonSource,
-		}
-		if p.DefaultMode != "" {
-			row["defaultMode"] = p.DefaultMode
-		}
-		profiles = append(profiles, row)
 	}
 	active, started := s.runs.counts()
 	return map[string]any{
 		"adapters": adapters,
-		"profiles": map[string]any{"defaultProfile": set.DefaultProfile, "profiles": profiles},
 		"modes":    s.modeNames(),
 		"limits": map[string]any{
 			"runsInFlight":       active,
@@ -136,7 +96,7 @@ func (s *Server) listPayload() map[string]any {
 			"maxWaitSeconds":     MaxWaitSeconds,
 			"maxArgumentBytes":   maxArgumentBytes,
 		},
-		"note": "Logical identifiers only. This server deliberately reports no binary paths, launch arguments or environment detail, and it cannot change any configuration.",
+		"note": "Logical identifiers only. Every panel is composed per call from these adapters, with model identifiers the caller supplies. This server reports no binary paths, launch arguments or environment detail, and it cannot change any configuration.",
 	}
 }
 
@@ -165,7 +125,7 @@ func (s *Server) doctorPayload(env *proto.RequestEnv) map[string]any {
 		// SUNSET-PATH (MCP26-SUNSET): both go with the era.
 		"protocolMode": string(s.core.Mode()),
 		"protocolEra":  protocolEra(env),
-		"note":         "Static readiness only: no process is started, nothing is spent, and no path or environment detail is reported. The live adapter probe is available on the exploremesh CLI (`aimesh explore doctor --probe`).",
+		"note":         "Static readiness only: no model call is made, nothing is spent, and no path or environment detail is reported. To check that a panel's agents can do real work before a run, pass verifyReadiness: true on the explore call.",
 	}
 }
 

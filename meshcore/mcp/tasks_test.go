@@ -11,19 +11,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the `io.modelcontextprotocol/tasks` EXTENSION on the wire (D7, migration design §12).
+// This file is the `io.modelcontextprotocol/tasks` EXTENSION on the wire.
 //
-// AGAINST A TREE WITHOUT THE EXTENSION EVERY TEST HERE FAILS TO COMPILE, and that is stated rather than
-// dressed up: `mcp.ExtensionTasks`, `mcp.TaskProvider`, `mcp.TaskView`, `mcp.ResultTypeTask`,
-// `Server.Tasks` and `Call.CreateTask` did not exist, because the extension did not. A test that
-// cannot compile against the old tree proves the API is new and proves nothing about behavior, so
-// each test below additionally states the MUTATION it would catch — the one-line change to the new
-// code that makes it fail. Those mutations are what stand in for a behavioral red, and they were
-// each run — a precedent kept because naming and running the mutation has caught a false negative before.
-//
-// The one test here that CAN fail behaviorally against the old tree is
-// TestTasks_DiscoverAdvertisesTheExtension: `server/discover` existed, and its `capabilities` object
-// had no `extensions` key.
+// Each test states the MUTATION it would catch — the one-line change to the code that makes it fail —
+// because naming and running the mutation is what shows a test can go red.
 
 // --- a fake provider, so the transport is the unit under test ---
 
@@ -123,9 +114,6 @@ func taskServer(f *fakeTasks, handle string) *mcp.Server {
 // TestTasks_DiscoverAdvertisesTheExtension is the ONE wire delta the extension makes visible to a
 // client that never opts in, and it is required rather than incidental: advertising the extension in
 // `server/discover` is HOW a client learns it may declare it.
-//
-// This test CAN fail behaviorally against the old tree — `server/discover` existed and its
-// capabilities object had no `extensions` key at all.
 // MUTATION: delete the `caps["extensions"] = …` block in era.go's discover.
 func TestTasks_DiscoverAdvertisesTheExtension(t *testing.T) {
 	f := newFakeTasks()
@@ -556,11 +544,8 @@ func TestTasksCancel_AcknowledgesAndPromisesOnlyDelivery(t *testing.T) {
 // `notifications/cancelled` notification MUST NOT be used for task cancellation" — and here it holds
 // BY CONSTRUCTION rather than by a special case: once the CreateTaskResult has been returned, the
 // originating tools/call is complete and its id has left the in-flight table, so the notification
-// finds nothing and reaches nothing.
-//
-// This CANNOT fail behaviorally against the old tree, because the old tree had no tasks at all for a
-// notification to fail to cancel. It is a regression guard for the property, and the mutation that
-// proves it is real is named below.
+// finds nothing and reaches nothing. It is a guard for the property, and the mutation that proves it is
+// real is named below.
 // MUTATION: have the `slow` handler keep its Call registered and route handleCancelled into the
 // provider's CancelTask — the assertion on f.cancels() then fails.
 func TestTasks_NotificationsCancelledCannotCancelATask(t *testing.T) {

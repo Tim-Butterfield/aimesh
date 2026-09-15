@@ -20,7 +20,7 @@ func envs() []Envelope {
 	}
 }
 
-// TestDegrade_EmergentSpace_MechanicalIndexOnly pins the emergent-space degraded artifact (design §1): the raw
+// TestDegrade_EmergentSpace_MechanicalIndexOnly pins the emergent-space degraded artifact: the raw
 // attributed envelopes plus a MECHANICAL, ungrouped typed-claim index carrying the exact uncollated label — and
 // NEVER a host register, which over explorer-authored values would be covert entity resolution.
 func TestDegrade_EmergentSpace_MechanicalIndexOnly(t *testing.T) {
@@ -113,7 +113,7 @@ func TestEnvelopeRef_Round1Unqualified(t *testing.T) {
 	}
 }
 
-// TestIsAbstention pins the DELIBERATE abstention channel (§1): only an explicit boolean true abstains, so a
+// TestIsAbstention pins the DELIBERATE abstention channel: only an explicit boolean true abstains, so a
 // missing or non-boolean field is never read as a position.
 func TestIsAbstention(t *testing.T) {
 	if !IsAbstention(map[string]any{AbstentionField: true}) {

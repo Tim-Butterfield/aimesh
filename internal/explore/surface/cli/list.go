@@ -18,7 +18,7 @@ import (
 
 // list surfaces the CONFIGURED adapters + the resolved roster + the configured PROFILES + the available
 // modes so a caller can verify (before spending) that the models it wants are configured — the read-only
-// analogue of reviewmesh's `list` (design §8). It REUSES the manager's pure projections (AdapterViews +
+// analogue of reviewmesh's `list`. It REUSES the manager's pure projections (AdapterViews +
 // RosterView + Profiles) and the mode registry (mode.Names); it re-derives nothing.
 // `identityEvidenceCapability` is the adapter's DECLARED evidence tier
 // (envelope/cli_status/trace/self_report/…), NOT a live "verified" — proving a model's identity still
@@ -54,7 +54,7 @@ type listRoster struct {
 	CanonicalizerSource string     `json:"canonicalizerSource"`
 }
 
-// listProfile is one configured profile (design §7): its name, whether a no-flag run binds to it, its
+// listProfile is one configured profile: its name, whether a no-flag run binds to it, its
 // per-profile default mode ("" = the app default map), its ORDERED explorers (the authored slice
 // order IS the --count preference order — deliberately NOT the Plan's canonical attribution order), its
 // collator and its explicit canonicalizers.
@@ -176,7 +176,7 @@ func buildListView(mgr *manager.Manager) listView {
 	}
 	view.Roster.CanonicalizerSource = canonicalizerSource(len(rv.Canonicalizers))
 
-	// The full profile set (design §7). The manager binds the SAME set a run resolves for this cwd (a
+	// The full profile set. The manager binds the SAME set a run resolves for this cwd (a
 	// persisted profiles.yaml, else the caller's already-resolved starting roster as the `default`
 	// profile), so `list` reports the profiles `explore --profile` can actually select.
 	set := mgr.Profiles()
@@ -256,7 +256,7 @@ func printProfiles(w io.Writer, p listProfiles) {
 			line += "; mode: " + pr.DefaultMode
 		}
 		fmt.Fprintln(w, line)
-		// Preference order — reordering changes WHICH explorers a --count subset selects (design §7).
+		// Preference order — reordering changes WHICH explorers a --count subset selects.
 		fmt.Fprintln(w, "    explorers (preference order):")
 		for _, e := range pr.Explorers {
 			fmt.Fprintf(w, "      %s\n", slotDisplay(e))

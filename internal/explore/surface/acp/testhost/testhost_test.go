@@ -8,9 +8,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/acp"
-	"github.com/Tim-Butterfield/aimesh/meshcore/localstate"
 )
 
 // testBin is the exploremesh binary built once for the whole package.
@@ -37,46 +35,35 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// env isolates the child agent from the developer's real config: AIMESH_HOME (the app-private
-// profiles + the durable ACP session store) and AIMESH_HOME (the shared adapters.yaml) both point at
-// throwaway dirs. The shipped default profile is deliberately UNCONFIGURED (nothing runs on a fresh
-// install), so the hermetic home gets an explicit all-`fake` test profile written into it — 2 `fake`
-// explorers + a `fake` collator, fully in-process. No real CLI is ever spawned.
+// env isolates the child agent from the developer's machine: AIMESH_HOME (the durable ACP session store)
+// points at a throwaway dir, the internal fake adapter is unlocked, and the agent is launched with it
+// through AIMESH_ADAPTERS — the environment form of `--adapter fake`. Every prompt composes a panel of fake
+// explorers and a fake collator, fully in-process. No real CLI is ever spawned.
 func env(t *testing.T) []string {
 	t.Helper()
-	home := t.TempDir()
-	writeFakeProfiles(t, home)
+	return envWithHome(t.TempDir())
+}
+
+func envWithHome(home string) []string {
 	return append(os.Environ(),
 		"AIMESH_HOME="+home,
 		"AIMESH_INTERNAL_FAKE=1", // unlock the hidden internal fake harness for the child
+		"AIMESH_ADAPTERS=fake",   // launch the child with the fake adapter
 	)
 }
 
-// writeFakeProfiles writes the deterministic all-fake test profile set into explore's component
-// directory under home (the user-scope profiles.yaml the child resolves via AIMESH_HOME).
-func writeFakeProfiles(t *testing.T, home string) {
-	t.Helper()
-	dir := filepath.Join(home, localstate.HomeDirName, roster.ComponentName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	const y = `schemaVersion: 1
-defaultProfile: default
-profiles:
-  default:
-    explorers:
-      - { adapter: fake, model: fake-a, effort: high }
-      - { adapter: fake, model: fake-b, effort: medium }
-    collator: { adapter: fake, model: fake-c, effort: high }
-`
-	if err := os.WriteFile(filepath.Join(dir, "profiles.yaml"), []byte(y), 0o644); err != nil {
-		t.Fatal(err)
+// fakePanel is the panel every prompt in this file composes: two fake explorers and a fake collator.
+func fakePanel() map[string]any {
+	return map[string]any{
+		"explorers": []any{
+			map[string]any{"adapter": "fake", "model": "fake-a", "effort": "high"},
+			map[string]any{"adapter": "fake", "model": "fake-b", "effort": "medium"},
+		},
+		"collator": map[string]any{"adapter": "fake", "model": "fake-c", "effort": "high"},
 	}
 }
 
-// launch starts the agent in a THROWAWAY working directory. The child's project-scope config resolution
-// is root-anchored (it walks up from its cwd), so launching in the repo would bind it to the aimesh
-// checkout's `.aimesh` instead of the hermetic home above.
+// launch starts the agent in a THROWAWAY working directory, so nothing about this repository can reach it.
 func launch(t *testing.T, framing string, environ []string) (*Client, func() error) {
 	t.Helper()
 	c, stop, err := LaunchIn(t.TempDir(), testBin, framing, environ, nil)
@@ -87,13 +74,13 @@ func launch(t *testing.T, framing string, environ []string) (*Client, func() err
 }
 
 // exploreTask is the minimal VALID `session/prompt` params: the ACP text prompt supplies the task
-// PURPOSE and `_meta.exploremesh.criteria` the load-bearing criteria (exploremesh's criteria-via-_meta
-// convention). Anything else about the run comes from the agent's bound config, never from the wire.
+// PURPOSE, `_meta.exploremesh.criteria` the load-bearing criteria (exploremesh's criteria-via-_meta
+// convention), and `_meta.exploremesh.panel` the required panel.
 func exploreTask(sid string) map[string]any {
 	return map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "compare Postgres and SQLite"}},
-		"_meta": map[string]any{"exploremesh": map[string]any{
+		"_meta": map[string]any{"exploremesh": map[string]any{"panel": fakePanel(),
 			"criteria": []any{"cost", "latency"},
 		}},
 	}
@@ -178,8 +165,8 @@ func TestACP_SessionFlow(t *testing.T) {
 			if em["status"] != "complete" {
 				t.Errorf("session/prompt status = %v, want complete", em["status"])
 			}
-			// The prompt named no mode, so the run used the default (map), and the echoed panel is the
-			// bound default profile's — the whole point of the echo is that a driver sees what actually ran.
+			// The prompt named no mode, so the run used the default (map), and the echoed panel is the one
+			// the prompt composed — the whole point of the echo is that a driver sees what actually ran.
 			if em["mode"] != "map" {
 				t.Errorf("session/prompt mode = %v, want map (the default)", em["mode"])
 			}
@@ -189,8 +176,8 @@ func TestACP_SessionFlow(t *testing.T) {
 			if n, _ := em["panelSize"].(float64); n < 2 {
 				t.Errorf("panelSize = %v, want the 2-explorer demo panel", em["panelSize"])
 			}
-			if sel, _ := em["explorersSelected"].(float64); sel != 2 {
-				t.Errorf("explorersSelected = %v, want 2", em["explorersSelected"])
+			if seats, _ := em["explorers"].([]any); len(seats) != 2 {
+				t.Errorf("echoed explorers = %v, want the 2 composed seats", em["explorers"])
 			}
 
 			if sd, err := c.Call("shutdown", nil); err != nil || sd.Error != nil {
@@ -348,16 +335,10 @@ func TestACP_InvalidRequests(t *testing.T) {
 // durable store, and runs a session/prompt on it — proving resume survives an agent restart, not just
 // in-process state.
 func TestACP_ResumeAcrossSubprocesses(t *testing.T) {
-	// One home, shared by both subprocesses: it carries the panel the agent binds to AND the durable
-	// session store the resume depends on finding again after the restart.
+	// One home, shared by both subprocesses: it carries the durable session store the resume depends on
+	// finding again after the restart.
 	home := t.TempDir()
-	writeFakeProfiles(t, home) // the shipped default is unconfigured; the agent needs a panel to bind
-	envWith := func() []string {
-		return append(os.Environ(),
-			"AIMESH_HOME="+home,
-			"AIMESH_INTERNAL_FAKE=1", // unlock the hidden internal fake harness for the children
-		)
-	}
+	envWith := func() []string { return envWithHome(home) }
 
 	// Instance A: create + persist a session, then terminate.
 	cA, stopA := launch(t, acp.FramingNewline, envWith())

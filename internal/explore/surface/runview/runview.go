@@ -2,7 +2,7 @@
 // the per-mode result detail, the identity caveats, and the halt breakdown — the facts every non-terminal
 // surface has to hand back verbatim.
 //
-// It exists because of the surface-parity invariant (mcp-design.md §Surface-parity): ACP and MCP must
+// It exists because of the surface-parity invariant: ACP and MCP must
 // report the SAME governance block for the same run. Two hand-written projections would agree on the day
 // they were written and drift afterwards, and the drift would be invisible — a driver reading a claim
 // count with no withheld tally beside it presents a contested result as a settled one. Computing it once
@@ -25,8 +25,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// Governance is the GOVERNANCE SUMMARY a surface must hand back for every run that produced counts
-// (design §4/§9): the claim tally by label, the hashes every count is pinned to, and any
+// Governance is the GOVERNANCE SUMMARY a surface must hand back for every run that produced counts:
+// the claim tally by label, the hashes every count is pinned to, and any
 // withheld/contested signal. It is nil for a mode that emits no counts, so a Map/Synthesize/Catalog
 // response carries no governance key at all.
 //
@@ -69,7 +69,7 @@ func Governance(out pipeline.Result) map[string]any {
 	} else if fixedSpace(g) {
 		// A FIXED-SPACE run echoes the explicit no-partition statement rather than omitting the field: an
 		// absent key and an honest "there is no partition" are different facts, and a driver must be able
-		// to tell "no entity resolution was needed" from "the field was not reported" (design §0 F-C).
+		// to tell "no entity resolution was needed" from "the field was not reported".
 		meta["partitionRevisionHash"] = govern.FixedSpaceNoPartition
 		meta["entityResolution"] = "none — the space was declared before any explorer spoke"
 	}

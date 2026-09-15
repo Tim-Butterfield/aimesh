@@ -8,27 +8,15 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// SELECTIVE APPLY on the MCP surface (D8-A, design §13.3).
-//
-// AGAINST A TREE WITHOUT SELECTIVE APPLY these fail in two ways, and both are stated rather than blurred:
-//
-//   - TestSelect_MCP_FingerprintIsDisclosedByReviewReport fails BEHAVIORALLY. `review_report`'s
-//     findings carried no `fingerprint` at all, which meant selective apply was not merely
-//     unimplemented on this surface — it was INEXPRESSIBLE, because a caller cannot select on
-//     host-computed values it was never told and `review_remediate` takes a selector rather than
-//     handing one out. The design assumed MCP already had this channel (it specified one only for
-//     ACP, §9.4.2); it did not. That gap is closed here.
-//   - The rest fail behaviorally too: `select` was not a field of `remediateArgs`, and this
-//     surface's decoder is STRICT, so a `select` argument came back -32602 "unknown field". That
-//     was the right failure to have — a narrowing filter that is silently dropped widens a write
-//     set behind the caller's back — but it is not the same as -32602 for an EMPTY list, which is
-//     what these now assert.
+// SELECTIVE APPLY on the MCP surface. `review_report`'s findings carry a host-computed `fingerprint`,
+// because a caller cannot select on values it was never told and `review_remediate` takes a selector
+// rather than handing one out. An EMPTY `select` is a -32602, never "apply everything".
 
-// TestSelect_MCP_FingerprintIsDisclosedByReviewReport is the DISCLOSURE CHANNEL. Without it D8-A on
+// TestSelect_MCP_FingerprintIsDisclosedByReviewReport is the DISCLOSURE CHANNEL. Without it selective apply on
 // MCP is an assertion rather than a mechanism.
 func TestSelect_MCP_FingerprintIsDisclosedByReviewReport(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 
 	res := c.tool(t, "review_report", map[string]any{"workspace": ws})
 	if res.rpc != nil {
@@ -61,11 +49,11 @@ func TestSelect_MCP_FingerprintIsDisclosedByReviewReport(t *testing.T) {
 func TestSelect_MCP_ThreadsToTheWritePathUnexamined(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
 	res := c.tool(t, "review_remediate", map[string]any{
-		"fromRun": runID, "output": "apply", "allowWrite": true,
+		"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true,
 		"select": []any{"sha1:aaa", "sha1:bbb"},
 	})
 	if res.rpc != nil {
@@ -85,12 +73,12 @@ func TestSelect_MCP_ThreadsToTheWritePathUnexamined(t *testing.T) {
 func TestSelect_MCP_EmptySelectIsRefusedBeforeAnySpend(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 	_, before := rv.counts()
 
 	res := c.tool(t, "review_remediate", map[string]any{
-		"fromRun": runID, "output": "apply", "allowWrite": true, "select": []any{},
+		"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true, "select": []any{},
 	})
 	if res.rpc == nil {
 		t.Fatalf("an empty `select` must be refused, got %+v", res.structured)
@@ -119,11 +107,11 @@ func TestSelect_MCP_UnmatchedSelectorsRideTheResultAndLeadTheText(t *testing.T) 
 		Matched:   []string{"sha1:aaa"},
 		Unmatched: []string{"sha1:typo"},
 	}}
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
 	res := c.tool(t, "review_remediate", map[string]any{
-		"fromRun": runID, "output": "apply", "allowWrite": true,
+		"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true,
 		"select": []any{"sha1:aaa", "sha1:typo"},
 	})
 	if res.rpc != nil {
@@ -154,10 +142,10 @@ func TestSelect_MCP_UnmatchedSelectorsRideTheResultAndLeadTheText(t *testing.T) 
 // byte-for-byte what it was.
 func TestSelect_MCP_AbsentSelectionCarriesNoSelectionKey(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	runID := reportRun(t, c, ws)
 
-	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "output": "apply", "allowWrite": true})
+	res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	if res.rpc != nil {
 		t.Fatalf("review_remediate: %+v", res.rpc)
 	}
@@ -174,7 +162,7 @@ func TestSelect_MCP_AbsentSelectionCarriesNoSelectionKey(t *testing.T) {
 // rule that keeps the capability safe.
 func TestSelect_MCP_IsDeclaredInTheInputSchema(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	resp, _ := c.call(t, "tools/list", map[string]any{})
 	tools, _ := resp.Result["tools"].([]any)
 	var schema string

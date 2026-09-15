@@ -21,12 +21,9 @@ func modeTestConfig() Config {
 	return c
 }
 
-// TestUnspecifiedModeIsReport_OnEverySurface is the safe-default half.
-//
-// `aimesh review run .` used to WRITE. An unspecified mode resolved to the surface CEILING, and
-// the CLI's ceiling is `apply` (it has to be, or `--apply` could not work), so the plain command
-// modified the user's files. Naming the command is consent to review, not consent for a model to
-// edit your tree — and the agent surfaces already refused that inference.
+// TestUnspecifiedModeIsReport_OnEverySurface is the safe-default half. The CLI's ceiling is `apply`
+// (it has to be, or `--apply` could not work), and an unspecified mode must still resolve to report:
+// naming the command is consent to review, not consent for a model to edit your tree.
 func TestUnspecifiedModeIsReport_OnEverySurface(t *testing.T) {
 	c := modeTestConfig()
 	for _, surface := range []string{"cli", "ci", "acp", "mcp"} {
@@ -40,9 +37,8 @@ func TestUnspecifiedModeIsReport_OnEverySurface(t *testing.T) {
 	}
 }
 
-// TestExplicitApplyStillWorks is the other half, and the reason the fix is not simply "set the
-// cli entry to report": that entry is read as the CEILING too, so lowering it would clamp an
-// explicit --apply down to report and break writing altogether.
+// TestExplicitApplyStillWorks is the other half: the cli entry is read as the CEILING, so an explicit
+// --apply reaches apply even though an unspecified mode resolves to report.
 func TestExplicitApplyStillWorks(t *testing.T) {
 	c := modeTestConfig()
 	plan, err := c.Resolve(ResolveRequest{Profile: "p", Surface: "cli", Mode: review.ModeApply})
@@ -62,11 +58,11 @@ func TestExplicitApplyStillWorks(t *testing.T) {
 	}
 }
 
-// TestTheCeilingStillClamps: the agent surfaces must not become writable just because the default
-// moved. An ACP caller asking for apply against the shipped `report` ceiling still gets report.
+// TestTheCeilingStillClamps: a CLI surface whose shipped ceiling is `report` clamps an explicit apply.
+// (The agent surfaces are gated by their launch grant instead; see TestResolve_AgentSurfacesIgnoreConfiguredCeilings.)
 func TestTheCeilingStillClamps(t *testing.T) {
 	c := modeTestConfig()
-	for _, surface := range []string{"acp", "mcp", "ci"} {
+	for _, surface := range []string{"ci"} {
 		plan, err := c.Resolve(ResolveRequest{Profile: "p", Surface: surface, Mode: review.ModeApply})
 		if err != nil {
 			t.Fatalf("%s: %v", surface, err)

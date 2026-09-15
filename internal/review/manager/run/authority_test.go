@@ -216,10 +216,10 @@ func TestAuthority_HashMismatchHalts(t *testing.T) {
 }
 
 // NO SILENT TRUNCATION, end to end: a large authority document reaches the reviewer's prompt
-// WHOLE. There is no byte budget any more — how much a model can take is the model's business —
+// WHOLE. There is no byte budget — how much a model can take is the model's business —
 // so the property left to defend is that nothing shortens the document on the way in.
 func TestAuthority_ALargeDocumentReachesThePromptWhole(t *testing.T) {
-	const size = (64 << 10) + 512 // past the ceiling that used to halt this run
+	const size = (64 << 10) + 512 // comfortably larger than a small document
 	big := strings.Repeat("Z", size)
 	ws, specPath := authorityWorkspace(t, big)
 	p := newProbe("main.go")

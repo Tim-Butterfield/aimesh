@@ -3,7 +3,7 @@
 // HOST-COMPUTED result. The protocol itself is meshcore/mcp; this package owns the tools, the schemas,
 // the job registry and the admission governor — everything that is exploremesh grammar.
 //
-// Four decisions shape this surface, all of them from the MCP design review:
+// Four decisions shape this surface:
 //
 //  1. JOB-SHAPED CALLS. Client request timeouts are commonly ~60 s and a real panel run is minutes. A
 //     synchronous call would be killed MID-SPEND with no way to reach the subprocesses it started. So a
@@ -17,8 +17,8 @@
 //  3. GOVERNANCE IS NOT OPTIONAL. Every terminal result carries the governance block, the identity
 //     caveats and the requested-vs-executed panel echo, and the declared outputSchema marks all three
 //     `required`. There is no `summary` vs `full` detail parameter to drop them through.
-//  4. COMPOSE, NEVER CONFIGURE. A call selects a configured profile or composes a panel from the adapter
-//     set bound at STARTUP. It can never introduce an adapter, a binary path or a launch argument, and
+//  4. COMPOSE, NEVER CONFIGURE. Every call composes its panel from the adapters this server was launched
+//     with. It can never introduce an adapter, a binary path or a launch argument, and
 //     `explore_list`/`explore_doctor` report logical identifiers only — no paths, no launch args, no environment.
 package mcp
 
@@ -44,10 +44,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/capture"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/mode"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/pipeline"
-	"github.com/Tim-Butterfield/aimesh/internal/explore/profile"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/runview"
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 )
 
 // ServerName / ServerVersion identify this server in the MCP handshake.
@@ -71,14 +71,11 @@ type Explorer interface {
 
 // Server is the exploremesh MCP server.
 type Server struct {
-	// Explorer routes a run to the pipeline; Plan is the DEFAULT panel (what a call that names no panel
-	// runs); Profiles is the set a call may select from by name.
+	// Explorer routes a run to the pipeline.
 	Explorer Explorer
-	Plan     roster.Plan
-	Profiles profile.Set
-	// Adapters is the STARTUP-BOUND adapter set an ad-hoc panel may compose from. Empty means ad-hoc
-	// composition is refused — fail-closed, because "no configured set" must not read as "anything goes".
-	Adapters []string
+	// Adapters are the adapters this server was launched with (`--adapter`). A call's panel may name only
+	// these; empty means every exploration is refused until the operator names one.
+	Adapters launchflags.Set
 	// Config supplies the sanitized projections behind `explore_list` and `explore_doctor`.
 	Config Config
 
@@ -100,7 +97,7 @@ type Server struct {
 	// means dual). It is reported by `explore_doctor` and not only announced on stderr, because a host
 	// launches its servers from a config file and MAY discard stderr entirely.
 	//
-	// SUNSET-PATH (MCP26-SUNSET; migration design §16.2): removed with the legacy era.
+	// SUNSET-PATH (MCP26-SUNSET): removed with the legacy era.
 	Protocol proto.ProtocolMode
 	// Diagnostics is the server's own log sink. It must never be the protocol stream.
 	Diagnostics io.Writer
@@ -224,8 +221,8 @@ func (s *Server) registerTools() {
 
 	s.core.Register(proto.Tool{
 		Name:         "explore_list",
-		Title:        "Report the configured adapters, profiles and modes",
-		Description:  "Reports what this server can run: adapter IDENTIFIERS and their readiness, the configured profiles (ordered explorers + collator + canonicalizers), the available modes, and the admission limits in force. Read-only. Reports no binary paths, launch arguments or environment detail, and cannot change any configuration. Call this before composing a panel.",
+		Title:        "Report the launched adapters and modes",
+		Description:  "Reports what this server can run: the adapters it was launched with and whether each can be started now, the available modes, and the admission limits in force. Read-only. Reports no binary paths, launch arguments or environment detail, and cannot change any configuration. Call this before composing a panel.",
 		InputSchema:  raw(emptyInputSchema),
 		OutputSchema: raw(listOutputSchema),
 		Annotations:  readOnlyAnnotations("List configuration"),
@@ -237,7 +234,7 @@ func (s *Server) registerTools() {
 	s.core.Register(proto.Tool{
 		Name:         "explore_doctor",
 		Title:        "Report adapter readiness",
-		Description:  "Static readiness of the explorers and collator this server would run: no process is started, nothing is spent, and no path or environment detail is reported. An unrecognized adapter is a failing check — it is never silently substituted.",
+		Description:  "Static readiness of the adapters this server was launched with: whether each adapter's CLI can be started. No model call is made, nothing is spent, and no path or environment detail is reported. To check that a panel's agents can do real work, pass verifyReadiness: true on the explore call.",
 		InputSchema:  raw(emptyInputSchema),
 		OutputSchema: raw(doctorOutputSchema),
 		Annotations:  readOnlyAnnotations("Check readiness"),
@@ -297,7 +294,7 @@ type commonArgs struct {
 	Criteria     []string  `json:"criteria"`
 	PriorContext string    `json:"priorContext"`
 	Panel        *panelArg `json:"panel"`
-	// Canonicalizers names the two identities that propose the canonicalization (design §4) — the MCP
+	// Canonicalizers names the two identities that propose the canonicalization — the MCP
 	// analogue of the CLI's repeatable `--canonicalizer` and ACP's `_meta.exploremesh.canonicalizers`. It is
 	// a SIBLING of `panel` rather than a member of it because it applies to every panel shape (default,
 	// profile, ad-hoc) and because canonicalization is a distinct role, not an explorer seat.
@@ -312,13 +309,15 @@ type commonArgs struct {
 	// DryRun resolves everything and spends nothing, answering with `dryRun: true` and a `shape` block
 	// instead of a result. It is the same pre-spend disclosure the CLI's --dry-run prints, and it stops at
 	// the same place: BEFORE the identity pre-flight, which is an exploration's first model call.
-	DryRun         bool   `json:"dryRun"`
-	IdempotencyKey string `json:"idempotencyKey"`
+	DryRun bool `json:"dryRun"`
+	// VerifyReadiness asks every distinct agent the panel names whether it can do real work before the
+	// run dispatches anything. It SPENDS one bounded call per agent; dryRun prices those calls.
+	VerifyReadiness bool   `json:"verifyReadiness"`
+	IdempotencyKey  string `json:"idempotencyKey"`
 }
 
+// panelArg is the required `panel`: the explorers and the collator one call composes.
 type panelArg struct {
-	Profile   string `json:"profile"`
-	Count     *int   `json:"count"`
 	Explorers []slot `json:"explorers"`
 	Collator  *slot  `json:"collator"`
 }
@@ -350,9 +349,8 @@ type exploreArgs struct {
 // `additionalProperties: false` a real boundary: a schema is advisory to a client, so a server that
 // trusted it would accept a misspelled field and run something the caller did not ask for.
 //
-// There used to be four per-tool shapes here, one per run-starting tool, so a field belonging to a
-// DIFFERENT tool failed to decode. With one tool the decode target is the union, and that protection
-// has to be restated as an explicit per-mode check — applyMode does it, and refuses rather than
+// One tool takes every mode, so the decode target is the union of every mode's parameters, and the
+// refusal of a parameter that belongs to a DIFFERENT mode is an explicit per-mode check — applyMode does it, and refuses rather than
 // ignores. Losing it silently is the failure this comment exists to prevent.
 func decodeArgs(tool string, args json.RawMessage) (*exploreArgs, error) {
 	if tool != "explore" {
@@ -379,8 +377,8 @@ func decodeArgs(tool string, args json.RawMessage) (*exploreArgs, error) {
 // It enforces BOTH directions, because only one of them is obvious. A missing required input is the
 // expected error. A parameter belonging to a DIFFERENT mode is the dangerous one: accepted-and-
 // ignored, a caller who passes `artifact` to a `map` run gets a successful result and believes their
-// artifact was reviewed. The four separate tools used to get this for free — each decoded into its
-// own struct, so a foreign field was a decode error — and collapsing them means saying it out loud.
+// artifact was reviewed. A strict decode cannot catch it, because the decode target is the union of
+// every mode's parameters, so the check is stated here.
 //
 // The rules come from modeInputRules, the same table the schema is generated from.
 func applyMode(a *exploreArgs, r *schema.RawTask) error {
@@ -532,13 +530,13 @@ func (s *Server) exploreHandler(tool string, apply func(*exploreArgs, *schema.Ra
 				return nil, proto.InvalidParams("invalid params: maxParallel must be at least 1 (got %d) — omit it to run the whole panel in parallel", maxParallel)
 			}
 		}
-		return s.startRun(ctx, c, tool, task, pick, wait, maxParallel, args.DryRun, strings.TrimSpace(args.IdempotencyKey))
+		return s.startRun(ctx, c, tool, task, pick, wait, maxParallel, args.DryRun, args.VerifyReadiness, strings.TrimSpace(args.IdempotencyKey))
 	}
 }
 
 // startRun admits, launches and inline-waits for one run. dryRun stops it before the first model call and
 // answers with the shape instead of a result.
-func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task schema.RawTask, pick panelPick, wait, maxParallel int, dryRun bool, key string) (*proto.CallToolResult, error) {
+func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task schema.RawTask, pick panelPick, wait, maxParallel int, dryRun, verifyReadiness bool, key string) (*proto.CallToolResult, error) {
 	// IDEMPOTENCY first, before any admission accounting: a retry after a dropped connection must return
 	// the ORIGINAL run, not a second panel billed to the same person for the same question.
 	if prior := s.runs.existing(key); prior != nil {
@@ -593,7 +591,7 @@ func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task 
 		}
 		tctx, tcancel := context.WithTimeout(runCtx, budget)
 		defer tcancel()
-		out, rerr := s.Explorer.Run(tctx, pick.plan, task, pipeline.Options{MaxParallel: maxParallel, DryRun: dryRun}, onEvent)
+		out, rerr := s.Explorer.Run(tctx, pick.plan, task, pipeline.Options{MaxParallel: maxParallel, DryRun: dryRun, VerifyReadiness: verifyReadiness}, onEvent)
 		// A dry run is NOT captured. A run directory records an exploration — envelopes, raw model outputs,
 		// prompts, a manifest — and a dry run produced none of them; writing one would put a record of an
 		// exploration nobody performed next to the records of ones that happened. The CLI refuses
@@ -932,20 +930,19 @@ func countNonBlank(ss []string) int {
 func renderList(payload map[string]any) string {
 	var b strings.Builder
 	adapters, _ := payload["adapters"].([]map[string]any)
-	b.WriteString("Configured adapters (identifiers only — no paths are reported):\n")
+	b.WriteString("Adapters this server was launched with (identifiers only — no paths are reported):\n")
+	if len(adapters) == 0 {
+		b.WriteString("  none — the operator must add --adapter <name> to the host configuration\n")
+	}
 	for _, a := range adapters {
-		fmt.Fprintf(&b, "  %v [%v] configured=%v", a["name"], a["kind"], a["configured"])
+		fmt.Fprintf(&b, "  %v [%v] available=%v", a["name"], a["kind"], a["available"])
+		if r, ok := a["reason"]; ok {
+			fmt.Fprintf(&b, " (%v)", r)
+		}
 		if ev, ok := a["identityEvidenceCapability"]; ok {
 			fmt.Fprintf(&b, " identityEvidence=%v", ev)
 		}
 		b.WriteString("\n")
-	}
-	profiles, _ := payload["profiles"].(map[string]any)
-	rows, _ := profiles["profiles"].([]map[string]any)
-	fmt.Fprintf(&b, "Profiles (default: %v):\n", profiles["defaultProfile"])
-	for _, p := range rows {
-		seats, _ := p["explorers"].([]map[string]any)
-		fmt.Fprintf(&b, "  %v — %d explorer(s) in preference order + 1 collator\n", p["name"], len(seats))
 	}
 	modes, _ := payload["modes"].([]string)
 	fmt.Fprintf(&b, "Modes: %s\n", strings.Join(modes, ", "))

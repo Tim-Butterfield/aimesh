@@ -149,7 +149,7 @@ type writeRequest struct {
 	// non-refused decisions.
 	Accept func(review.Decision) bool
 	// Select, when non-nil, NARROWS the accepted set to the findings whose HOST-COMPUTED
-	// fingerprint it names (design §13.3, decision D8-A). nil means no narrowing.
+	// fingerprint it names. nil means no narrowing.
 	//
 	// It composes with Accept rather than replacing it: `Accept` decides what a run is ALLOWED to
 	// write, `Select` decides which of that the caller ASKED to write, and the intersection is what
@@ -353,7 +353,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 			rcerr)).WithReason(ReasonDecisionSetUnreconciled))
 	}
 
-	// THE NARROWING SELECTION, applied to the reconciled set and to nothing else (D8-A, §13.3).
+	// THE NARROWING SELECTION, applied to the reconciled set and to nothing else.
 	//
 	// It is placed HERE deliberately: after reconciliation, so a selector can only name a finding
 	// whose decision binding has already been verified; and before every other check, so a run
@@ -459,14 +459,12 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 	}
 	ws.Guard = confine
 
-	// A DIRTY TREE IS RECORDED, NEVER REFUSED. An apply into a tree holding uncommitted work used to
-	// halt here. It does not any more, because the premise was wrong about who uses this: working on
-	// a dirty tree is the normal state of the work, not an anomaly worth interrupting, and a refusal
-	// that fires on the normal case is a flag every invocation has to carry.
+	// A DIRTY TREE IS RECORDED, NEVER REFUSED. Working on a tree holding uncommitted work is the normal
+	// state of the work, not an anomaly worth interrupting, and a refusal that fires on the normal case
+	// is a flag every invocation has to carry.
 	//
-	// What made the refusal defensible was the claim that undoing our edits would take the user's
-	// with them. That is only true of the BLUNT undo (`git checkout -- .`). A precise one has always
-	// existed and is produced on this very path: `changes.patch` is a complete reverse-appliable
+	// Undoing our edits takes the user's with them only with the BLUNT undo (`git checkout -- .`). A
+	// precise one is produced on this very path: `changes.patch` is a complete reverse-appliable
 	// delta of everything this run wrote, so `git apply -R` undoes exactly ours and nothing else.
 	// See the undo_is_this_patch event below, which already names it for the no-VCS case.
 	//
@@ -553,17 +551,14 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 	for _, t := range accepted {
 		f := t.finding
 		// Root confinement + the protected-path denylist, BEFORE the skip rules. Two refusals
-		// come back from here and they are answered DIFFERENTLY, which is D8-C:
+		// come back from here and they are answered DIFFERENTLY, under the partial-refusal contract:
 		//
 		//   - PROTECTED PATH (the non-overridable write denylist, inside the consented root) is a
-		//     RECORDED REFUSAL. Nothing is written there — that part is unchanged and
-		//     non-negotiable — but the remaining findings proceed. The original rule made this a
-		//     halt, and the objection it answered was to a SILENT skip letting a run report
-		//     success; a refusal that is named in the receipt, counted in the summary, rendered
-		//     first in the text and carried in the run's coarse not-clean signal is not silent.
-		//     What the halt actually cost was every OTHER finding in a paid run — and, worse, a
-		//     caller could only learn WHICH finding was protected by paying for the run that told
-		//     them.
+		//     RECORDED REFUSAL. Nothing is written there — that is non-negotiable — but the
+		//     remaining findings proceed. A SILENT skip letting a run report success would be wrong;
+		//     a refusal that is named in the receipt, counted in the summary, rendered first in the
+		//     text and carried in the run's coarse not-clean signal is not silent. A halt would cost
+		//     every OTHER finding in a paid run.
 		//   - ANYTHING ELSE — a target resolving outside the consented root, an unresolvable path,
 		//     a resolver with no roots — still HALTS. Those are escapes, not policy; the denylist
 		//     held in the first case and did not even get to speak in the others.
@@ -642,7 +637,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 			// STILL A HALT HERE, and deliberately so. `authorizeEditTarget` above has already
 			// established that `e.File == f.File`, and `f.File` passed the finding-level
 			// authorization at the top of this loop — so the DENYLIST branch is unreachable at
-			// this point, and D8-C's recorded-refusal answer has nothing to apply to. What can
+			// this point, and the recorded-refusal answer has nothing to apply to. What can
 			// still fire is a target that resolves outside the root between the two checks, which
 			// is an escape and halts on both.
 			if aerr := authorizeTarget(ws, rcopy, e.File); aerr != nil {

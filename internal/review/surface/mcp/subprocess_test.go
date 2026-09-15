@@ -67,21 +67,13 @@ type buildFailure struct {
 
 func (b *buildFailure) Error() string { return b.err.Error() + "\n" + b.out }
 
-// hermeticEnv isolates the child from the developer's real configuration and points it at the
-// shipped-but-hidden `fake-smoke` profile: a deterministic, fully in-process panel. No real CLI is
+// hermeticEnv isolates the child from the developer's machine and unlocks the internal fake adapter, so
+// a child launched with `--adapter fake` runs a deterministic, fully in-process panel. No real CLI is
 // ever spawned, and no artifact lands anywhere but a temp directory.
 func hermeticEnv(t *testing.T) []string {
 	t.Helper()
-	home := t.TempDir()
-	dir := filepath.Join(home, ".aimesh", "review")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("schemaVersion: 1\ndefaultProfile: fake-smoke\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	return append(os.Environ(),
-		"AIMESH_HOME="+home,
+		"AIMESH_HOME="+t.TempDir(),
 		"REVIEWMESH_ARTIFACT_DIR="+t.TempDir(),
 		"REVIEWMESH_FAKE_SCENARIO=valid", // deterministic 1-finding report
 		"AIMESH_INTERNAL_FAKE=1",         // unlock the hidden internal fake harness for the child
@@ -111,11 +103,11 @@ func (t teeReadCloser) Close() error               { return t.c.Close() }
 func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 	bin := binary(t)
 	ws := subprocessWorkspace(t)
-	// `--allow-remediate` is passed deliberately: it is the launch that PRINTS TO STDERR before
-	// serving (the write-capability banner), which is exactly the kind of print that would corrupt the
-	// protocol stream if the redirect were wrong. The child runs in a THROWAWAY cwd so that config
-	// resolution cannot bind it to this repo's project-scope config instead of the hermetic home.
-	cmd := exec.Command(bin, "review", "mcp", "--root", ws, "--allow-remediate", "--wait-seconds", "60")
+	// `--allow-writes` is passed deliberately: it is the launch that PRINTS TO STDERR before serving
+	// (the write-capability notice), which is exactly the kind of print that would corrupt the protocol
+	// stream if the redirect were wrong. The child runs in a THROWAWAY cwd so nothing about this repo can
+	// reach it.
+	cmd := exec.Command(bin, "review", "mcp", "--adapter", "fake", "--root", ws, "--allow-writes", "--wait-seconds", "60")
 	cmd.Dir = t.TempDir()
 	cmd.Env = hermeticEnv(t)
 	// `stderr` must be the concurrency-safe buffer: os/exec copies the child's stderr on its own
@@ -187,7 +179,7 @@ func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 		t.Errorf("tools = %v, want 7 (the write tool is granted at launch)", names)
 	}
 
-	params := &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws}}
+	params := &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws, "panel": defaultPanel()}}
 	params.Meta = sdk.Meta{"progressToken": "sub-1"}
 	res, err := session.CallTool(ctx, params)
 	if err != nil {
@@ -238,9 +230,9 @@ func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 	if !gotProgress || !gotLog {
 		t.Errorf("the purity assertion is only meaningful with notifications interleaved (progress=%v log=%v)", gotProgress, gotLog)
 	}
-	// The write-capability banner really did go to stderr — proving the stream the purity assertion
+	// The write-capability notice really did go to stderr — proving the stream the purity assertion
 	// just walked is not simply an empty-stderr accident.
-	if !strings.Contains(stderr.String(), "REMEDIATION ENABLED") {
+	if !strings.Contains(stderr.String(), "--allow-writes") {
 		t.Errorf("expected the launch banner on stderr, got:\n%s", stderr.String())
 	}
 }

@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
@@ -30,9 +29,7 @@ type slot struct {
 // panelPick is the panel a call asked for AND the panel that will execute — kept together because the
 // echo is only meaningful as a pair.
 type panelPick struct {
-	source     string // "default" | "profile" | "adhoc"
-	profile    string
-	count      int // 0 when the caller named none
+	source     string // "adhoc": every call composes its panel
 	reqSeats   []slot
 	reqCollate *slot
 	// reqCanon is the caller's `canonicalizers` argument, when it supplied one. It is on the pick rather
@@ -43,17 +40,10 @@ type panelPick struct {
 	configured int
 }
 
-// echo renders the requested-vs-executed panel block. It is REQUIRED in the output schema: a count that
-// was narrowed, a profile that resolved somewhere unexpected, or a seat that dropped mid-run is visible
-// only by comparing the two halves.
+// echo renders the requested-vs-executed panel block. It is REQUIRED in the output schema: a seat that
+// dropped mid-run is visible only by comparing the two halves.
 func (p panelPick) echo(out *pipeline.Result) map[string]any {
 	req := map[string]any{"source": p.source}
-	if p.profile != "" {
-		req["profile"] = p.profile
-	}
-	if p.count > 0 {
-		req["count"] = p.count
-	}
 	if len(p.reqSeats) > 0 {
 		req["explorers"] = seatMaps(p.reqSeats)
 	}
@@ -359,11 +349,4 @@ func runningResult(rec *record, pick panelPick, waited int) (map[string]any, str
 	text := fmt.Sprintf("Run %s is still running after %ds (%d explorer(s) in the panel). Poll explore_run_status with this runId, then fetch explore_run_result. Do NOT start another run for the same question — re-issuing with the same idempotencyKey returns this run.",
 		rec.ID, waited, len(pick.plan.Explorers))
 	return structured, text
-}
-
-// sortedNames is a small helper for deterministic listings.
-func sortedNames(in []string) []string {
-	out := append([]string(nil), in...)
-	sort.Strings(out)
-	return out
 }

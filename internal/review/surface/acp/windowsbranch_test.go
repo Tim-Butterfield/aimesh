@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// The over-broad-root refusal is the rule that stops `--root /`, `--root ~`, `--root C:\Windows` from
-// being a way around trusted-root confinement — and its WINDOWS half is the half nobody here can run.
-// It is also the half a comment in roots.go already records as having been wrong once: the list
-// hardcoded `C:`, so `D:\Windows` on any machine with a second drive passed straight through.
+// The over-broad-root refusal is the rule that stops `--root /`, `--root ~` or a declared
+// `C:\Windows` from widening a scope — and its WINDOWS half is the half a non-Windows machine cannot run.
 //
 // Substituting `windowsPaths` exercises the CASE-FOLDING branch on any platform. What it cannot reach
 // is stated here rather than left as a passing test that proves nothing:
@@ -17,9 +15,8 @@ import (
 // `\`-separated entries with `filepath.Clean`. Both come from `path/filepath`, which is selected by
 // BUILD CONSTRAINT and is not substitutable — on unix `VolumeName("D:\\Windows")` is `""` and
 // `Clean` leaves the backslashes as a single opaque component, so the comparison cannot succeed no
-// matter what `windowsPaths` says. The drive-letter-agnostic rule (the one whose earlier hardcoded
-// `C:` let `D:\Windows` through) is therefore **verifiable only on Windows**, and this repository does
-// not run there. It is recorded as an uncovered path in docs/security.md's platform matrix.
+// matter what `windowsPaths` says. The drive-letter-agnostic rule is therefore verifiable only on
+// Windows (TestMatchSystemRoot_WindowsIsDriveLetterAgnostic).
 //
 // What IS covered below is that entering the Windows arm does not misclassify: an ordinary directory
 // is still not a system root.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# golden-run-exploremesh.sh — exploremesh "behavior unchanged" golden equivalence gate (aimesh C20).
+# golden-run-exploremesh.sh — exploremesh "behavior unchanged" golden equivalence gate.
 # The mirror of scripts/golden-run.sh for the second binary: it runs deterministic FAKE-ONLY
 # explorations with --dump-run, normalizes the legitimately volatile fields, and diffs the captured
 # artifacts against a stored baseline (testdata/golden-run-exploremesh/). `GOLDEN_UPDATE=1` (re)captures.
@@ -41,7 +41,7 @@ GOLDEN_DIR="$REPO_ROOT/testdata/golden-run-exploremesh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 # ONE home: the profiles and the shared adapters file both live under its `.aimesh/` state root, so a
-# single AIMESH_HOME makes the run hermetic (it used to take two variables that had to agree).
+# single AIMESH_HOME makes the run hermetic.
 HOME_DIR="$WORK/home"; ART_DIR="$WORK/artifacts"; WD="$WORK/wd"; CUR="$WORK/current"
 mkdir -p "$HOME_DIR/.aimesh/explore" "$ART_DIR" "$WD" "$CUR"
 

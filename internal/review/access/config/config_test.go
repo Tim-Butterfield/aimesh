@@ -437,32 +437,21 @@ func TestResolve_ModeDegradation_CISurface(t *testing.T) {
 	}
 }
 
-// The ACP surface's shipped policy ceiling is `report`: an apply request over ACP resolves to
-// report on the seed config. Without the seed entry the surface fell through to `apply`, so an
-// ACP host could reach live workspace writes with no config opt-in — this pins that closed.
-func TestResolve_ModeDegradation_ACPSurface(t *testing.T) {
+// The agent surfaces gate writes with their own `--allow-writes` launch grant, so resolution does not
+// cap them, and a config entry for them has no effect.
+func TestResolve_AgentSurfacesIgnoreConfiguredCeilings(t *testing.T) {
 	t.Setenv(fake.EnvVar, "1") // the hidden fake profile resolves only under the internal gate
-	plan, err := Default().Resolve(ResolveRequest{Profile: FakeProfile, Mode: review.ModeApply, Surface: "acp"})
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if plan.Mode != review.ModeReport {
-		t.Errorf("acp effective mode = %q, want report (shipped surface ceiling)", plan.Mode)
-	}
-}
-
-// The ceiling is config-visible POLICY, not a hard-coded refusal: a user who widens
-// `surfaces.defaultModeBySurface.acp` to apply gets apply.
-func TestResolve_ACPSurface_WidenedByConfig(t *testing.T) {
-	t.Setenv(fake.EnvVar, "1")
 	cfg := Default()
-	cfg.Surfaces.DefaultModeBySurface["acp"] = "apply"
-	plan, err := cfg.Resolve(ResolveRequest{Profile: FakeProfile, Mode: review.ModeApply, Surface: "acp"})
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if plan.Mode != review.ModeApply {
-		t.Errorf("widened acp mode = %q, want apply", plan.Mode)
+	cfg.Surfaces.DefaultModeBySurface["acp"] = "report"
+	cfg.Surfaces.DefaultModeBySurface["mcp"] = "report"
+	for _, surface := range []string{"acp", "mcp"} {
+		plan, err := cfg.Resolve(ResolveRequest{Profile: FakeProfile, Mode: review.ModeApply, Surface: surface})
+		if err != nil {
+			t.Fatalf("%s resolve: %v", surface, err)
+		}
+		if plan.Mode != review.ModeApply {
+			t.Errorf("%s effective mode = %q, want apply (the launch grant gates it, not config)", surface, plan.Mode)
+		}
 	}
 }
 

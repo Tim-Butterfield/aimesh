@@ -30,15 +30,15 @@ const (
 	BadFormulate     Scenario = "bad_formulate"     // collator: malformed formulate output → deterministic fallback
 	FencedResponse   Scenario = "fenced_response"   // explorer wraps VALID JSON in a ```json fence → recovered via extraction
 	// CanonMergeAll is an AGGRESSIVELY MERGING canonicalizer: it proposes ONE cluster containing every
-	// nomination. Paired with a normal canonicalizer under the dual merge-agreement rule (design §0 F-B) it
+	// nomination. Paired with a normal canonicalizer under the dual merge-agreement rule it
 	// produces a CONTESTED merge — the case the whole dual rule exists for, since an aggressive merger is
 	// precisely how a canonicalizer would manufacture corroboration if its proposal were authoritative.
 	CanonMergeAll Scenario = "canon_merge_all"
-	// ChallengeWrongMerge makes the explorer raise ONE typed `wrong_merge` challenge in the confirmation round
-	// (design §4), against the first presented entity that groups nominations from >=2 explorers.
+	// ChallengeWrongMerge makes the explorer raise ONE typed `wrong_merge` challenge in the confirmation round,
+	// against the first presented entity that groups nominations from >=2 explorers.
 	ChallengeWrongMerge Scenario = "challenge_wrong_merge"
 	// Abstain makes the explorer DELIBERATELY abstain (a schema-valid response carrying `"abstain": true`) —
-	// distinct from a technical absence, and the case the dual denominators exist to keep honest (§1).
+	// distinct from a technical absence, and the case the dual denominators exist to keep honest.
 	Abstain Scenario = "abstain"
 	// BallotReverse makes the explorer cast its ballot in the EXACT REVERSE of the presented order.
 	// Paired with the default forward ballot it produces a total tie under the positional tally — the case the
@@ -57,7 +57,7 @@ const (
 	// rather than interpret.
 	ForecastNonNumeric Scenario = "forecast_non_numeric"
 	// CollatorCiteAll makes the Map collator cite a REAL `envelope#k` alias on every finding — and makes one
-	// of them additionally CLAIM `"uncited": true` (C1). It is the fixture for the two halves of the
+	// of them additionally CLAIM `"uncited": true`. It is the fixture for the two halves of the
 	// host-authoritative citation rule that the default fake cannot show at once: a fully-cited collation
 	// carries no `uncited` finding, and a model's assertion ABOUT its own sourcing is overwritten by the
 	// host rather than believed.
@@ -149,7 +149,7 @@ func (a *Adapter) Invoke(_ context.Context, c model.Call) (model.Result, error) 
 	case schema.PhaseConfirm:
 		res.Stdout = a.confirm(c.Prompt)
 	default:
-		// Includes the identity PRE-FLIGHT probe (design §1): its body is irrelevant — the probe exists so the
+		// Includes the identity PRE-FLIGHT probe: its body is irrelevant — the probe exists so the
 		// adapter performs a real invocation and the identity engine gets evidence before the fan-out.
 		res.Stdout = []byte("{}")
 	}
@@ -173,7 +173,7 @@ func isCatalogPrompt(prompt string) bool {
 }
 
 // isMediatedRoundPrompt reports whether this is a LATER (mediated) explorer round: the host wraps the carried
-// round artifact in its untrusted-data delimiters, which round 1 never has (design §6).
+// round artifact in its untrusted-data delimiters, which round 1 never has.
 func isMediatedRoundPrompt(prompt string) bool {
 	return strings.Contains(prompt, "BEGIN UNTRUSTED DATA")
 }
@@ -236,7 +236,7 @@ func (a *Adapter) explore() []byte {
 	}
 	b, _ := json.Marshal(resp)
 	if a.scenario == FencedResponse {
-		// A schema-valid body, but wrapped in a markdown code fence (the real dogfood failure): the
+		// A schema-valid body, but wrapped in a markdown code fence (a failure real providers produce): the
 		// pipeline must strip the fence and recover it rather than drop on "invalid character '`'".
 		return []byte("```json\n" + string(b) + "\n```")
 	}
@@ -293,7 +293,7 @@ func (a *Adapter) exploreCatalog() []byte {
 	return b
 }
 
-// --- The adjudicative modes (design §3 Challenge + Shortlist rows) ---
+// --- The adjudicative modes ---
 
 // exploreFindings returns a schema-valid round-1 CHALLENGE / ai-collab response: typed findings varied by tag
 // so a panel of fakes produces genuine OVERLAP (a finding two reviewers independently raise → corroborated,
@@ -344,7 +344,7 @@ func (a *Adapter) exploreFindings() []byte {
 
 // crossReview returns the round-2 CROSS-REVIEW response: it ECHOES every pooled canonical ref back with a
 // stance + its own severity. Echoing is deliberate — a reviewer repeating a finding it has now SEEN is exactly
-// the contamination the anti-echo invariant must neutralize (§0 F-A), and a fake that quietly declined to echo
+// the contamination the anti-echo invariant must neutralize, and a fake that quietly declined to echo
 // would make the anti-echo test prove nothing.
 func (a *Adapter) crossReview(prompt string) []byte {
 	stance := "deepens"
@@ -434,7 +434,7 @@ func pooledItems(prompt string) []pooledItem {
 	return payload.Items
 }
 
-// --- The FIXED-SPACE modes (design §3 Compare + Forecast rows) ---
+// --- The FIXED-SPACE modes ---
 
 // isComparePrompt reports whether the round-1 prompt is Compare's (it renders the declared option set as a
 // machine-readable block — a marker no other mode's prompt contains).
@@ -625,7 +625,7 @@ func (a *Adapter) forecastNarrative() []byte {
 	return b
 }
 
-// abstain returns a schema-valid DELIBERATE ABSTENTION (design §1): the reserved `abstain` marker plus the
+// abstain returns a schema-valid DELIBERATE ABSTENTION: the reserved `abstain` marker plus the
 // required fields left empty. It is the honest "I decline to answer", tallied separately from a technical
 // absence so a denominator can never quietly absorb it.
 func (a *Adapter) abstain() []byte {
@@ -663,9 +663,9 @@ func (a *Adapter) abstain() []byte {
 	return b
 }
 
-// exploreMediated returns the LATER-round response (design §1): the fake echoes back the canonical items it was
+// exploreMediated returns the LATER-round response: the fake echoes back the canonical items it was
 // shown in the untrusted-data block as `candidates`, plus a refinement per item. Echoing is deliberate — it is
-// exactly the contamination the ANTI-ECHO invariant must neutralize (§0 F-A): a later round repeating an item
+// exactly the contamination the ANTI-ECHO invariant must neutralize: a later round repeating an item
 // must not raise any independence count, because counts are computed over blind round-1 artifacts only.
 func (a *Adapter) exploreMediated(prompt string) []byte {
 	var payload struct {
@@ -726,7 +726,7 @@ type confirmEntityWire struct {
 	} `json:"members"`
 }
 
-// confirm returns the CONFIRMATION-round response (design §4). The default is an empty challenge list — the
+// confirm returns the CONFIRMATION-round response. The default is an empty challenge list — the
 // common, valid answer. Under the ChallengeWrongMerge scenario it raises exactly ONE typed `wrong_merge` against
 // the first presented entity that groups nominations from two different explorers (the only kind of entity whose
 // split can change a corroboration count), so the host rule has something real to adjudicate.
@@ -794,7 +794,7 @@ func (a *Adapter) canonicalize(prompt string) []byte {
 	if a.scenario == CanonMergeAll {
 		// The AGGRESSIVE merger: every nomination in ONE entity. Under the dual merge-agreement rule this
 		// proposal wins nothing it does not share with the other canonicalizer — its extra merges are recorded
-		// as CONTESTED and resolved by SPLITTING (design §0 F-B).
+		// as CONTESTED and resolved by SPLITTING.
 		all := make([]int, 0, len(noms))
 		for _, n := range noms {
 			all = append(all, n.Index)
@@ -819,7 +819,7 @@ func (a *Adapter) canonicalize(prompt string) []byte {
 }
 
 // collatorAliases recovers the citable `envelope#k` aliases out of the Map collator prompt's labeled
-// responses block (C1). The fake cites what it was actually SHOWN — never a hardcoded alias — for the same
+// responses block. The fake cites what it was actually SHOWN — never a hardcoded alias — for the same
 // reason the ballot fake reads the host's projected refs: a fake that invented its citations would pass the
 // host's validation for the wrong reason, and would keep passing after the prompt stopped teaching them.
 func collatorAliases(prompt string) []string {
@@ -839,7 +839,7 @@ func collatorAliases(prompt string) []string {
 // synthesize returns a fixed collator-output with a non-empty summary + a disagreement entry. The
 // weak-response appendix is left empty — the pipeline fills it from the weak envelopes.
 //
-// Its CITATIONS (C1) deliberately exercise BOTH host outcomes in one default run: the first finding cites
+// Its CITATIONS deliberately exercise BOTH host outcomes in one default run: the first finding cites
 // the real aliases it was shown (including one narrowed to a specific claim, `envelope#k/claims/0`, so the
 // narrowing half of the grammar is exercised hermetically), and the second cites the legacy free-text
 // "s1" — which is not an alias, so the host drops it and labels that finding uncited. Under the

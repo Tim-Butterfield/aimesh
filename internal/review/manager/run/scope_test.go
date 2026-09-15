@@ -108,9 +108,8 @@ func mustWrite(t *testing.T, path, content string) {
 	}
 }
 
-// TestApply_OutOfRootTarget_Halts is what remains of the original blanket halt test after D8-C
-// split it in two. An ESCAPE — a target that resolves outside the workspace the caller consented
-// to — is still a halt with the containment exit code and a halt record on disk. It is not a
+// TestApply_OutOfRootTarget_Halts: an ESCAPE — a target that resolves outside the workspace the caller consented
+// to — is a halt with the containment exit code and a halt record on disk. It is not a
 // policy refusal: the denylist never got to speak, the write was aimed somewhere nobody
 // authorized, and a proposal that reached outside its authorization is not one whose other hunks
 // can be assumed sound.
@@ -154,7 +153,7 @@ func TestApply_OutOfRootTarget_Halts(t *testing.T) {
 	}
 }
 
-// TestApply_ProtectedTarget_RecordedRefusal is D8-C: a finding aimed at a protected path is a
+// TestApply_ProtectedTarget_RecordedRefusal: a finding aimed at a protected path is a
 // RECORDED REFUSAL, not a halt of the whole run.
 //
 // Halting the run on one protected target makes every OTHER finding in it pay: a caller paid for a
@@ -256,12 +255,9 @@ func TestApply_ProtectedTarget_RecordedRefusal(t *testing.T) {
 	}
 }
 
-// TestApply_MixedSet_AppliesTheRestAndRefusesOne is the assertion §13.2 calls owed and the one
-// the halt could never satisfy: a decision set mixing a protected-path target with a valid one
-// APPLIES the valid one. Everything else in this file could pass with a run that refused
+// TestApply_MixedSet_AppliesTheRestAndRefusesOne: a decision set mixing a protected-path target with
+// a valid one APPLIES the valid one. Everything else in this file could pass with a run that refused
 // everything; this is the test that says the paid work survives.
-//
-// AGAINST THE OLD CODE IT FAILS AT THE FIRST ASSERTION (the run halted, so nothing was applied).
 func TestApply_MixedSet_AppliesTheRestAndRefusesOne(t *testing.T) {
 	ws := scopeWorkspace(t)
 	m := mixedTargetManager(t, "main.go", ".env")

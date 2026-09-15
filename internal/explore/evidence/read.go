@@ -2,13 +2,13 @@ package evidence
 
 // This file READS a captured run directory into memory. It is deliberately the only half of the export that
 // knows about files, and it reads the persisted JSON — never the live in-memory types — because the system
-// of record is the run directory (design §9). Two consequences worth stating:
+// of record is the run directory. Two consequences worth stating:
 //
 //   - A MISSING MANIFEST MEANS AN UNFINISHED RUN. The manifest is written last and renamed into place, so
 //     its absence is the capture layer's own signal that the directory is not a complete record. The export
 //     refuses rather than exporting a partial one.
 //   - THE APPEND-ONLY LEDGER IS READ FROM ITS JSONL, not from the confirmation record's embedded copy. The
-//     JSONL is the append-only artifact §9 designates; the embedded copy exists for a different purpose.
+//     JSONL is the designated append-only artifact; the embedded copy exists for a different purpose.
 //
 // Where a persisted shape happens to be an exported Go type that round-trips cleanly (schema.RawTask,
 // govern.Report, govern.Decision, canon.LedgerRow, …) the reader uses it: the export must consume exactly

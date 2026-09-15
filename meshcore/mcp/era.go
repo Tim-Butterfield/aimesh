@@ -23,7 +23,7 @@ import (
 // probed with a version we do not implement is told what we do implement, and its RETRY is the request
 // that chooses the era.
 //
-// SUNSET-PATH (MCP26-SUNSET; migration design §16.2): at legacy removal the latch, the era
+// SUNSET-PATH (MCP26-SUNSET): at legacy removal the latch, the era
 // mismatch refusals and `--protocol legacy` are deleted and the process becomes an unconditionally
 // stateless modern server — which is the shape `basic/index` §Statelessness wants.
 

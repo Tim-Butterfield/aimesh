@@ -16,13 +16,11 @@ import (
 // `init` and `doctor` are SHARED, not per-domain, and each is ONE command with flags rather than a
 // family of subcommands.
 //
-// They used to be spelled `init` / `repo init` / `folder init` in both CLIs — three commands for one
-// operation, since all three called localstate.Init with nothing but a different mode. Subcommands
-// should denote different operations and flags should denote modifiers of one (`git init --bare`,
-// not `git bare init`); and `repo`/`folder` sitting at the top level alongside `review`/`explore`
-// implied they were peer domains, which they are not. The aikit tool (github.com/Tim-Butterfield/aikit)
-// made exactly this migration and states the reason for keeping the assertions available as flags:
-// they are "for scripts and CI where doing the right thing silently is the wrong answer".
+// Subcommands denote different operations and flags denote modifiers of one (`git init --bare`, not
+// `git bare init`): repo and folder initialization are one operation with a different mode, and
+// `repo`/`folder` at the top level alongside `review`/`explore` would imply they were peer domains,
+// which they are not. The assertions stay available as flags because they are "for scripts and CI
+// where doing the right thing silently is the wrong answer".
 
 // initRecord is the --json shape for `aimesh init`.
 type initRecord struct {

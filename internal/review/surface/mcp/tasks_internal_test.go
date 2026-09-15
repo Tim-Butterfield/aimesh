@@ -7,10 +7,8 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// The TASKS PROJECTION over this server's run registry (D7, design §12.3/§12.4).
-//
-// AGAINST A TREE WITHOUT THE TASKS EXTENSION every test here fails to COMPILE — `taskProvider`, `taskHandOff` and
-// `record.timestamps` did not exist. The MUTATION each would catch is named on it.
+// The TASKS PROJECTION over this server's run registry. The MUTATION each test would catch is named on
+// it.
 //
 // These are INTERNAL tests deliberately: the thing under test is the mapping from a `*record` to the
 // extension's vocabulary, and driving it over the wire would additionally exercise the transport,

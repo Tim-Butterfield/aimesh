@@ -1,6 +1,6 @@
 package mode
 
-// This file holds the per-mode COLLATOR contract (design §3): the terminal collation is app-owned
+// This file holds the per-mode COLLATOR contract: the terminal collation is app-owned
 // per mode, not one hardcoded shape. A CollatorContract renders the collator instruction (spelling out
 // the exact nested output structure — the hard-won lesson from the Map fixes: always render the field
 // names + "output ONLY JSON, no fences") and parses/validates the collator's raw output into the mode's
@@ -20,7 +20,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// ModeOutput is a mode's terminal collator output (design §3). Each mode has its OWN concrete output
+// ModeOutput is a mode's terminal collator output. Each mode has its OWN concrete output
 // type (Map → schema.CollatorOutput; Synthesize → schema.SynthesizeOutput); the pipeline persists
 // whichever ran behind this marker interface, and the surfaces render Summary() (with an optional
 // type-switch for a mode's richer detail). A JSON round-trip of the concrete value is the machine surface.
@@ -29,7 +29,7 @@ type ModeOutput interface {
 	Summary() string
 }
 
-// CollatorContract is a mode's app-owned terminal-collation behavior (design §3). Prompt builds the
+// CollatorContract is a mode's app-owned terminal-collation behavior. Prompt builds the
 // collator instruction over the primary envelopes — rendering the exact nested output structure
 // explicitly. Parse decodes + validates the collator's raw output into the mode's ModeOutput. It
 // depends only on schema (never the pipeline), so the pipeline resolves a contract from a ModeSpec
@@ -41,7 +41,7 @@ type CollatorContract interface {
 
 // --- Map: the collate-only contract ---
 
-// mapCollator is the Map mode's terminal contract. Its Prompt is the synthesize prompt plus the C1
+// mapCollator is the Map mode's terminal contract. Its Prompt is the synthesize prompt plus the
 // CITATION instruction:
 // each explorer response is labeled with its prompt-facing `envelope#k` alias and every finding is required
 // to cite the aliases it drew from. Nothing the collator answers with is trusted — the host validates the
@@ -113,7 +113,7 @@ func (mapCollator) Parse(raw []byte) (ModeOutput, error) {
 	return o, nil
 }
 
-// --- Synthesize: select/compose the strongest answer (design §3) ---
+// --- Synthesize: select/compose the strongest answer ---
 
 // synthesizeCollator is the Synthesize mode's terminal contract: the collator SELECTS the strongest
 // candidate and GRAFTS superior elements from the others into one composed artifact — it does NOT tally.
@@ -162,14 +162,14 @@ func (synthesizeCollator) Parse(raw []byte) (ModeOutput, error) {
 	return o, nil
 }
 
-// --- Catalog: enumerate broadly → CANONICALIZE → organize into clusters (design §3/§4) ---
+// --- Catalog: enumerate broadly → CANONICALIZE → organize into clusters ---
 
-// CanonicalizingContract is a mode's app-owned CANONICALIZING terminal collation (design §3/§4): unlike a
+// CanonicalizingContract is a mode's app-owned CANONICALIZING terminal collation: unlike a
 // plain CollatorContract (Prompt → one collate model call → Parse), its terminal step runs the raw
 // explorer nominations through the canonicalization component (internal/canon). The pipeline resolves it
 // from ModeSpec.Canonicalizing and drives the flow: it extracts the nominations (Nominations), builds a
 // DECOUPLED canonicalizer model call around CanonicalizerPrompt/ParseProposal (a distinct call,
-// SEPARATELY identity-verified — a strong-evidence mismatch halts, §0 F-A), hands it to canon.Canonicalize
+// SEPARATELY identity-verified — a strong-evidence mismatch halts), hands it to canon.Canonicalize
 // (which records the APPEND-ONLY, revision-hashed merge-ledger + enforces the surjectivity GATE), and
 // finally Collate assembles the mode output as a deterministic VIEW over the canonical partition. Catalog
 // is the only single-canonicalizer mode that uses it.
@@ -194,7 +194,7 @@ type CanonicalizingContract interface {
 	Collate(res canon.Result) (ModeOutput, error)
 }
 
-// CollateInput is the FULL governed record a terminal collation may read (design §0 F-C): the confirmed
+// CollateInput is the FULL governed record a terminal collation may read: the confirmed
 // partition, the confirmation record, the emitted governance claims, the host tally, the recorded rounds and
 // the frozen panel. Every field is a HOST artifact — there is nothing here a model asserted — which is what
 // lets an adjudicative output be assembled as a pure view over it.
@@ -223,12 +223,12 @@ type GovernedCollator interface {
 	CollateGoverned(in CollateInput) (ModeOutput, error)
 }
 
-// BallotContract is a mode's app-owned BALLOT contract (design §3 Shortlist / §4). Note what it does
+// BallotContract is a mode's app-owned BALLOT contract. Note what it does
 // NOT contain: there is no method that produces a ranking, an ordering, or a winner. It declares the frozen
 // decision inputs (criteria, tally method, shortlist size) and parses ONE explorer's ballot; the host freezes,
 // hashes, solicits and TALLIES. A ranking a mode contract could compute is a ranking a model could influence.
 type BallotContract interface {
-	// Criteria are the decision criteria, each carrying its origin + aggregationMethod (§4). They are frozen
+	// Criteria are the decision criteria, each carrying its origin + aggregationMethod. They are frozen
 	// and hashed before the ballot is solicited, so they are derived from the TASK — never from the tally.
 	Criteria(raw schema.RawTask) []govern.Criterion
 	// Method is the versioned HOST tally rule the decision is computed under.
@@ -243,7 +243,7 @@ type BallotContract interface {
 
 // catalogCollator is the Catalog mode's canonicalizing contract. It extracts candidate nominations from
 // the blind round-1 envelopes, renders the exact canonicalizer proposal structure, parses the proposed
-// partition, and assembles the CatalogOutput view over canon.Result (§4 host-derived organization).
+// partition, and assembles the CatalogOutput view over canon.Result (host-derived organization).
 type catalogCollator struct{}
 
 // Nominations flattens the verified panel into raw nominations: each explorer's "candidates[]" entry
@@ -293,7 +293,7 @@ func (catalogCollator) CanonicalizerPrompt(noms []canon.Nomination) (string, err
 	if len(noms) > 0 {
 		lastIdx = strconv.Itoa(len(noms) - 1)
 	}
-	return "You are the CANONICALIZER — a role DISTINCT from the collator (design §4). Below are raw candidate " +
+	return "You are the CANONICALIZER — a role DISTINCT from the collator. Below are raw candidate " +
 		"nominations gathered from INDEPENDENT explorers. CLUSTER the nominations that name the SAME underlying " +
 		"candidate (synonyms/variants/near-duplicates) under one canonical entity; keep genuinely distinct " +
 		"candidates in separate entities. You may CLUSTER duplicates but MUST NEVER DROP a nomination: every " +

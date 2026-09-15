@@ -1,6 +1,6 @@
 package mode
 
-// This file is the COMPARE mode (design §3 Compare row) — one of the two FIXED-SPACE modes, and
+// This file is the COMPARE mode — one of the two FIXED-SPACE modes, and
 // the clean counterexample to everything the emergent-space modes have to do:
 //
 //	declare          the USER fixes the option set and the criteria (with direction + role) up front
@@ -10,13 +10,13 @@ package mode
 //
 // ONE round. NO canonicalizer. NO confirmation round. Not as a simplification, but because there is nothing
 // for them to do: the option set was handed to the explorers, so recognizing "Postgres" as the option named
-// "Postgres" is a string comparison, not the entity-resolution judgment §0 F-B exists to keep visible and
+// "Postgres" is a string comparison, not the entity-resolution judgment that must stay visible and
 // contestable. Running a canonicalizer here would manufacture a contestable partition where none exists —
 // and then a confirmation round to adjudicate disputes about it — which is a governance ceremony over an
 // invented problem. The whole value of Compare in the model is that it shows what host-deterministic
 // governance looks like when the space really is fixed.
 //
-// Three things the output refuses to do, all of them §3:
+// Three things the output refuses to do, all of them part of the mode's contract:
 //
 //   - It never averages a disagreed cell into one score. Every attributed value stays on the cell, the
 //     split is labeled, and the definitive label is WITHHELD. A cell where two explorers said 2 and 9 is
@@ -34,7 +34,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// --- the terminal output (design §3 Compare row) ---
+// --- the terminal output ---
 
 // CompareOutput is the FIXED, exploremesh-owned terminal output of the Compare mode: the consolidated
 // options×criteria matrix with per-cell agreement, the host-computed Pareto frontier, the filter-gate
@@ -47,7 +47,7 @@ type CompareOutput struct {
 	Space     string `json:"space"`
 	SpaceNote string `json:"spaceNote"`
 	// PartitionRevisionHash carries govern.FixedSpaceNoPartition — the statement that there is no partition,
-	// rather than an empty field that would imply a blank one (§0 F-C: say what is reconstructable).
+	// rather than an empty field that would imply a blank one (say what is reconstructable).
 	PartitionRevisionHash string                    `json:"partitionRevisionHash"`
 	Options               []string                  `json:"options"`
 	Criteria              []schema.CompareCriterion `json:"criteria"`
@@ -67,18 +67,18 @@ type CompareOutput struct {
 	// RankingWithheld states why in the result itself, where a reader will actually see it.
 	ScalarRanking   []govern.ScalarEntry `json:"scalarRanking,omitempty"`
 	RankingWithheld string               `json:"rankingWithheld,omitempty"`
-	// Rules are the versioned HOST rules every derived value above was computed under (§9).
+	// Rules are the versioned HOST rules every derived value above was computed under.
 	Rules CompareRules `json:"rules"`
 	// PanelSize / Respondents are the participation facts behind the per-cell denominators.
 	PanelSize   int `json:"panelSize"`
 	Respondents int `json:"respondents"`
-	// CollatorNarrative is the quarantined MODEL PROSE namespace (§0 F-C) — the collator's reading of the
+	// CollatorNarrative is the quarantined MODEL PROSE namespace — the collator's reading of the
 	// matrix lives here and nowhere else.
 	CollatorNarrative []govern.Narrative `json:"collatorNarrative,omitempty"`
 }
 
 // CompareRules names the versioned host rules a comparison was computed under, persisted with the value so
-// a result read later is interpretable under the rules that produced it (§4/§9).
+// a result read later is interpretable under the rules that produced it.
 type CompareRules struct {
 	RulesVersion    string `json:"rulesVersion"`
 	CellPointRule   string `json:"cellPointRule"`
@@ -311,13 +311,13 @@ func fixedSpaceNarrative(raw []byte, by schema.ExplorerIdentity, read func([]byt
 }
 
 func init() {
-	// Compare (design §3 Compare row). Formulation-free like every registered mode, ONE round, and —
+	// Compare. Formulation-free like every registered mode, ONE round, and —
 	// the whole point — no Canonicalization policy at all: the zero value means no canonicalizer and no
 	// confirmation round, which is correct here rather than merely cheap (see the file comment).
 	//
 	// Class is FIXED-space, and unlike the emergent modes that is not the conservative default but a claim
 	// the task input backs up: the key universe was handed to the explorers, so the degraded host register
-	// keyed on `optionsEvaluated` is a genuine comparison rather than covert entity resolution (§1).
+	// keyed on `optionsEvaluated` is a genuine comparison rather than covert entity resolution.
 	register(ModeSpec{
 		Name:               Compare,
 		FormulationFree:    true,

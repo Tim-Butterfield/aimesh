@@ -1,6 +1,6 @@
 package canon
 
-// This file is the BINDING, HOST-ADJUDICATED CONFIRMATION ROUND (design §4).
+// This file is the BINDING, HOST-ADJUDICATED CONFIRMATION ROUND.
 //
 // The merge ledger records the partition; it does not VALIDATE it. Validation
 // requires the panel that produced the nominations to be able to CONTEST the partition, and it requires the
@@ -34,13 +34,13 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// HostConfirmationRuleVersion is the VERSIONED host adjudication rule (design §4). It is persisted with
+// HostConfirmationRuleVersion is the VERSIONED host adjudication rule. It is persisted with
 // every resolution and on the resulting revision, so a partition revision can always be re-derived from the
 // provisional partition + the recorded challenges by the exact rule version that produced it.
 const HostConfirmationRuleVersion = "host-confirmation-rule@v1"
 
 // ChallengeType is the CLOSED set of typed challenges an explorer may raise against the provisional
-// partition (design §4). The set is closed because each type maps to a specific mechanical host action.
+// partition. The set is closed because each type maps to a specific mechanical host action.
 type ChallengeType string
 
 const (
@@ -77,7 +77,7 @@ func ChallengeTypes() []ChallengeType {
 	return []ChallengeType{ChallengeWrongMerge, ChallengeWrongSplit, ChallengeLabelBias, ChallengeMissingItem, ChallengeInjectedItem}
 }
 
-// Challenge is one typed objection from one explorer against the provisional partition (design §4).
+// Challenge is one typed objection from one explorer against the provisional partition.
 type Challenge struct {
 	Type ChallengeType `json:"type"`
 	// CanonicalID is the challenged entity. Required for wrong_merge / wrong_split / label_bias /
@@ -128,10 +128,10 @@ func (c Challenge) Validate(known map[string]bool) error {
 }
 
 // Presentation is the PERSISTED, RANDOMIZED order in which the provisional entities were shown to the
-// explorers (design §4: "candidate order persisted + randomized"). The permutation is derived
+// explorers ("candidate order persisted + randomized"). The permutation is derived
 // DETERMINISTICALLY from a host seed rather than from wall-clock randomness: it must be uncorrelated with
 // nomination/cluster order (so position cannot encode the canonicalizer's preference) while staying exactly
-// reproducible from persisted artifacts (§0 F-C). It is an ordering, not a secret.
+// reproducible from persisted artifacts. It is an ordering, not a secret.
 type Presentation struct {
 	Order       []string `json:"order"`
 	Seed        string   `json:"seed"`
@@ -332,7 +332,7 @@ type AlternativeEntity struct {
 	Contributions  []Contribution `json:"contributions"`
 }
 
-// ContestedMapping is a mapping the confirmation round could NOT settle (design §4). It names BOTH plausible
+// ContestedMapping is a mapping the confirmation round could NOT settle. It names BOTH plausible
 // partitions of the affected nominations so any dependent count can be computed over both and emitted as a
 // range — with the definitive `corroborated`/`ranked` label WITHHELD.
 type ContestedMapping struct {
@@ -359,7 +359,7 @@ func (m ContestedMapping) Affects(canonicalID string) bool {
 	return false
 }
 
-// Confirmation is the full record of one binding confirmation round (design §4): what was shown and in which
+// Confirmation is the full record of one binding confirmation round: what was shown and in which
 // order, every typed challenge received, the host's versioned resolution of each, the NEW ledger revision the
 // resolutions produced, the hash of the revision it supersedes (retained, never edited), and every mapping
 // that remains CONTESTED.
@@ -374,11 +374,11 @@ type Confirmation struct {
 }
 
 // Settled reports whether the confirmed partition carries NO contested mapping — the precondition for a
-// dependent count to be labeled definitively (§4: otherwise the label is withheld and a range is emitted).
+// dependent count to be labeled definitively (otherwise the label is withheld and a range is emitted).
 func (c Confirmation) Settled() bool { return len(c.Contested) == 0 }
 
 // Confirm applies HostConfirmationRuleVersion to the typed challenges over a PROVISIONAL partition and
-// returns the confirmed revision (design §4). The canonicalizer is NOT consulted — it must not adjudicate
+// returns the confirmed revision. The canonicalizer is NOT consulted — it must not adjudicate
 // complaints about its own partition. prov must carry its Nominations (the pipeline sets them on the governed
 // paths) because a revision re-partitions the SAME nominations rather than re-deriving them.
 //

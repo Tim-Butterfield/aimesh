@@ -1,6 +1,6 @@
 package pipeline
 
-// This file holds the ROBUSTNESS INVARIANTS (design §1). All three exist because the expensive part of
+// This file holds the ROBUSTNESS INVARIANTS. All three exist because the expensive part of
 // an exploration is the explorer fan-out, and every one of them is about not discovering a governance
 // problem after paying for it:
 //
@@ -36,7 +36,7 @@ import (
 // identity evidence the call happens to expose is classified and recorded on the way past.
 const preflightPrompt = "Pre-flight check. Reply with ONLY this JSON object and nothing else: {\"ok\":true}"
 
-// PreflightRecord is one role's pre-flight verdict (design §1), persisted so "the role was reachable
+// PreflightRecord is one role's pre-flight verdict, persisted so "the role was reachable
 // before the fan-out" is a recorded fact rather than a claim about the code. Status/Caveat DESCRIBE the
 // identity evidence; neither can fail the pre-flight.
 type PreflightRecord struct {
@@ -71,8 +71,8 @@ func preflight(ctx context.Context, a model.Adapter, role string, id schema.Expl
 	return rec, nil
 }
 
-// identityLedger pins each ROLE's resolved model across all of that role's calls in ONE exploration (design
-// §1: the same-identity invariant). It is written from the pipeline's own goroutines (explorer calls run
+// identityLedger pins each ROLE's resolved model across all of that role's calls in ONE exploration (the
+// same-identity invariant). It is written from the pipeline's own goroutines (explorer calls run
 // concurrently), so it carries a mutex.
 type identityLedger struct {
 	mu    sync.Mutex
@@ -120,10 +120,10 @@ type canonicalizerIdentity struct {
 	explorer roster.Explorer
 }
 
-// Canonicalizer PROVENANCE (design §4): how the identities that produced this partition were chosen. It is
+// Canonicalizer PROVENANCE: how the identities that produced this partition were chosen. It is
 // a governance fact, not a diagnostic — it is recorded on the Result and in the run manifest because it is
 // precisely what makes a bad canonicalizer choice visible FROM A RUN RECORD instead of requiring a code
-// read. (The defect this exists to prevent recurring was invisible in every artifact a run produced.)
+// read.
 const (
 	// ProvenanceExplicit: the identities were NAMED by the request or the profile.
 	ProvenanceExplicit = "explicit"
@@ -132,12 +132,12 @@ const (
 	ProvenanceDerived = "derived"
 )
 
-// Canonicalizer INDEPENDENCE (design §4): what the merge-agreement rule is actually worth on this run.
+// Canonicalizer INDEPENDENCE: what the merge-agreement rule is actually worth on this run.
 //
 // A held merge means "both canonicalizers proposed it". How much that is worth depends entirely on how
-// different the two proposers are, and until now nothing recorded it — a run whose two canonicalizers were
-// the same model behind two adapters produced a record indistinguishable from one with two genuinely
-// different models, while every corroboration count downstream rested on the difference.
+// different the two proposers are, so it is recorded: without it, a run whose two canonicalizers were
+// the same model behind two adapters would produce a record indistinguishable from one with two genuinely
+// different models, while every corroboration count downstream rests on the difference.
 //
 // It is a SEPARATE axis from provenance, not another provenance value: provenance says who CHOSE the
 // identities, this says what the choice bought. Folding them together would make "explicit" and
@@ -185,7 +185,7 @@ type canonicalizerChoice struct {
 	independence string // IndependenceDistinct | IndependenceSharedModel; "" on the single-canonicalizer path
 }
 
-// canonicalizerIdentities resolves the canonicalizer identities for a run (design §4: canonicalization is a
+// canonicalizerIdentities resolves the canonicalizer identities for a run (canonicalization is a
 // distinct role whose identity is DECOUPLED from the collator). It returns them with their PROVENANCE
 // (explicit / derived) and, on the dual path, their INDEPENDENCE — which the caller records and warns on.
 //

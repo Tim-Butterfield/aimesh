@@ -1,7 +1,7 @@
 package pipeline
 
 // End-to-end tests for the two ADJUDICATIVE modes (Challenge + Shortlist) and the shipped ai-collab
-// composition (design §0/§3/§4). Everything here is hermetic — deterministic in-process fakes, no real CLI —
+// composition. Everything here is hermetic — deterministic in-process fakes, no real CLI —
 // and every test pins ONE invariant from the design rather than the shape of the implementation.
 
 import (
@@ -100,7 +100,7 @@ func entryFor(t *testing.T, out mode.ChallengeOutput, statement string) mode.Cha
 	return mode.ChallengeEntry{}
 }
 
-// --- 1. Challenge (design §3 Challenge row) ---
+// --- 1. Challenge ---
 
 // TestChallenge_SeverityRegisterWithHostComputedCorroboration is the mode's headline contract: a 2-round run
 // produces a SEVERITY-TRIAGED register in which a finding raised by 2 of 3 reviewers is `corroborated` with
@@ -217,8 +217,8 @@ func TestChallenge_SeverityRegisterWithHostComputedCorroboration(t *testing.T) {
 	}
 }
 
-// TestChallenge_AntiEcho_CrossReviewNeverInflatesACount is the anti-echo invariant for the adjudicative path
-// (§0 F-A): the round-2 reviewers are SHOWN the pooled findings and echo every one of them back, and not a
+// TestChallenge_AntiEcho_CrossReviewNeverInflatesACount is the anti-echo invariant for the adjudicative path:
+// the round-2 reviewers are SHOWN the pooled findings and echo every one of them back, and not a
 // single count moves — because corroboration is computed over the immutable blind round-1 artifacts and a
 // later round cannot become a counting baseline at all.
 func TestChallenge_AntiEcho_CrossReviewNeverInflatesACount(t *testing.T) {
@@ -279,7 +279,7 @@ func TestChallenge_AntiEcho_CrossReviewNeverInflatesACount(t *testing.T) {
 
 // TestChallenge_ContestedMapping_WithholdsCorroboratedAndEmitsRange: a merge only ONE canonicalizer proposed
 // leaves the mapping CONTESTED, so every dependent register entry becomes conditional — a sensitivity range
-// with the definitive `corroborated` label WITHHELD (§4) — and the renderer says so rather than hiding it.
+// with the definitive `corroborated` label WITHHELD — and the renderer says so rather than hiding it.
 func TestChallenge_ContestedMapping_WithholdsCorroboratedAndEmitsRange(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	reg["merger"] = fake.New("merger", "M", fake.CanonMergeAll) // the aggressive merger the dual rule neutralizes
@@ -342,7 +342,7 @@ func TestChallenge_MissingArtifact_RefusedBeforeAnySpend(t *testing.T) {
 	}
 }
 
-// --- 2. Shortlist (design §3 Shortlist row / §4) ---
+// --- 2. Shortlist ---
 
 // TestShortlist_HostTalliedRankingOverConfirmedUniverse is the mode's headline contract: the ranking is
 // computed by the HOST from the recorded ballots over the CONFIRMED canonical universe, every ranked entry is
@@ -396,7 +396,7 @@ func TestShortlist_HostTalliedRankingOverConfirmedUniverse(t *testing.T) {
 			t.Errorf("a ranked entry must report its blind round-1 salience alongside its ballot support: %+v", e.EmergentSalience)
 		}
 	}
-	// The criteria are frozen with their ORIGIN + AGGREGATION METHOD (§4).
+	// The criteria are frozen with their ORIGIN + AGGREGATION METHOD.
 	if len(out.Criteria) != 2 {
 		t.Fatalf("the user's criteria must be frozen with the decision: %+v", out.Criteria)
 	}
@@ -438,7 +438,7 @@ func TestShortlist_HostTalliedRankingOverConfirmedUniverse(t *testing.T) {
 	}
 }
 
-// TestShortlist_DecisionInputsFrozenBeforeTheBallot pins §4's central ordering rule: the candidate-universe
+// TestShortlist_DecisionInputsFrozenBeforeTheBallot pins the central ordering rule: the candidate-universe
 // revision, the criterion set, the method, the shortlist cut, the quorum, the tie rule and the missing-response
 // policy are fixed AND HASHED before the ballot is solicited — else a criterion can be introduced after seeing
 // which candidate it favors.
@@ -501,7 +501,7 @@ func TestShortlist_DecisionInputsFrozenBeforeTheBallot(t *testing.T) {
 			t.Errorf("the ballot prompt is missing %q", want)
 		}
 	}
-	// The frozen record names every input §4 lists.
+	// The frozen record names every decision input.
 	in := frozen.Inputs
 	if in.UniverseRevisionHash != res.Canonicalization.PartitionRevisionHash {
 		t.Errorf("the frozen universe must be the CONFIRMED partition revision: %q vs %q", in.UniverseRevisionHash, res.Canonicalization.PartitionRevisionHash)
@@ -525,7 +525,7 @@ func TestShortlist_DecisionInputsFrozenBeforeTheBallot(t *testing.T) {
 
 // TestShortlist_ContestedCandidate_WithholdsRankedAndEmitsRange: a contested mapping reaching a ranked
 // candidate makes the ballot's own option set conditional, so the definitive `ranked` label is WITHHELD and a
-// range over both plausible partitions is emitted instead (§4).
+// range over both plausible partitions is emitted instead.
 func TestShortlist_ContestedCandidate_WithholdsRankedAndEmitsRange(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	reg["merger"] = fake.New("merger", "M", fake.CanonMergeAll)
@@ -639,7 +639,7 @@ func TestShortlist_UnusableBallotIsRecordedNotInvented(t *testing.T) {
 	}
 }
 
-// --- 3. ai-collab: the shipped multi-round COMPOSITION (design §11) ---
+// --- 3. ai-collab: the shipped multi-round COMPOSITION ---
 
 // TestAICollab_ComposedMultiRoundExampleRunsEndToEnd is the acceptance test for the composition: the owner's
 // ai-collab — each agent shortlists its OWN findings blind, the agents then CHALLENGE each other's findings,

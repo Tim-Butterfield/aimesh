@@ -13,11 +13,15 @@ The surface is split across the monorepo the way everything else is:
 This split mirrors the monorepo's [meshcore boundary](architecture.md#the-meshcore-boundary): the transport is reusable outside either app; the review and exploration semantics are not.
 
 > **ACP is one of three run-capable surfaces**, and they are held to a **surface-parity invariant**: every
-> run-forming capability (mode and mode params, profile selection, ad-hoc panel composition, `count`,
-> authority documents, prior context, run capture) is expressible on the CLI, over ACP, and over MCP with
-> identical fail-closed semantics. Only transport mechanics and the config-visible write-authority ceilings
-> may differ. The per-capability comparison tables live in
-> [mcp.md → Surface parity](mcp.md#surface-parity).
+> run-forming capability (mode and mode params, panel composition, authority documents, prior context, run
+> capture, dry runs, readiness checks) is expressible on the CLI, over ACP, and over MCP with identical
+> fail-closed semantics. Only transport mechanics, the configuration source and write authority may differ.
+> The per-capability comparison tables live in [mcp.md → Surface parity](mcp.md#surface-parity).
+
+> **Both agents read no aimesh configuration.** Their adapters, write grant and optional root ceiling come
+> from the arguments the host launches them with, so they work on a fresh install with no setup step. Every
+> prompt composes its own panel from the launched adapters, with the exact model identifiers the adapter's
+> CLI accepts; saved profiles, the model catalog and saved policy are for the CLI only.
 
 > **ACP runs in two opposite directions in aimesh — don't conflate them.** *This document* covers the
 > two apps as ACP **servers** (an IDE/host drives a review or an exploration). The mirror image is
@@ -35,13 +39,13 @@ Both agents speak one message per line by default (`--framing newline`, the fram
 
 | ACP method | reviewmesh behavior |
 |---|---|
-| `initialize` | Returns the ACP v1 result: integer `protocolVersion: 1`, `agentCapabilities` (`loadSession:false`, text-only `promptCapabilities`, no MCP, `sessionCapabilities.resume` when the durable session store is configured), `agentInfo`, `authMethods`. |
-| `session/new` | Allocates an opaque session id and minimal state; stores `params.cwd` as the session's workspace root (a later `session/prompt` that omits `workspace` falls back to it) and persists a durable record for cross-restart resume. |
-| `session/prompt` | **Two paths, chosen by `fromRun`.** Without it: builds a `review.Request{workspace, mode, authority, profile, reviewerPanel}` from the params (see [Authority documents](#authority-documents-via-_metareviewmesh) and [Profile / panel selection](#profile--panel-selection-via-_metareviewmesh)) and runs it through `ReviewManager.RunContext`, capped to the host's negotiated `modeCeiling` and the surface's configured policy ceiling (see [Mode gating](#mode-gating-reviewmesh-only)). **With** `fromRun` on a `patch`/`apply` turn: resolves that handle to the source run's stored decision set and applies it through `ReviewManager.Remediate` — **no reviewers run** (see [the two-turn contract](#a-write-turn-needs-a-run-handle-and-it-applies-that-run-the-two-turn-contract-reviewmesh-only)). Either way it emits `session/update` progress notifications during the run and a `PromptResponse` at the end, with one of **three** stop reasons: `end_turn` on completion, `cancelled` after `session/cancel`, and `refusal` when a write completed but refused a protected-path finding (see [Partial refusal](#partial-refusal-stopreason-refusal)). |
+| `initialize` | Returns the ACP v1 result: integer `protocolVersion: 1`, `agentCapabilities` (`loadSession:false`, text-only `promptCapabilities`, no MCP, `sessionCapabilities.resume` when the durable session store is configured), `agentInfo`, `authMethods`, and `_meta.reviewmesh.{writes, diffAvailable}` — who performs writes on this agent, disclosed before the first prompt. |
+| `session/new` | Allocates an opaque session id and minimal state; stores `params.cwd` (cleaned, never made absolute against this process's directory) as the session's workspace (a later `session/prompt` that omits `workspace` falls back to it) and persists a durable record for cross-restart resume. |
+| `session/prompt` | **Two paths, chosen by `fromRun`.** Without it: builds a review request from the prompt's absolute workspace, mode, authority and required panel (see [Scope](#launch-flags-and-scope-reviewmesh) and [Panel composition](#panel-composition-via-_metareviewmesh)) and runs it through `ReviewManager.RunContext`, capped to the connection's mode ceiling (see [Mode gating](#mode-gating-reviewmesh-only)). **With** `fromRun` on a `patch`/`apply` turn: resolves that handle to the source run's stored decision set and applies it through `ReviewManager.Remediate` — **no reviewers run** (see [the two-turn contract](#a-write-turn-needs-a-run-handle-and-it-applies-that-run-the-two-turn-contract-reviewmesh-only)). Either way it emits `session/update` progress notifications during the run and a `PromptResponse` at the end, with one of **three** stop reasons: `end_turn` on completion, `cancelled` after `session/cancel`, and `refusal` when a write completed but refused a protected-path finding (see [Partial refusal](#partial-refusal-stopreason-refusal)). |
 | `session/update` | Not a request the host sends — reviewmesh's outbound progress-streaming notification during a prompt turn (`SessionNotification` with `update.sessionUpdate: "agent_message_chunk"`), sanitized and context-gated, tagged with the session id. |
 | `session/resume` | **Durable, reconnect-without-history.** Restores a session record (session id + cwd) persisted by an earlier process from `<home>/.aimesh/review/acp-sessions/`; returns an empty `ResumeSessionResponse` — no conversation is replayed, because a stateless one-shot reviewer never held one. Advertised only when the durable store is configured (`sessionCapabilities.resume`); otherwise method-not-found. |
 | `session/load` | **Method-not-found, intentionally.** Its ACP contract is to replay a prior conversation in full; a stateless reviewer has no conversation to replay, so implementing or advertising it (`loadSession:false`) would be dishonest. Reconnect is served by `session/resume` instead. |
-| `review` | A compatibility method with the same handling as `session/prompt` but without a session — useful for a host or test harness that wants a single review turn without the session lifecycle. It accepts the **same** `_meta.reviewmesh` (authority, profile, panel) as `session/prompt`: a compatibility method that could not express a run-forming capability would be a parity hole, not a simplification. |
+| `review` | A compatibility method with the same handling as `session/prompt` but without a session — useful for a host or test harness that wants a single review turn without the session lifecycle. It accepts the **same** `_meta.reviewmesh` (panel, roots, authority, …) as `session/prompt`, and its `workspace` must be named: a compatibility method that could not express a run-forming capability would be a parity hole, not a simplification. |
 | `session/cancel` (and legacy `cancel` / `$/cancelRequest`) | Cancels the in-flight run at the run's `context`. **No write happens after cancel**, and that is enforced rather than intended: an `apply` prompt writes through the same governed write window as every other surface (see [docs/mcp.md § The write window](mcp.md#the-write-window)), where "cancelled" and "entered the commit" are decided **once under a lock** and are mutually exclusive answers. A cancelled prompt still leaves a durable `remediation/receipt.json` in its run directory saying nothing was committed, and answers with a normal `PromptResponse` carrying `runDir`. |
 | `shutdown` / `exit` | Graceful teardown and process exit. |
 
@@ -82,46 +86,63 @@ identically — this is not a retryable failure. The same outcome on the other s
 `isError: true` + `outcome: "partial_refusal"` ([mcp.md](mcp.md#partial-refusal-a-protected-path-target-does-not-discard-the-run))
 and CLI exit 7 ([architecture.md](architecture.md#exit-7-without-a-halt-the-protected-path-refusal)).
 
-## Trusted roots (reviewmesh only): what an ACP session is allowed to read
+## Launch flags and scope (reviewmesh)
 
 ```
-aimesh review acp [--framing newline|content-length] [--root <dir> …] [--no-default-root]
-               [--allow-broad-root] [--turn-timeout <dur>]
+aimesh review acp [--adapter <name>[=<path>]]... [--allow-writes]
+                  [--root <dir>]... [--allow-broad-root]
+                  [--framing newline|content-length] [--turn-timeout <dur>]
+                  [--verify-cmd <cmd>]... [--verify-timeout <dur>] [--verify-baseline]
+                  [--allow-protected-paths]
 ```
 
-(`--turn-timeout` is the total wall-clock budget for a single prompt/review turn, default **10m** — the same flag, with the same meaning, that `aimesh explore acp` and both `mcp` servers take.)
-
-On the CLI the path a **human types** is the consent: `aimesh review run ./service` is what makes `./service` readable. That reasoning does not transfer to ACP, where the caller is a peer **process** — an editor extension, another agent, anything on this machine that can speak JSON-RPC on stdio. If a request's own `workspace` were treated as its own allowed root, the containment check would compare the path with itself and always pass, and any local ACP peer could name any readable directory and have its contents copied into prompts that are shipped to external model CLIs.
-
-So the roots are established **out of band, before any request exists**, and a request may only **narrow** them:
-
-| At launch | Meaning |
+| Flag | Meaning |
 |---|---|
-| `--root <dir>` (repeatable) | The launching human's consent — the CLI's path argument, moved to launch time. These are the trusted roots. |
-| *no `--root`* | **Consent by launch context**: the process working directory at launch, because an IDE spawns its agents in the project the user opened. |
-| `--no-default-root` | Decline that inference: explicit `--root` only. With no `--root`, the launch fails rather than starting an agent that would refuse everything. |
-| `--allow-broad-root` | Explicit opt-in to an over-broad **explicit** `--root` that would otherwise be refused (see below). It never applies to the inferred cwd, and never waives the denylist. |
+| `--adapter <name>` / `--adapter <name>=<path>` | An adapter prompts may use, found on `PATH` or at the given full path. Repeatable; also settable as `AIMESH_ADAPTERS` (entries separated by `;` on Windows, `:` elsewhere). Paths expand `%VAR%` on Windows and `$VAR`/`${VAR}` elsewhere, plus a leading `~`; an undefined variable refuses startup. See [mcp.md → At a glance](mcp.md#at-a-glance) for the names and the full grammar. |
+| `--allow-writes` | Lets an `apply` turn write the workspace. Without it aimesh changes no project content; a `patch` turn supplies the diff. |
+| `--root <dir>` | Optional **ceiling**, repeatable: every path a turn declares must lie inside it. |
+| `--allow-broad-root` | Permit a `--root` that is normally refused as over-broad. Never waives the read denylist. |
+| `--turn-timeout <dur>` | Total wall-clock budget for one turn, default **10m** — the same flag `aimesh explore acp` and both `mcp` servers take. |
 
-**An over-broad root is refused — whether you typed it or we inferred it.** A trusted root grants everything beneath it, so `aimesh review acp` refuses a root that is the filesystem/volume root, your home directory itself, the parent of your home directory (`/Users`, `/home`), a system tree (`/etc`, `/usr`, `/var`, `/System`, `\Windows`, `\Program Files`, …), a shared tree (`/Users/Shared`, `\Users\Public`) or a mount parent (`/mnt`, `/media`, `/Volumes`, `/srv`). The rule is the same for an explicit `--root` and for the inferred working directory: `aimesh review acp --root /` is not a way around it. The Windows entries are **drive-letter agnostic** — `D:\Windows` is refused exactly as `C:\Windows` is.
+Launched with no adapter, the agent still starts; every review turn is refused with a message naming
+`--adapter`.
 
-- The inferred cwd is simply refused (`acp_degenerate_default_root`) — the inference's whole justification is "an IDE started us in the project", which a degenerate cwd disproves, so there is nothing to override.
-- An explicit `--root` is refused (`acp_degenerate_root`) with a message naming `--allow-broad-root`, so an operator who genuinely means it keeps a way to say so **by saying it**. The waived roots are echoed on stderr at launch.
+An IDE host launches this agent from its own configuration, for example:
+
+```json
+{ "command": "aimesh", "args": ["review", "acp", "--adapter", "devin-cli=%LOCALAPPDATA%\\devin\\cli\\bin\\devin.exe"] }
+```
+
+**Scope is declared per turn.** A host can change folders after launching its agent, so nothing is inferred
+from where this process started. A turn's scope is exactly the directories it declares:
+
+- the prompt's **`workspace`**, which must be **absolute** (`reasonCode: scope_call_path_relative`), or, when
+  the prompt names none, the session's `cwd` from `session/new` — held to the same rule, so a relative
+  session `cwd` is refused when a prompt falls back to it. With neither, the turn is refused
+  (`workspace is required`);
+- any extra absolute directories in **`_meta.reviewmesh.roots[]`**, for example the project folder holding
+  authority documents;
+- every declared path must lie inside the `--root` ceiling when one is set
+  (`scope_outside_root_ceiling`), and is refused when it is the filesystem/volume root, your home directory
+  or its parent (`/Users`, `/home`), a system tree (`/etc`, `/usr`, `/var`, `/System`, `\Windows`,
+  `\Program Files`, …), a shared tree (`/Users/Shared`, `\Users\Public`), a mount parent (`/mnt`, `/media`,
+  `/Volumes`, `/srv`) (`acp_degenerate_root`), or a protected path (`acp_root_denied`). The Windows entries
+  are **drive-letter agnostic**. Only an operator's explicit `--root` can waive the breadth rule, with
+  `--allow-broad-root`; a path a turn declares never can.
+
+The non-overridable read denylist still applies inside every declared path, so a `.env` under an allowed
+project is refused just the same. An `inlineWorkspace` consumes no scope: its content is materialized into a
+directory this process owns. Refusals are `-32602` before any spend, with the machine `reasonCode` in
+`error.data`.
 
 ## Mode gating (reviewmesh only)
 
-A review request carries a mode (`report`, `patch`, or `apply`), but the ACP surface never lets a host push a write beyond what it can actually support. The effective mode is `min(requested, surface, policy)`:
+A review request carries a mode (`report`, `patch`, or `apply`), but the ACP surface never lets a host push a write beyond what the operator granted and the host supports. The effective mode is `min(requested, connection ceiling, per-turn permission)`:
 
-- **Surface ceiling** — derived from the host's negotiated capabilities: `apply` needs the host's `FileWrite` capability (it commits to the live workspace); `patch` needs `DiffContext` (it emits a diff artifact); otherwise the ceiling is `report`. A read-only host therefore can never drive a live write — its request is degraded, not rejected, and the degradation is not silent. A host may also deny write/patch for a single turn (`session/prompt.permissions`), narrowing that turn below the connection's ceiling.
-- **Policy ceiling** — `surfaces.defaultModeBySurface.acp` in config, the same per-surface write-authority ceiling every other reviewmesh surface has (see [docs/configuration.md](configuration.md#config-sections-by-owner)). **It ships at `report`.** An ACP session is driven by an external host, so reaching a live workspace write over ACP is an explicit, config-visible opt-in — widen it deliberately:
+- **Connection ceiling** — `apply` needs **both** the operator's `--allow-writes` launch grant **and** the host's `FileWrite` capability; otherwise the ceiling is `patch`. A `patch` turn is always available: it changes no project content and supplies the complete diff for the host to apply itself.
+- **Per-turn permission** — a host may deny write or patch for a single turn (`session/prompt.permissions`): denying write narrows the turn to `patch`, denying patch narrows it to `report`.
 
-  ```yaml
-  # ~/.aimesh/review/config.yaml (or ./.aimesh/review/config.yaml for one project)
-  surfaces:
-    defaultModeBySurface:
-      acp: apply    # ships as `report`
-  ```
-
-The narrowest always wins; the ACP surface adds no capability the CLI or web surfaces don't already enforce. So on the shipped config, an `apply` request from even a fully write-capable host runs in `report`: with `degradeWhenModeUnavailable` (default `true`) it is degraded — a `mode_degraded` warn on `session/update`, plus `modeDegraded`, `requestedMode` and `modeReason` in the response's `_meta.reviewmesh` — and with `degradeWhenModeUnavailable: false` it is refused with `-32602` before anything is spent. **exploremesh has no equivalent** — it has no write surface to gate (see [exploremesh as an ACP agent](#exploremesh-as-an-acp-agent)).
+The narrowest always wins. An `apply` turn on an agent launched without `--allow-writes` is **refused** before any run (`-32602`, `reasonCode: "writes_not_granted"`), with a message naming the grant and the `patch` turn that supplies the diff instead. A mode that exceeds the host's capability or a per-request permission is **degraded, never silently**: a `mode_degraded` warn on `session/update`, plus `modeDegraded`, `requestedMode` and `modeReason` in the response's `_meta.reviewmesh`. An omitted mode is `report` on both `session/prompt` and the compatibility `review` method. Every successful or cancelled turn's `_meta.reviewmesh` carries `writes` (`"aimesh"` or `"agent"`) and `diffAvailable: true`. **exploremesh has no equivalent** — it has no write surface to gate (see [exploremesh as an ACP agent](#exploremesh-as-an-acp-agent)).
 
 ## A write turn needs a run handle, and it applies that run: the two-turn contract (reviewmesh only)
 
@@ -129,14 +150,13 @@ The narrowest always wins; the ACP surface adds no capability the CLI or web sur
 > with `-32602` (`reasonCode: write_without_run_handle`) **before any work starts**. `report` and `patch`
 > turns are unaffected. There is no one-turn review-and-write form on ACP.
 >
-> This only affects a deployment that opts in with `surfaces.defaultModeBySurface.acp: apply`, which is
-> **not the shipped default** — the ceiling ships at `report`.
+> An `apply` turn is reachable only on an agent launched with `--allow-writes`.
 
 **The problem.** ACP has no lookup surface. Its whole method set is `initialize`, `review`, `session/new`,
 `session/resume`, `session/prompt`, `session/cancel`, `cancel`, `shutdown`, `exit`; not one of them accepts a
 run identifier or returns anything about a prior run, and `session/resume` deliberately replays nothing. So a
-write turn whose response was lost — cancelled, dropped, or the process killed — used to leave the host
-holding **nothing at all** about a run that may already have written to its files.
+one-turn review-and-write whose response was lost — cancelled, dropped, or the process killed — would leave
+the host holding **nothing at all** about a run that may already have written to its files.
 
 **The rule.** A governed apply is naturally two turns, and the handle rides the one channel that has a
 delivery property: a **response to the host's own request**.
@@ -168,14 +188,16 @@ restart. MCP reads the **same file** for the same reason, whenever its in-memory
 the handle; what remains particular to that surface is its in-process source-run guard, and [what a second
 apply gets across a restart because of it](mcp.md#one-form-fromrun).
 
-**The handle is verified, not trusted.** `fromRun` is a path from a peer process, so it is resolved against
-this agent's *own* artifact directory: it must be an immediate child of it, both as spelled and after
-symlink resolution, and it must carry a decision set whose recorded run id is the directory's own name.
-Everything else — a directory this agent did not produce, a nested path, a traversal, a symlink that is
-merely *spelled* like one of our runs, a run that recorded no decision set (a `patch`/`apply` run does not) —
-is refused with one uniform `-32602` `reasonCode: run_handle_unknown`. The containment ordering is
-deliberate: the check that a handle is inside the artifact directory is **lexical**, made before the
-filesystem is consulted, so this surface never becomes an existence oracle over arbitrary absolute paths.
+**The handle is verified, not trusted.** `fromRun` is a path from a peer process. It must be **absolute**,
+and it is resolved only among the run-record locations of **the turn's workspace** (the named `workspace`,
+or the session `cwd`): its `.aimesh/` state directory when it has one, else the temp run directory. It must
+be an immediate child of one of those, both as spelled and after symlink resolution, and it must carry a
+decision set whose recorded run id is the directory's own name. Everything else — a relative handle, a
+directory this agent did not produce, a nested path, a traversal, a symlink that is merely *spelled* like one
+of our runs, a run that recorded no decision set (a `patch`/`apply` run does not) — is refused with one
+uniform `-32602` `reasonCode: run_handle_unknown`. The containment ordering is deliberate: the check that a
+handle is inside a run-record location is **lexical**, made before the filesystem is consulted, so this
+surface never becomes an existence oracle over arbitrary absolute paths.
 
 **What gates the write** — all of it the same machinery every other surface gets, none of it re-implemented:
 
@@ -184,18 +206,17 @@ filesystem is consulted, so this surface never becomes an existence oracle over 
 | Workspace identity binding | The canonical path must still resolve to what it resolved to, and the reviewed root's device+inode must still match. `remediation_workspace_identity_changed`, pre-spend. |
 | Base-hash pins (pass one) | Any targeted file whose content changed since the report run — checked **before** the write window opens, before a copy is made and before any model call. `stale_decision_set`. |
 | `governedWrite` content pins (pass two) | The same question again, per destination, inside the commit: a file saved during the write is refused there. `stale_decision_set`, with `commitAttempted: true` on the receipt and a rolled-back commit. |
-| Trusted roots | The stored workspace must resolve inside **this connection's** roots, not the ones the source run was launched with — a decision set is durable and can outlive them. |
+| Turn scope | The write is re-gated against the scope **this turn** declared, not the one the source run was reviewed under — a decision set is durable and can outlive it. |
 | Protected-path denylist, journal, cancel/commit gate, receipt | Unchanged; one governed write path. |
 
-**Run-forming arguments are refused, not ignored.** `_meta.reviewmesh.profile`, `.panel` and `.authority`
-cannot ride a `fromRun` turn (`reasonCode: from_run_args_refused`): each names a governance input to an
-adjudication that has already happened, and honouring the request is not something this turn can do. Same
-rule, same reasoning as MCP's `review_remediate {fromRun}`.
+**Run-forming arguments are refused, not ignored.** `_meta.reviewmesh.panel` and `.authority` cannot ride a
+`fromRun` turn (`reasonCode: from_run_args_refused`): each names a governance input to an adjudication that
+has already happened, and honouring the request is not something this turn can do. Same rule, same
+reasoning as MCP's `review_remediate {fromRun, workspace}`.
 
-**The workspace.** A turn that *names* a `workspace` must name the tree the source run judged
-(`reasonCode: from_run_workspace_mismatch`) — the write is applied where the decisions were made, and a
-caller that asked for somewhere else is told rather than silently redirected. A turn that names none (the
-`session/new` cwd, the process working directory) asserts nothing, and the source run's workspace stands.
+**The workspace.** The turn's workspace — named, or the session `cwd` — must be the tree the source run
+judged (`reasonCode: from_run_workspace_mismatch`). The write is applied where the decisions were made, and a
+turn whose workspace is somewhere else is told rather than silently redirected.
 
 **The response carries two handles.** `_meta.reviewmesh.runDir` is **this write's own** run directory — its
 journal, commit-attempt marker and receipt live there — and `sourceRunDir` is the run whose decisions it
@@ -289,17 +310,29 @@ The schema is **identical to the CLI's** `--authority` / `--authority-manifest` 
 | Both or neither of `path`/`content`; missing or duplicate `name`; bad `expectedHash`; incoherent `completeness`/`ranges` | `authority_doc_invalid` |
 | More than 8 documents | `authority_too_many_docs` |
 | Inline `content` in a write-capable effective mode (the provenance split) | `authority_inline_mode_invalid` |
-| A path outside the allowed roots, or one the non-overridable read denylist protects (`.env*`, key material) | `scope_outside_root` / `scope_read_denied` |
+| A path outside the directories the turn declared, or one the non-overridable read denylist protects (`.env*`, key material) | `scope_outside_root` / `scope_read_denied` |
 | An `expectedHash` that does not match the bytes read | `authority_hash_mismatch` |
 
 Unknown keys *elsewhere* in `_meta` belong to the host and are ignored.
 
-> **Scope of the reviewmesh namespace.** `_meta.reviewmesh` carries exactly six keys — `authority`,
-> `profile`, `panel`, `maxParallel`, `dryRun` and `verifyReadiness` — and it is accepted on `session/prompt` and the compatibility `review` method
-> **only**; `session/new` reads nothing but `cwd`. The review `mode` is a **top-level** param, not a
-> `_meta` key, so `_meta.reviewmesh.mode` is a `-32602` like any other unknown key. One rough edge worth
-> knowing: because the whole namespace is decoded as a unit, *any* malformed key inside it — including a
-> panel-shaped one — reports `reasonCode: authority_doc_invalid`, which is broader than its name suggests.
+> **Scope of the reviewmesh namespace.** On a request, `_meta.reviewmesh` carries exactly these keys, and it
+> is accepted on `session/prompt` and the compatibility `review` method **only**; `session/new` reads
+> nothing but `cwd`:
+>
+> | Key | Meaning |
+> |---|---|
+> | `panel` | **Required** on a review turn: `{reviewers[], author_remediator, cross_check?, verifier?}` — see [Panel composition](#panel-composition-via-_metareviewmesh). Refused on a `fromRun` turn. |
+> | `roots` | Extra absolute directories the turn reads beside its workspace. |
+> | `authority` | Authority documents, as above. |
+> | `maxParallel` | How many reviewer seats invoke at once (absent → the whole panel). Wall clock only. |
+> | `dryRun` | Price the turn instead of running it — see below. |
+> | `verifyReadiness` | Before dispatch, one bounded one-token call per distinct adapter/model; a blocked agent halts the turn before the panel is paid for. **Spends**; `dryRun` prices it. |
+>
+> The response's `_meta.reviewmesh` adds `writes` and `diffAvailable` to every successful or cancelled turn.
+> The review `mode` is a **top-level** param, not a `_meta` key, so `_meta.reviewmesh.mode` is a `-32602`
+> like any other unknown key. One rough edge worth knowing: because the whole namespace is decoded as a
+> unit, *any* malformed or unknown key inside it — including a `profile` key — reports
+> `reasonCode: authority_doc_invalid`, which is broader than its name suggests.
 
 `dryRun: true` prices the turn instead of running it: the plan, panel, authority documents and
 preflight all resolve, then the turn stops before its first model call and answers with
@@ -312,57 +345,58 @@ branch on `status` rather than on the count.
 
 A successful turn's `_meta.reviewmesh` echo carries the **inclusion manifest** as `authority[]` — per document the source, `fullHash`, `embeddedHash`, `bytesEmbedded`/`bytesTotal`, `complete`, and any declared `ranges` (see [schema/authority-manifest.schema.json](schema/authority-manifest.schema.json)) — so a host can record exactly which intent the run was judged against. Findings the [write-path rule](prompts.md#authority--context-inputs) refused are marked `applyable: false` in the run projection; the host never writes them.
 
-## Profile / panel selection via `_meta.reviewmesh`
+## Panel composition via `_meta.reviewmesh`
 
-The same namespace carries **run-forming selection**, so an ACP host can choose *how* a review runs,
-not only *what* it reviews — the parity gap that used to force every ACP session through the loaded
-default profile. Both keys work on `session/prompt` and on the compatibility `review` method.
-
-```json
-{
-  "_meta": {
-    "reviewmesh": {
-      "profile": "three-seat-panel"
-    }
-  }
-}
-```
+Every review turn composes its own panel — the host chooses *how* a review runs, not only *what* it
+reviews. The same object works on `session/prompt` and on the compatibility `review` method:
 
 ```json
 {
   "_meta": {
     "reviewmesh": {
-      "panel": [
-        { "adapter": "codex-cli",   "model": "codex-cli-default" },
-        { "adapter": "claude-code", "model": "claude-code-default" },
-        { "adapter": "agy-cli",     "model": "agy-cli-default", "effort": "high" }
-      ]
+      "panel": {
+        "reviewers": [
+          { "adapter": "codex-cli",   "model": "gpt-5" },
+          { "adapter": "claude-code", "model": "sonnet", "effort": "high" }
+        ],
+        "author_remediator": { "adapter": "claude-code", "model": "opus" },
+        "cross_check":       { "adapter": "codex-cli",   "model": "gpt-5" }
+      }
     }
   }
 }
 ```
 
-- `profile` **selects** a configured profile by name (absent/blank → the configured default).
-- `panel` **composes** an ad-hoc [blind reviewer panel](review.md#the-blind-reviewer-panel) — the ACP equivalent of repeatable `--reviewer`, with the array order as the panel's order. It replaces the profile's panel entirely; it never merges with it.
+- **`reviewers[1..16]`** — the [blind reviewer panel](review.md#the-blind-reviewer-panel), in the order
+  given. A different `effort` is a different vantage and part of the seat's identity.
+- **`author_remediator`** — **required**: the host-adjudication seat whose judgment becomes the accepted
+  set. It is never defaulted.
+- **`cross_check`**, **`verifier`** — optional. A turn without them does not run those steps, and the run's
+  shape lists them as skipped.
+- A single-slot role seat takes no `effort`; put an effort-bearing identifier in its `model`.
 
-**Compose, never configure.** A seat may name only an adapter and model the *server's* configuration
-already defines. There is deliberately **no field** for a binary path, launch arguments, or an adapter
-definition — the absence is the enforcement, and because the namespace is strict-decoded, adding one
-is `-32602` rather than a silently ignored key. A prompt can therefore reorder and select the
-identities an operator configured, and can never introduce one.
+**The launched adapters, the caller's models.** A seat may name only an adapter this agent was launched
+with (`--adapter`), and its CLI must be startable now. `model` is the exact identifier that adapter's CLI
+accepts for the license it runs under: the calling agent looks it up, and aimesh passes it through verbatim.
+There is deliberately **no field** for a binary path, launch arguments, or an adapter definition, and
+because the namespace is strict-decoded, adding one is `-32602` rather than a silently ignored key.
 
 Refusals are **pre-spend `-32602`** with a stable `reasonCode`, exactly like authority:
 
 | Condition | `reasonCode` |
 |---|---|
-| Both `profile` and `panel` named — a panel is composed *or* selected, never half of each | `panel_and_profile` |
-| More seats than the panel cap (16) | `panel_too_large` |
+| A review turn with no `panel` | `panel_required` |
+| `reviewers` empty | `panel_reviewers_empty` |
+| More reviewer seats than the cap (16) | `panel_too_large` |
 | A seat missing `adapter` or `model` | `panel_seat_incomplete` |
-| An unknown key inside the reviewmesh namespace (including anything panel-shaped that is not `adapter`/`model`/`effort`) | `authority_doc_invalid` |
+| No `author_remediator` | `panel_author_remediator_required` |
+| `effort` on `author_remediator`, `cross_check` or `verifier` | `panel_role_effort` |
+| The agent was launched with no adapter (the message names `--adapter`) | `panel_no_adapters` |
+| A seat names an adapter the agent was not launched with (the message lists the launched set) | `panel_adapter_not_launched` |
+| A seat's adapter CLI cannot be started now | `panel_adapter_unavailable` |
+| An unknown key inside the reviewmesh namespace (a `profile` key, an array-shaped `panel`, a `path` on a seat) | `authority_doc_invalid` |
 
-An unknown profile name, an unresolvable seat, or a duplicate seat identity is refused by the same
-resolver every surface uses, before any model call — the surface owns only the checks above, so an
-ACP prompt and a CLI invocation can never disagree about what resolves.
+A duplicate seat identity is refused by the same resolver every surface uses, before any model call.
 
 A successful turn's `_meta.reviewmesh` echo carries `panel[]` — the **executed roster**: one entry per
 *requested* seat, in order, with `seatId`, `adapter`, `model`, `status`, `rounds`, `findings` and the
@@ -386,14 +420,12 @@ Ambient safety therefore rests on reviewmesh's other guarantees, not on knowing 
 ## exploremesh as an ACP agent
 
 ```
-aimesh explore acp [--framing newline|content-length] [--turn-timeout <dur>] [--roster <path>]
+aimesh explore acp [--adapter <name>[=<path>]]... [--framing newline|content-length] [--turn-timeout <dur>]
 ```
 
-`aimesh explore acp` serves one **exploration** per `session/prompt`. `--turn-timeout` is the total wall-clock budget for a single turn (default **10m**); when it expires the turn ends as a **halt** (`-32000`), not as `stopReason: cancelled` — `cancelled` is reserved for a cancel the host actually asked for. `aimesh review acp` behaves the same way, with the same flag and the same default. Framing, the 16 MiB frame cap, session ids, cancellation and `shutdown`/`exit` behave exactly as above — the transport is the same `meshcore/acp` code.
+`aimesh explore acp` serves one **exploration** per `session/prompt`. `--adapter` (repeatable, or `AIMESH_ADAPTERS`) names the adapters a prompt's panel may use, with the same names and path expansion as `aimesh review acp`; the agent reads no aimesh configuration, and launched with no adapter it starts and refuses every exploration with a message naming `--adapter`. `--turn-timeout` is the total wall-clock budget for a single turn (default **10m**); when it expires the turn ends as a **halt** (`-32000`), not as `stopReason: cancelled` — `cancelled` is reserved for a cancel the host actually asked for. `aimesh review acp` behaves the same way, with the same flag and the same default. Framing, the 16 MiB frame cap, session ids, cancellation and `shutdown`/`exit` behave exactly as above — the transport is the same `meshcore/acp` code.
 
 **There is no write-gating and no mode ceiling.** exploremesh reviews nothing on disk and the pipeline runs every model call in a fresh isolated work directory, so there is no workspace, no `report|patch|apply` mode, no permission ceiling, and no capability narrowing from the host's advertised capabilities. `session/new.params.cwd` is stored only so a later `session/resume` can round-trip it; it is never a run root.
-
-It is a **launch** flag for exactly the reason the roots are: the caller is a peer process, so the consent has to precede the request. There is no `_meta.exploremesh` field for it, and none for the file either — a peer that could name the file this process appends to would have an arbitrary write. The location is derived from the project's `.aimesh/explore/`, and with no project state directory the flag is refused rather than downgraded.
 
 ### The task arrives via `_meta.exploremesh`
 
@@ -408,9 +440,9 @@ The ACP prompt text becomes the exploration **purpose**. Everything load-bearing
 | `artifact` | The artifact under review. Optional at the protocol level, **required by whichever mode says so** (`challenge`). |
 | `options`, `compareCriteria` | The fixed-space declarations for `--mode compare`. |
 | `target`, `unit`, `horizon`, `conditioningEvent` | The fixed-space declarations for `--mode forecast`. |
-| `profile` | Selects a named profile from the set the agent bound to at startup (absent → that set's default). |
-| `count` | Selects the top-N explorers by preference order — a JSON integer, or the string `"all"`. Never clamped: out of range, or `<2`, is `invalid-params`. |
-| `panel` | **Composes** an ad-hoc panel by identifier: `{explorers: [{adapter, model, effort?}] (2..16), collator: {adapter, model, effort?}}` — the ACP analogue of the CLI's `--explorer`/`--collator` and of MCP's `panel` branch B. **Mutually exclusive with `profile`/`count`.** Compose, never configure: every adapter must already be in the set the agent bound at startup, and there is deliberately no field for a binary path or launch argument. |
+| `panel` | **Required.** `{explorers: [{adapter, model, effort?}] (2..16), collator: {adapter, model, effort?}}` — the ACP analogue of the CLI's `--explorer`/`--collator` and of MCP's `panel`. Every adapter must be one the agent was launched with whose CLI can start now; `model` is the exact identifier that adapter's CLI accepts, passed through verbatim. There is deliberately no field for a binary path or launch argument. A prompt with no panel is `invalid-params` naming the corrected shape. |
+| `canonicalizers` | Exactly two `{adapter, model, effort?}` seats, or absent (the host derives them). Held to the same launched-adapter rule. |
+| `verifyReadiness` | `true` asks every distinct adapter/model/effort the panel names, before the run, whether it can do real work — one bounded one-token call each. A blocked agent halts the turn before the panel is paid for. **Spends**; `dryRun` prices it as a `readiness` stage in `shape.calls`. |
 | `dumpRun` | `true` records the whole run (envelopes, raw outputs, prompts, the declared task, a versioned manifest) under `$EXPLOREMESH_ARTIFACT_DIR` — the ACP analogue of `--dump-run`. The response echoes `runCaptured` and the `runId`; the record is at `$EXPLOREMESH_ARTIFACT_DIR/<runId>`. The host **path** is never put on the wire. |
 | `maxParallel` | Bounds how many explorers invoke their model CLI at once (absent → the whole panel). Wall clock only, never cost. |
 | `dryRun` | `true` prices the turn instead of running it — the ACP analogue of `--dry-run` and MCP's `dryRun`. See below. **Mutually exclusive with `dumpRun`.** |
@@ -430,17 +462,14 @@ only that nothing left is a *configuration* question. It is refused with `dumpRu
 directory records an exploration and a dry run performs none. A host branches on `status`/`dryRun`,
 never on the absent result.
 
-A prompt may only **select or compose from** the bound configuration; it can never supply a new roster,
-an unconfigured adapter, a binary path, or a launch argument.
+A prompt composes from the adapters the agent was launched with; it can never supply an unnamed adapter, a
+binary path, or a launch argument.
 
-> **A deliberate asymmetry with reviewmesh, stated so it is not mistaken for a guarantee.** Every key
-> *listed above* is validated fail-closed, but the `_meta.exploremesh` namespace is **not** strict-decoded
-> the way `_meta.reviewmesh` is: an **unrecognized** key inside it is silently ignored rather than
-> refused. Nothing is loosened by that — there is no ignored key that could introduce an adapter, a path
-> or an argument, because no such field exists to mistype into — but a driver cannot rely on a typo'd
-> governance field being reported here, and should verify what actually ran from the response echo. The agent binds its profile set once at startup — the same set a no-flag `aimesh explore run` resolves — and builds its adapter registry over **every** bound profile's adapters, so an unconfigured adapter in any selectable profile fails closed *before serving* rather than mid-turn. When launched with an explicit `--roster`, the agent is bound to a single anonymous roster with no named profiles, and naming any `profile` is `invalid-params`.
+The `_meta.exploremesh` namespace is **strict-decoded**, like `_meta.reviewmesh`: an unrecognized key inside
+it — a typo, or a `profile` or `count` key — is `invalid-params` naming the key, rather than a silently
+ignored governance field.
 
-Every one of these fails closed with `invalid-params` (-32602) rather than being clamped or coerced: missing criteria, an unknown mode, an unknown profile, a non-integer/out-of-range `count`, a `panel` combined with `profile`/`count`, a panel outside 2..16 or naming an unconfigured adapter, and any mode-specific task requirement the prompt did not meet.
+Every one of these fails closed with `invalid-params` (-32602) rather than being clamped or coerced: missing criteria, an unknown mode, an unknown key, a missing panel, a panel outside 2..16 or naming an adapter the agent was not launched with (the message lists the launched set) or one whose CLI cannot start, `dryRun` combined with `dumpRun`, and any mode-specific task requirement the prompt did not meet.
 
 ### Method mapping (`aimesh explore acp`)
 
@@ -448,7 +477,7 @@ Every one of these fails closed with `invalid-params` (-32602) rather than being
 |---|---|
 | `initialize` | ACP v1 result: integer `protocolVersion: 1`, `agentInfo` (`name: exploremesh`), `agentCapabilities` (`loadSession:false`; `promptCapabilities` text-only — no image, audio, or embedded context; no MCP; `sessionCapabilities.resume` **only** when the durable session store is configured), empty `authMethods`. A missing, non-integer or too-low client `protocolVersion` is a deterministic protocol error. |
 | `session/new` | Allocates a session id, records `params.cwd`, and persists a durable record (best-effort) for cross-restart resume. |
-| `session/prompt` | Resolves the panel from `_meta.exploremesh.profile`/`count`, builds the task, and runs the exploremesh pipeline. Emits `session/update` progress during the run. Returns a `PromptResponse` (`stopReason: end_turn`, or `cancelled` after a cancel) whose `_meta.exploremesh` echoes back exactly what ran. |
+| `session/prompt` | Resolves the required `_meta.exploremesh.panel` against the launched adapters, builds the task, and runs the exploremesh pipeline. Emits `session/update` progress during the run. Returns a `PromptResponse` (`stopReason: end_turn`, or `cancelled` after a cancel) whose `_meta.exploremesh` echoes back exactly what ran. |
 | `session/update` | Outbound progress notification during a turn: a `SessionUpdate` with `sessionUpdate: "agent_message_chunk"` carrying the progress line as text, plus the structured audit-event fields (`eventType`, `level`, `message`, `timestamp`) under `_meta.exploremesh`. Context-gated, so none arrive after cancellation or after the terminal response. |
 | `session/resume` | **Durable, reconnect-without-history.** Restores a session record persisted by an earlier process from `<AIMESH_HOME>/.aimesh/explore/acp-sessions/` and returns an empty `ResumeSessionResponse`. Method-not-found when no store is configured (which happens only if the home cannot be resolved). |
 | `session/load` | **Method-not-found, intentionally** — its contract is to replay a prior conversation, and a stateless one-shot explorer has none. |
@@ -459,7 +488,7 @@ Any other method returns method-not-found; JSON-RPC **batch** requests are rejec
 
 ### What comes back
 
-A successful turn's `_meta.exploremesh` echo carries the applied purpose + criteria, the effective `mode`, the **panel that actually ran** (`profile`, `explorersSelected`, `explorersConfigured`), whether prior context and an artifact were supplied (never their content), the run outcome (`formulationSource`, `collatorStatus`, `panelSize`, `dropped`), the mode's one-line `summary` plus that mode's own structured detail, `runCaptured` + `runId` when `dumpRun` was requested, and — for any count-bearing mode — a `governance` block. A **dry** turn instead carries `status: "planned"`, `dryRun: true` and the `shape` described above, and none of the run-outcome fields, because there was no run.
+A successful turn's `_meta.exploremesh` echo carries the applied purpose + criteria, the effective `mode`, the **panel that actually ran** (`panelSource: "adhoc"`, `explorers`, `collator`), whether prior context and an artifact were supplied (never their content), the run outcome (`formulationSource`, `collatorStatus`, `panelSize`, `dropped`), the mode's one-line `summary` plus that mode's own structured detail, `runCaptured` + `runId` when `dumpRun` was requested, and — for any count-bearing mode — a `governance` block. A **dry** turn instead carries `status: "planned"`, `dryRun: true` and the `shape` described above, and none of the run-outcome fields, because there was no run.
 
 Alongside `canonicalizerSource` (who chose the canonicalizers) a canonicalizing run echoes `canonicalizerIndependence`: `distinct_models`, or `shared_model` when both canonicalizers ran one model behind two adapters. The pair is allowed — a panel is configured deliberately — so this echo is the whole safeguard: a merge held by two instances of one model is weaker evidence than one held across two models, and every corroboration count in the result rests on that difference.
 
@@ -475,14 +504,14 @@ Bounded before any model subprocess is spawned: the `session/prompt` params payl
 
 `go test ./...` needs no real ACP host — a fake harness and a real-subprocess harness (driving the actual agent binary over stdio, both framings) cover the protocol deterministically in both apps. Verifying interoperability with an actual IDE host is a separate, manual, opt-in procedure, because only a real host frames, initializes, and drives sessions the way it actually will in production.
 
-The procedure below is written for `aimesh review acp`. For `aimesh explore acp` the shape is the same minus the workspace: skip the mode-gating step (8), and in step 6 send a `session/prompt` whose `_meta.exploremesh.criteria` is a non-empty list, then confirm the `_meta.exploremesh` echo names the mode and the panel that ran.
+The procedure below is written for `aimesh review acp`. For `aimesh explore acp` the shape is the same minus the workspace: skip the mode-gating step (8), and in step 6 send a `session/prompt` whose `_meta.exploremesh` carries a non-empty `criteria` list and a `panel` naming the launched adapters, then confirm the `_meta.exploremesh` echo names the mode and the panel that ran.
 
 1. **Prerequisites.** Build the agent (`make dist` or `go build ./cmd/aimesh`); note `aimesh --version`. Have the host installed and signed in manually — do not automate GUI login or trust prompts.
-2. **Point the host at the agent.** Configure the host to launch `aimesh review acp` (add `--framing content-length` if the host expects LSP framing; default is `newline`). Record the exact launch command the host uses.
-3. **initialize.** Start a session from the host. Capture the host's `initialize` params and reviewmesh's response; confirm the response is ACP v1-shaped (integer `protocolVersion: 1`, `agentCapabilities`, `agentInfo`, `authMethods`, no legacy `capabilities`/`serverInfo`). Confirm capability narrowing behaviorally — e.g. a host that advertises no write capability should later see an `apply` request degrade to `patch`.
+2. **Point the host at the agent.** Configure the host to launch `aimesh review acp --adapter <name>` (add `--allow-writes` to exercise an apply turn, and `--framing content-length` if the host expects LSP framing; default is `newline`). Record the exact launch command the host uses.
+3. **initialize.** Start a session from the host. Capture the host's `initialize` params and reviewmesh's response; confirm the response is ACP v1-shaped (integer `protocolVersion: 1`, `agentCapabilities`, `agentInfo`, `authMethods`, no legacy `capabilities`/`serverInfo`) and carries `_meta.reviewmesh.writes` and `diffAvailable`. Confirm capability narrowing behaviorally — e.g. a host that advertises no write capability should later see an `apply` request degrade to `patch`.
 4. **session/new.** Confirm the host calls it and accepts the returned `sessionId`.
 5. **session/resume** (optional). Restart the agent and have the host call `session/resume` with the prior `sessionId`; confirm an empty `ResumeSessionResponse` and that a following `session/prompt` (omitting `workspace`) runs against the restored cwd. (`session/load` should surface as method-not-found.)
-6. **session/prompt (report mode).** Send a review request for a small workspace. Confirm a result with `mode`, `findings`, `runDir`, and audit artifacts under `runDir`.
+6. **session/prompt (report mode).** Send a review request for a small workspace, by absolute path, with a `_meta.reviewmesh.panel` naming the launched adapter. Confirm a result with `mode`, `findings`, `runDir`, `writes`, and audit artifacts under `runDir`.
 7. **session/update.** During step 6, confirm the host receives progress notifications tagged with the session id, and record whether it consumes or ignores them. Confirm none arrive after the terminal response.
 8. **Mode gating.** Request `apply` from a host with no write capability. Confirm reviewmesh degrades to patch/report with a reason and performs no live workspace write.
 9. **session/cancel.** Cancel a longer-running prompt mid-run. Confirm a `cancelled` result and no write after cancel.

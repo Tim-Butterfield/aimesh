@@ -1,4 +1,4 @@
-// Package schema is exploremesh's domain schema (design §6): the machine-validatable response
+// Package schema is exploremesh's domain schema: the machine-validatable response
 // schema + the `expanded ⊇ minimum` guard, the raw-task / explorer-task-payload artifacts, the
 // explorer outer envelope + model-identity policy, the formulation run-state, and the fixed
 // collator-output schema. It depends on meshcore only (never reviewmesh).

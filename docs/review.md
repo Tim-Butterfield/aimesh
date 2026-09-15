@@ -43,8 +43,8 @@ aimesh review run \
 `--reviewer` may name only adapters and models your configuration already defines (it composes, it
 never configures), and it cannot be combined with `--profile` — a panel is composed *or* selected.
 To save one instead, put a `reviewers` list on a profile ([configuration](../docs/configuration.md#profiles-and-the-reviewer-panel))
-or `aimesh review setup --profile <name>`. The same panel is composable over ACP with
-`_meta.reviewmesh.panel` ([ACP](../docs/acp.md#profile--panel-selection-via-_metareviewmesh)).
+or `aimesh review setup --profile <name>`. Over MCP and ACP every review composes its panel per call
+(`panel` / `_meta.reviewmesh.panel`) — see [Driving it over MCP or ACP](#driving-it-over-mcp-or-acp).
 
 ## Commands
 
@@ -74,21 +74,20 @@ reviewmesh <command> [flags]
   init            create the local, VCS-excluded .aimesh/ state directory
                   (variants: init | repo init | folder init)
   acp             run as an ACP agent server (JSON-RPC 2.0 over stdio; --framing newline|content-length)
-                  --root <dir> (repeatable) trusted workspace root a session may review
-                  --no-default-root (do not adopt the launch working directory)
-                  --allow-broad-root (opt in to an explicit --root the degenerate rule refuses;
-                    never applies to the inferred cwd, never waives the denylist)
+                  reads no aimesh configuration
+                  --adapter <name>[=<path>] (repeatable; or AIMESH_ADAPTERS) adapters a turn may use
+                  --allow-writes (an apply turn may write; without it an apply turn is refused)
+                  --root <dir> (repeatable, optional) ceiling every declared workspace must lie inside
+                  --allow-broad-root (opt in to a --root the degenerate rule refuses; never waives the denylist)
                   --turn-timeout <dur> (wall-clock budget for one turn; default 10m)
   mcp             run as an MCP server (Model Context Protocol over stdio)
-                  tools: review_report (writes nothing), list, doctor, run_status, run_result
+                  tools: review_report (writes nothing), review_remediate, list, doctor, run_status, run_result
+                  reads no aimesh configuration
+                  --adapter <name>[=<path>] (repeatable; or AIMESH_ADAPTERS) adapters a call may use
+                  --allow-writes (review_remediate output=apply may write; output=patch works without it)
+                  --root <dir> (repeatable, optional) ceiling, --allow-broad-root
                   --protocol dual|legacy  era posture (default dual; legacy = a
                     pre-2026-07-28 server, a compatibility fallback, not conformance)
-                  --root <dir> (repeatable; MANDATORY consent — as acp, and STRICTER on
-                    2026-07-28: an inferred cwd is not a root there),
-                  --no-default-root, --allow-broad-root
-                  --allow-inferred-root  accept the launch cwd as a trusted root on
-                    2026-07-28+ (default: refused, every path denied)
-                  --allow-remediate  ALSO expose review_remediate, which WRITES
                   --framing, --wait-seconds, --turn-timeout
 
   --version [--json], --help
@@ -126,8 +125,7 @@ aimesh review run --dry-run --report . \
 ```
 
 Over MCP the same composition is the `panel` argument of `review_report` (`{reviewers[], author_remediator, …}`);
-over ACP it is `_meta.reviewmesh.panel` — see [docs/mcp.md](../docs/mcp.md#review_report) and
-[docs/acp.md](../docs/acp.md#profile--panel-selection-via-_metareviewmesh).
+over ACP it is `_meta.reviewmesh.panel` — see [Driving it over MCP or ACP](#driving-it-over-mcp-or-acp).
 
 **Saving a panel.** A run that names neither `--reviewer` nor `--profile` binds to the profile named
 **`default`**, which ships deliberately **unconfigured** — `doctor` reports it as needing adapters until
@@ -264,7 +262,7 @@ the result carries a `scope` block with the selected count, the file list, and a
 
 ## When a provider runs out (capacity is not integrity)
 
-A seat can fail for two very different reasons, and until now both halted the run:
+A seat can fail for two very different reasons, and the run treats them differently:
 
 - **Integrity** — a proven model-identity mismatch, a containment refusal, an unresolvable adapter.
   The run's *premises* are broken, so nothing the panel produced can be trusted. It still halts.
@@ -276,7 +274,7 @@ play at once — an enterprise quota, a flat subscription, purchased tokens, sta
 seat hitting its wall late in a panel is ordinary, and discarding three completed seats because the
 fourth was out of credit is the tool wasting your money on your behalf.
 
-So a capacity failure now **degrades the panel** instead:
+So a capacity failure **degrades the panel** instead of halting the run:
 
 ```
 PARTIAL PANEL: 2 of 4 configured seat(s) answered.
@@ -428,8 +426,7 @@ learn to override by reflex, which makes it worth nothing anyway.
 **What you get instead is a precise undo.** `patches/changes.patch` is a complete reverse-appliable
 delta of everything the run wrote, produced on the apply path as well as the patch path. So
 `git apply -R` takes out exactly this run's edits and leaves yours alone. The blunt undo
-(`git checkout -- .`) does take both — that is what the old refusal was really about — but the
-precise one has always existed, and it is the one to reach for.
+(`git checkout -- .`) takes both, so the precise one is the one to reach for.
 
 The tree's state **is** recorded: an apply into a dirty tree emits a `workspace_dirty` event with
 the paths involved, so a run read later says plainly that the tree was not clean when it was
@@ -443,9 +440,9 @@ this tree is under no version control, so reverse-applying <run>/patches/changes
 ONLY way to undo what this run is about to write (`git apply -R <patch>`, or `patch -R -p1 < <patch>`)
 ```
 
-That artifact used to land in the OS temp directory for exactly this tree — the least recoverable one
-keeping its only recovery artifact in the most disposable place. It now gets a project state directory
-created for it before the run. That is the one case where creating state unasked is right: we are
+Such a tree gets a project state directory created for it before the run, so its only recovery
+artifact does not land in the OS temp directory, the most disposable place there is. That is the one
+case where creating state unasked is right: we are
 already about to write into this tree by explicit instruction, and declining to also write the means
 of undoing that is restraint aimed at the wrong thing. A configured artifact directory is never
 relocated — only the unconfigured fallback is.
@@ -484,9 +481,8 @@ widens which *names* are allowed inside a root, never which roots exist.
 ## Judging against a large specification
 
 There is **no size limit on an authority document**. Whether a model can hold a 100 KiB
-specification is the model's business, not this tool's, and the ceiling that used to live here
-(64 KiB per document) meant a real spec — this repository's own `docs/mcp.md` is over 100 KiB —
-could not be judged against at all.
+specification is the model's business, not this tool's, and a per-document ceiling would make a real
+spec — this repository's own `docs/mcp.md` is over 100 KiB — impossible to judge against at all.
 
 The cost is real and worth knowing: authority is embedded in **every seat's prompt, on every
 round**, so it multiplies. That is what `--dry-run` is for. It names the exact bytes, the files and
@@ -703,8 +699,35 @@ These map to process exit codes: `0` success · `1` findings (with `--fail-on-fi
 ## Surfaces
 
 - **CLI** — the commands above.
-- **ACP** — `aimesh review acp` runs as an [Agent Client Protocol](https://agentclientprotocol.com/) server over stdio (JSON-RPC 2.0; newline or `Content-Length` framing), for ACP-capable IDEs. Over ACP the caller is another *process*, not a person, so the consent a CLI path argument carries is given at launch instead: **`--root <dir>` (repeatable) names the trusted workspace roots a session may review**, and every path a request supplies — workspace, session cwd, authority documents — must resolve inside them. With no `--root` the launch working directory is adopted (an IDE starts the agent in the project you opened), unless it is a degenerate root such as `/` or your home directory, which is refused; `--no-default-root` requires explicit roots. See [docs/acp.md](../docs/acp.md#trusted-roots-reviewmesh-only-what-an-acp-session-is-allowed-to-read).
-- **MCP** — `aimesh review mcp` runs as a [Model Context Protocol](https://modelcontextprotocol.io/) server over stdio, so an MCP-speaking agent can drive a governed review. Trusted roots work exactly as they do over ACP and are **mandatory** here too. Two tools form a run: **`review_report`** runs the cycle and **writes nothing**, returning the adjudicated findings with their per-seat provenance, the authority inclusion manifest, the identity caveats and the requested-vs-executed roster; **`review_remediate`** applies an already-adjudicated accepted set — and it is **doubly gated**. It is not even listed unless the operator launched with `--allow-remediate` (which grants the config capability `surfaces.capabilitiesBySurface.mcp: [allowRemediate]`, the thing that raises the shipped `mcp: report` ceiling), and every call must additionally pass `allowWrite: true` — a declaration the *calling model* makes, which is auditable and host-inspectable but is **not** human consent (the enforcement a model cannot supply is the launch flag, the config capability and root confinement). Its preferred `fromRun` form binds the reviewed root by device+inode, reconciles decisions to findings by ID, re-verifies the base hashes captured at review time — before the window **and again per destination inside the commit**, which is what catches a concurrent in-place save — journals the intended hunks durably before writing (a journal that cannot be written halts the run), applies each finding all-or-nothing, and always persists a receipt derived only from a commit that succeeded. See [docs/mcp.md](../docs/mcp.md#reviewmesh-mcp).
+- **ACP** — `aimesh review acp` runs as an [Agent Client Protocol](https://agentclientprotocol.com/) server over stdio (JSON-RPC 2.0; newline or `Content-Length` framing), for ACP-capable IDEs. See [Driving it over MCP or ACP](#driving-it-over-mcp-or-acp) and [docs/acp.md](../docs/acp.md).
+- **MCP** — `aimesh review mcp` (or the combined `aimesh mcp`) runs as a [Model Context Protocol](https://modelcontextprotocol.io/) server over stdio, so an MCP-speaking agent can drive a governed review. Two tools form a run: **`review_report`** runs the cycle and **writes nothing**, returning the adjudicated findings with their per-seat provenance, the authority inclusion manifest, the identity caveats and the requested-vs-executed roster; **`review_remediate`** acts on that run's already-adjudicated accepted set. Its `fromRun` form binds the reviewed root by device+inode, reconciles decisions to findings by ID, re-verifies the base hashes captured at review time — before the window **and again per destination inside the commit**, which is what catches a concurrent in-place save — journals the intended hunks durably before writing (a journal that cannot be written halts the run), applies each finding all-or-nothing, and always persists a receipt derived only from a commit that succeeded. See [docs/mcp.md](../docs/mcp.md).
+
+## Driving it over MCP or ACP
+
+The MCP and ACP servers read **no aimesh configuration** — no saved profiles, model catalog or surface
+policy, including a project `.aimesh/`. Everything they need comes from the launch arguments in the
+host's own configuration (for example an IDE's MCP `config.json`) and from each call, so they work on a
+fresh install with no setup step.
+
+- **Adapters** are named at launch: `--adapter <name>` (found on `PATH`) or `--adapter <name>=<path>`,
+  repeatable, or `AIMESH_ADAPTERS`. Only named adapters are available. See
+  [adapters.md → Which adapters are available where](adapters.md#which-adapters-are-available-where).
+- **The panel is composed per call.** `reviewers[]` (1..16 seats) and `author_remediator` are required;
+  `cross_check` and `verifier` run only when named, and a run without them lists them in
+  `shape.skippedSteps`. Each seat names a launched adapter and the exact model identifier that adapter's
+  CLI accepts; the server passes it through verbatim. Effort is per seat on `reviewers[]` only.
+- **Scope is declared per call.** `workspace` is an absolute directory and is the call's root; `roots`
+  adds other absolute directories the call reads (for example a project folder holding authority
+  documents). No path may be the filesystem root, a home directory, a system tree or a protected
+  directory, and every path must lie inside the operator's optional `--root` ceiling. ACP turns may fall
+  back to the session `cwd`; nothing is inferred from where the server started.
+- **Writes.** `review_remediate` (or an ACP `patch` turn) supplies the complete diff on every server.
+  Writing the workspace (`output: "apply"` / an `apply` turn) needs the operator's `--allow-writes` at
+  launch, and on MCP also `allowWrite: true` per call; `review_doctor` reports `writes: "aimesh"` or
+  `"agent"`. `review_remediate` takes the source run's `fromRun` **and** the absolute `workspace` it
+  reviewed; a different workspace is refused.
+- **Before paying:** `dryRun` prices the run with no model call; `verifyReadiness` spends one bounded call
+  per distinct adapter/model to prove each can do real work before the panel runs.
 
 ## Documentation
 

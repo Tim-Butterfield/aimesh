@@ -12,15 +12,71 @@ Two domains:
 - **explore** — a panel of explorers answers a question against declared criteria; a collator
   merges their answers. It edits nothing you own.
 
-## Two ways to reach aimesh
+## Three ways to reach aimesh
 
-- **Shell**: `aimesh <command>`. Run `aimesh --help` for the tree.
-- **MCP**: `aimesh review mcp` / `aimesh explore mcp` speak the Model Context Protocol over stdio.
-  Both lifecycles are served — a client may open with the `initialize` handshake, or with
-  `server/discover` and no handshake.
+- **Shell (CLI)**: `aimesh <command>`. Run `aimesh --help` for the tree. The CLI reads aimesh's saved
+  configuration (profiles, model catalog, recorded adapter paths).
+- **MCP**: `aimesh mcp` serves both domains' tools over stdio (`aimesh review mcp` / `aimesh explore mcp`
+  serve one). Both MCP lifecycles are served — a client may open with the `initialize` handshake, or
+  with `server/discover` and no handshake.
+- **ACP**: `aimesh review acp` / `aimesh explore acp` run as an Agent Client Protocol agent over stdio.
 
-Both surfaces reach the same engine and enforce the same rules. This document is the same one the
-`agents_md` MCP tool returns, so an agent arriving by either route gets identical guidance.
+Every surface reaches the same engine and enforces the same rules. The one deliberate difference is
+**where configuration comes from**: the CLI reads saved configuration; the MCP and ACP servers read
+**none** — their adapters and grants come only from the arguments (and environment) their host starts
+them with, so they work on a fresh install with no setup step. This document is the same one the
+`agents_md` MCP tool returns, so an agent arriving by any route gets identical guidance.
+
+## Setting up an MCP or ACP server (no aimesh setup needed)
+
+An MCP/ACP server is available only with the adapters named at launch. Each `--adapter` names a
+built-in adapter — `claude-code`, `codex-cli`, `gemini-cli`, `devin-cli`, `cursor-cli`, `agy-cli`,
+`ollama` — either bare (its CLI is found on `PATH`) or as `name=path` (the CLI's full path). A path
+may use the host OS's own variable syntax — `%VAR%` on Windows, `$VAR` or `${VAR}` elsewhere — and a
+leading `~`; an undefined variable refuses startup. `AIMESH_ADAPTERS` is the environment form (entries
+separated by `;` on Windows, `:` elsewhere); give one or the other, not both. The named adapters are
+exactly who may receive the content a call sends.
+
+**Find the CLI's path yourself.** Try `where devin` (Windows) or `command -v devin` (macOS/Linux). A
+CLI launched from a Start-menu shortcut or app bundle is often not on `PATH`; look in its per-user
+install folder (for example `%LOCALAPPDATA%\<vendor>\...` on Windows, `~/.local/bin` on macOS/Linux).
+If you are the host's agent, you know your own binary's location — use it.
+
+**Edit the host's MCP configuration yourself** (or ask the user to). aimesh never edits a host's
+configuration file. A Windows example for a host whose `config.json` lists MCP servers:
+
+```json
+{
+  "mcpServers": {
+    "aimesh": {
+      "command": "aimesh",
+      "args": ["mcp", "--adapter", "devin-cli=%LOCALAPPDATA%\\devin\\cli\\bin\\devin.exe"]
+    }
+  }
+}
+```
+
+A macOS example:
+
+```json
+{
+  "mcpServers": {
+    "aimesh": {
+      "command": "aimesh",
+      "args": ["mcp", "--adapter", "claude-code", "--adapter", "devin-cli=~/.local/bin/devin"]
+    }
+  }
+}
+```
+
+Optional launch flags: `--allow-writes` (let aimesh apply accepted review findings; see below),
+`--root <dir>` (repeatable: a **ceiling** every declared path must lie inside), `--allow-broad-root`
+(permit an over-broad `--root`), `--verify-cmd <command>` (repeatable: your own build/test command, run
+on the containment copy and reported; it gates nothing), `--verify-timeout <duration>`,
+`--verify-baseline` (run the verify commands on report runs too) and `--allow-protected-paths` (permit
+work under `.git`, `.vscode` and similar configuration trees). Then call `review_doctor` / `explore_doctor`:
+they report which adapters can be started and who performs writes, and nothing about your machine's
+paths. A server launched with no adapter still starts; every run is refused until one is named.
 
 ## Rules that are expensive to get wrong
 
@@ -36,8 +92,9 @@ you and didn't.
 
 **Reviewers never touch your files.** Every review runs against an isolated **containment copy**.
 Model CLIs work inside that copy; findings come back as proposals. Nothing reaches your working
-tree until an `apply` runs, and `apply` is separately gated on every surface (`--apply` on the CLI,
-`allowWrite: true` plus `--allow-remediate` on MCP, host write capability on ACP).
+tree until an `apply` runs, and `apply` is separately gated on every surface (`--apply` on the CLI;
+`--allow-writes` at launch plus `allowWrite: true` per call on MCP; `--allow-writes` at launch plus a
+`fromRun` apply turn on ACP).
 
 **The write denylist is absolute and `--force` does not lift it.** Credentials (`.env*`, `.ssh`,
 `*.pem`, `id_*`, `.netrc`, …), version control (`.git/**`), this tool's own state (`.aimesh`, and
@@ -55,6 +112,76 @@ it says so and stops — it does not do something adjacent and report success.
 **Run artifacts contain everything the models were shown.** They are written under `.aimesh/`
 (VCS-excluded by `aimesh init`) or the OS temp directory — never a relative path inside whatever
 checkout you happened to run from. Treat them as sensitive.
+
+## Scope: every MCP/ACP call declares its own paths
+
+An MCP or ACP server has no launch folder: a host can change folders after starting it, and several
+conversations can use one server at once. So nothing is inferred from where the server started.
+
+- **Every path is absolute.** A relative path is refused as a malformed request.
+- **`workspace` is the call's root.** A review call names its absolute `workspace` (on ACP, the prompt's
+  `workspace`, else the session's `cwd`). That call reads only inside it.
+- **`roots` adds directories.** Name extra absolute directories the call reads — for example the
+  project folder holding authority documents when the workspace is a temporary directory. On ACP this
+  is `_meta.reviewmesh.roots`.
+- **The operator's `--root` is a ceiling.** When set, every declared path must lie inside it
+  (`scope_outside_root_ceiling`). Without it, a call may declare any absolute directory that is not
+  the filesystem root, a home directory, a system tree or a protected directory.
+- **`inlineWorkspace`** reviews content you supply in the call; it consumes no path.
+
+On the CLI, the path you type is the root.
+
+## Compose the panel in the call
+
+On MCP and ACP **every run composes its own panel** — there are no profiles and no default panel.
+
+- **review, MCP:** `panel` on `review_report` — `reviewers[]` and `author_remediator` are required;
+  `cross_check` and `verifier` are optional and run only when named (a run without them lists them in
+  `shape.skippedSteps`). `author_remediator` is the seat whose adjudication becomes the accepted set.
+  Reasoning `effort` is per-seat on `reviewers[]` only.
+- **review, ACP:** `_meta.reviewmesh.panel`, the same object.
+- **explore, MCP:** `panel: {explorers: […] (at least 2), collator: {…}}` on `explore`.
+- **explore, ACP:** `_meta.exploremesh.panel`, the same object.
+
+Each seat names an adapter the server was launched with (`review_list` / `explore_list` shows them,
+with `available`) and **the exact model identifier that adapter's CLI accepts**. Look that identifier
+up for your adapter and the license it runs under — the set of models differs by account — and use
+what the user asked for. aimesh passes it through verbatim and does not validate it; an identifier the
+provider does not recognise fails in the provider's words, mid-run, after the call was paid for. Use
+`verifyReadiness` to find out first (below). A seat can never introduce an adapter, a binary path or a
+launch argument.
+
+**CLI (saved configuration).** The CLI composes the same way with flags:
+
+- **review:** one `--reviewer adapter=<a>,model=<m>[,effort=<e>]` per seat (order preserved, 1..16),
+  plus the host lane, which must be a **model-catalog key** because it is never passed through:
+  `--set author_remediator.adapter=<a> --set author_remediator.model=<catalog-key>`.
+- **explore:** two or more `--explorer adapter=<a>,model=<m>[,effort=<e>]` plus one
+  `--collator adapter=<a>,model=<m>`.
+
+On the CLI a panel is composed **or** selected with `--profile`, never half of each. `aimesh review
+list --json` reports `modelCatalog`: model keys the saved configuration defines. A reviewer model that
+is not a catalog key goes to the adapter verbatim and comes back as `modelSource: "passthrough"`;
+surface that, and a `passThroughHint` if present. Run `setup` only when the operator asks for a
+**saved** profile, or when a CLI is not on `PATH` and its path must be recorded. Never save
+configuration as a side effect of answering a question.
+
+## Who writes, and the diff
+
+A review never writes. Remediation acts on a completed review's accepted findings:
+
+- **MCP:** `review_remediate {fromRun: "<runId>", workspace: "<absolute workspace>", output}`.
+  `output: "patch"` returns the complete diff on **every** server and changes no project content.
+  `output: "apply"` writes the workspace; it needs the server launched with `--allow-writes` **and**
+  `allowWrite: true` on the call.
+- **ACP:** a `report` turn returns `runDir`; an `apply` turn carries `fromRun: <that runDir>`. Without
+  `--allow-writes` an apply turn is refused (`writes_not_granted`); a `patch` turn supplies the diff.
+  A turn that names no mode is a `report`.
+
+`workspace` must be the tree the source run reviewed (`source_run_workspace_mismatch` otherwise).
+`review_doctor`, `review_list` and every ACP result report `writes`: `aimesh` when aimesh can apply,
+`agent` when it cannot — then ask for the patch and apply the diff with your own file tools.
+`diffAvailable` is always `true`.
 
 ## Exploration modes and what each one requires
 
@@ -79,7 +206,7 @@ CLI equivalents are the same names as flags: `--artifact`, `--options` + `--crit
 axes — *not* the same thing as `criteria`, which are the constraints the whole exploration must
 satisfy.
 
-## Price a run before you start it
+## Price a run, and check its agents, before you start it
 
 Both domains take a **dry run**: `--dry-run` on the CLI, `dryRun: true` on MCP,
 `_meta.<domain>.dryRun` on ACP. It resolves everything, spends nothing, and reports every
@@ -88,15 +215,19 @@ configuration error a real run would hit — for free. Use it before committing 
 The two answers differ, and the difference is not cosmetic:
 
 - **review** reports a **min/max range** (it iterates until adjudication converges) and a `payload`
-  naming every file the reviewers would be shown. Its static preflight is free, so its shape can say
-  every adapter answered.
+  naming every file the reviewers would be shown.
 - **explore** reports **one exact number** (an exploration's round count is fixed by its mode
   contract; only a halt makes it fewer) and the **exact round-1 prompt** every explorer would get.
-  It stops *before* the identity pre-flight, which is a real model call per governed role — so it
-  says nothing about whether any adapter is reachable.
+  It stops *before* the identity pre-flight, which is a real model call per governed role.
 
 In both, an empty result means nothing was looked at. Branch on `status: "planned"` / `dryRun: true`,
 never on the empty finding set.
+
+**`verifyReadiness: true`** (MCP; `_meta.<domain>.verifyReadiness` on ACP) asks every distinct
+adapter/model the panel names whether it can do real work — one bounded one-token call each, which
+**spends** — before the run dispatches anything. An agent blocked on login, folder trust or an
+identifier its license cannot use halts the run before the panel is paid for. With `dryRun` the calls
+are priced and none is made.
 
 ## A run takes minutes. Slow is not stuck.
 
@@ -142,24 +273,6 @@ carries a `composition` block for the panel as a whole.
 `shared_model` is **not** a refutation — the finding may be perfectly real; the extra agreement is
 just worth less than the number suggests. And `distinctModels` is not a discounted count: it counts a
 different thing. Say both, as "3 seats, 2 distinct models", rather than picking one.
-
-## Compose panels from the configured catalog; a made-up model runs, and that is the risk
-
-The list tool reports `modelCatalog`: every model key this server has configured, with the adapter
-that carries it. **Compose from those keys.** They resolve to a pinned argument and effort, and a bad
-one is caught before anything is spent.
-
-A model that is *not* in the catalog is **not refused** — it goes to the adapter verbatim and comes
-back as `modelSource: "passthrough"`. That is a deliberate capability, not a loophole, but the failure
-mode is yours to avoid: a name the provider does not recognise fails **in the provider's words, mid-run,
-after the call was paid for**, whereas a catalog key would have failed for free. Do not invent model
-names to satisfy a request; if the model someone asked for is not configured, say so and offer what is.
-
-The adapter is never passed through. An unconfigured adapter is refused, always.
-
-If a result carries a pass-through seat, surface it — the operator's configuration says nothing about
-that model, so no inventory you can call will answer questions about it. A `passThroughHint` names the
-configured key it most plausibly meant.
 
 ## `contested` is a reason to read a finding, never a reason to drop it
 
@@ -215,39 +328,29 @@ The failure to avoid in both is upgrading a floor into a verification. "12 of 14
 does **not** mean 12 findings were confirmed; it means 12 pointers resolve. Pass the `note` on when
 you pass the numbers on, and when you repeat a citation into your own output, repeat its status too.
 
-## Compose the panel in the call; do not write configuration in order to run
-
-You do not need `setup` to run. A shell adapter whose CLI is on `PATH` is usable as it stands, and a
-run names its own panel:
-
-- **review, CLI:** one `--reviewer adapter=<a>,model=<m>[,effort=<e>]` per seat (order preserved,
-  1..16), plus the host lane, which must be a **catalog key** because it is never passed through:
-  `--set author_remediator.adapter=<a> --set author_remediator.model=<catalog-key>`.
-- **review, MCP:** the `panel` argument of `review_report` — `reviewers[]` plus `author_remediator`.
-- **explore, CLI:** two or more `--explorer adapter=<a>,model=<m>[,effort=<e>]` plus one
-  `--collator adapter=<a>,model=<m>`.
-- **explore, MCP:** `panel: {explorers: […], collator: {…}}` on `explore`.
-
-A panel is composed **or** selected (`--profile` / `panel.profile`), never half of each. Composition
-resolves fail-closed against the adapters the configuration defines: it can order and select them,
-never introduce a binary. Price the composed panel with a dry run before spending on it.
-
-Run `setup` only when the operator asks for a **saved** profile (so that a no-flag run means
-something), or when a CLI is not on `PATH` and its path must be recorded. Never save configuration as
-a side effect of answering a question.
-
 ## Recommended loop
+
+**MCP / ACP:**
+
+1. `review_doctor` / `explore_doctor` — which launched adapters can be started, and (review) who
+   writes. If no adapter is listed, the host configuration needs `--adapter` (see setup above).
+2. `review_list` / `explore_list` — the adapter names you may compose from.
+3. Compose the panel in the call with the model identifiers the user asked for, each looked up for
+   your adapter and license.
+4. `dryRun` it and read what it would cost; add `verifyReadiness` to check the agents.
+5. Run it with an absolute `workspace` (review) or the task fields (explore).
+6. Read the findings. For review, ask for `output: "patch"`, or apply deliberately and separately.
+
+**CLI:**
 
 1. `aimesh doctor` — read-only readiness. Run it *first*: it tells you whether initialization is
    needed instead of assuming. It reports rather than blocking, so it is safe to lead with.
 2. `aimesh init` — create the VCS-excluded `.aimesh/` state directory. Idempotent. Add
    `--require-repo` in CI, where landing in folder mode by accident is a silent wrong answer.
 3. `aimesh review list --json` / `aimesh explore list --json` — the adapters and the model catalog
-   you can compose from. `aimesh review doctor` / `aimesh explore doctor` add adapter readiness: a
-   panel needs real, working model CLIs, and this is where a missing binary or an unauthenticated
-   tool surfaces.
-4. Compose the panel in the call (above), or select a saved profile when the operator has one.
-5. `--dry-run` / `dryRun` the run you intend, and read what it would cost.
+   you can compose from. `aimesh review doctor` / `aimesh explore doctor` add adapter readiness.
+4. Compose the panel with flags, or select a saved profile when the operator has one.
+5. `--dry-run` the run you intend, and read what it would cost.
 6. `aimesh review run <path>` or `aimesh explore run --purpose … --criteria …`.
 7. Read the findings. For review, apply deliberately and separately.
 
@@ -263,6 +366,7 @@ Shared:
 - `aimesh agents-md` — print this guide. `AGENTS_MD=<path>` serves that file instead; an unreadable
   path is an error, and an active override is reported on stderr so you can tell which document you
   received.
+- `aimesh mcp` — the MCP server for both domains (`--only review|explore` narrows it).
 - `aimesh --version [--json]`, `aimesh help`.
 
 Review (`aimesh review <command>`): `run`, `setup`, `list`, `doctor`, `config`, `acp`, `mcp`.
@@ -270,9 +374,12 @@ Explore (`aimesh explore <command>`): `run`, `setup`, `list`, `doctor`, `export`
 
 Each domain documents its own flags: `aimesh review run --help`, `aimesh explore run --help`.
 
-## Configuration
+## State and configuration
 
-One state root, `.aimesh/`:
+**State** is what runs leave behind: run records under a workspace's `.aimesh/` (or the OS temp
+directory). Every surface writes it.
+
+**Configuration (CLI only)** lives under one state root, `.aimesh/`:
 
 - `.aimesh/adapters.yaml` — adapter binary paths and user-defined ACP instances. **Shared** by both
   domains.
@@ -282,17 +389,21 @@ One state root, `.aimesh/`:
 Each resolves user scope (under `AIMESH_HOME`, else the OS home) overlaid by a root-anchored project
 scope. `AIMESH_HOME` is the single home override for the whole tool.
 
-Adapters are **composed, not configured, at call time**: a run may select and order adapters and
-models the configuration already defines, but no surface can introduce a new one. That is what keeps
-a prompt — or a model driving aimesh over MCP — from pointing a "review" at an arbitrary binary.
+The MCP and ACP servers read none of it — not the user files, and not a project's `.aimesh/` inside a
+workspace a call names. Their configuration is their launch arguments.
+
+On every surface a call may use and order the adapters it was given, but can never introduce a new
+one. That is what keeps a prompt — or a model driving aimesh — from pointing a "review" at an
+arbitrary binary.
 
 ## Safety posture
 
 aimesh spawns real model CLIs with the privileges of the aimesh process, and those CLIs may call
 paid providers. It is not a sandbox. What it does guarantee is narrower and worth knowing exactly:
-reviewers see only a containment copy, protected paths are never copied or written, configuration
-cannot be authored by a model, findings are never filtered by claimed identity, and every run
-records what was shown and what came back.
+reviewers see only a containment copy, protected paths are never copied or written, aimesh's own
+configuration cannot be authored by a model (a host's MCP configuration is edited by the host's agent
+or the user, never by aimesh), content goes only to the adapters an operator named, findings are never
+filtered by claimed identity, and every run records what was shown and what came back.
 
 Exit codes: 0 success, 1 gated findings, 2 usage, 3 config, 4 adapter, 5 model/identity,
 6 containment, 7 policy/cap, 8 internal.

@@ -1,6 +1,6 @@
 package schema
 
-// Tests for the ADJUDICATIVE modes' app-owned round artifacts (design §3 Challenge + Shortlist rows). The
+// Tests for the ADJUDICATIVE modes' app-owned round artifacts. The
 // end-to-end behavior is pinned in the pipeline's adjudicative tests; these pin the two properties that live entirely
 // here — the CLOSED severity vocabulary and the untrusted framing around the artifact under review — plus the
 // mechanical parsers those rounds depend on.

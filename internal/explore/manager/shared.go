@@ -13,10 +13,7 @@ import (
 // sibling) is written by the review domain and by the CLI too, so a version token is needed to tell
 // whether the effective adapter set changed underneath a resolved config.
 //
-// It used to be much larger. The optimistic-concurrency guard, the integrity verdict and the reload
-// diff all existed for the web workbench — a long-lived process holding a form the user might save
-// against a stale base — and went with it. What remains is the token itself, which the manager still
-// stamps onto a resolution.
+// The token is what the manager stamps onto a resolution.
 //
 // Everything here is PURE CONFIG: nothing in this file starts a process. Availability probing (does
 // the binary run? is the CLI logged in?) stays on demand in `doctor` / the ACP flows.
@@ -49,7 +46,7 @@ func CombinedSharedVersion(paths []string) string {
 }
 
 // StaleBaseError is the optimistic-concurrency refusal: the caller's write was composed against a
-// version of the shared adapters file that is no longer on disk. It is a typed error so a surface can
+// version of the shared adapters file that is not the one on disk. It is a typed error so a surface can
 // answer 409-with-reconcile rather than 400.
 type StaleBaseError struct{ Message string }
 

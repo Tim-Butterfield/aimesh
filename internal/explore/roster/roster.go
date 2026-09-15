@@ -1,4 +1,4 @@
-// Package roster is exploremesh's configured explorer/collator set (design §6.1) plus its
+// Package roster is exploremesh's configured explorer/collator set plus its
 // parse/validate/plan + persistence. It is the app-side "grammar" analogous to reviewmesh's
 // profiles/lanes — exploremesh owns it; meshcore never learns it. Persistence goes through
 // meshcore/config's domain-free store (strict decode + atomic write).
@@ -18,7 +18,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// Explorer is one configured explorer — a distinct (adapter, model, effort) triple (design §6.1).
+// Explorer is one configured explorer — a distinct (adapter, model, effort) triple.
 type Explorer struct {
 	Adapter string `json:"adapter"`
 	Model   string `json:"model"`
@@ -46,16 +46,16 @@ func (e Explorer) triple() string { return e.Adapter + "\x00" + e.Model + "\x00"
 //   - PreferenceOrdered is the author's own ranking (the profile's slice order). It is what SelectTopN
 //     selects the top-N from, and it is the ONLY order a SELECTION with consequences may read.
 //
-// The distinction is load-bearing and was previously implicit: canonicalizer-b — half of the dual
-// merge-agreement governance rule — was derived from the attribution order, which meant the second
-// independent judgment was whichever explorer happened to sort first alphabetically. An attribution
+// The distinction is load-bearing: canonicalizer-b — half of the dual merge-agreement governance rule —
+// is derived from the preference order, because deriving it from the attribution order would make the
+// second independent judgment whichever explorer happened to sort first alphabetically. An attribution
 // order must never be used as if it were a preference order.
 type (
 	AttributionOrdered []Explorer
 	PreferenceOrdered  []Explorer
 )
 
-// ValidateCanonicalizers enforces the CANONICALIZER SPEC rule shared by every surface (design §4): a
+// ValidateCanonicalizers enforces the CANONICALIZER SPEC rule shared by every surface: a
 // request supplies either NO canonicalizers (the host derives them) or EXACTLY TWO (the dual rule's two
 // independent judgments). Anything else is refused with a teaching error, because:
 //
@@ -95,7 +95,7 @@ func ValidateCanonicalizers(cs []Explorer) error {
 	return nil
 }
 
-// Collator is exploremesh's single collating model (design §6.1). It MAY reuse an explorer's model
+// Collator is exploremesh's single collating model. It MAY reuse an explorer's model
 // (collation is a different function).
 type Collator struct {
 	Adapter string `json:"adapter"`
@@ -113,7 +113,7 @@ func (c Collator) Identity() schema.ExplorerIdentity {
 type Roster struct {
 	Explorers []Explorer `json:"explorers"`
 	Collator  Collator   `json:"collator"`
-	// Canonicalizers names the two identities that propose the canonicalization (design §4). It is
+	// Canonicalizers names the two identities that propose the canonicalization. It is
 	// EITHER empty (the host derives them) or exactly two — see ValidateCanonicalizers. It is a separate
 	// slot list rather than a flag on an explorer because canonicalization is a DISTINCT role whose
 	// identity is decoupled from both the collator and the panel: a canonicalizer need not be an
@@ -128,7 +128,7 @@ func (r Roster) IsZero() bool {
 	return len(r.Explorers) == 0 && len(r.Canonicalizers) == 0 && r.Collator == (Collator{})
 }
 
-// Validate enforces the design §6.1 rules: minimum 2 explorers, no duplicate (adapter,model,effort)
+// Validate enforces the roster rules: minimum 2 explorers, no duplicate (adapter,model,effort)
 // triple, non-empty adapter+model on every explorer and the collator.
 func (r Roster) Validate() error {
 	if len(r.Explorers) < 2 {
@@ -161,7 +161,7 @@ type Plan struct {
 	// it (envelope IDs, the frozen panel, the dispatch order).
 	Explorers AttributionOrdered
 	// Preferred is the SAME set in the author's PREFERENCE order. Every SELECTION with consequences
-	// reads it — today that is the derivation of canonicalizer-b (design §4).
+	// reads it — today that is the derivation of canonicalizer-b.
 	Preferred PreferenceOrdered
 	Collator  Collator
 	// Canonicalizers are the EXPLICIT canonicalizer identities carried from the roster/profile (empty
@@ -199,17 +199,17 @@ func (r Roster) Plan() (Plan, error) {
 }
 
 // SelectTopN validates the roster and returns the executable plan for the TOP-N explorers by PREFERENCE
-// (the authored slice order — design §7), then canonicalizes the SELECTED subset into a STABLE ATTRIBUTION
+// (the authored slice order), then canonicalizes the SELECTED subset into a STABLE ATTRIBUTION
 // order (sorted by identity triple). Preference (selection) and attribution (envelope ordering) are thus
 // DECOUPLED: reordering the full explorer list never changes the envelope IDs of an UNCHANGED selected set,
 // because the plan's order depends only on WHICH explorers were selected, not on their preference order.
 //
 // BOTH orders are returned (Plan.Explorers / Plan.Preferred), because decoupling them is not the same as
 // discarding one. A later stage that must SELECT (the dual path's canonicalizer-b) needs the preference
-// order and previously had only the attribution order to reach for.
+// order, which the attribution order cannot stand in for.
 //
 // n must be in [2, len(Explorers)]: n<2 is rejected (a panel needs 2+ explorers) and n greater than the
-// roster size is a clear out-of-range error — the count is NEVER clamped (requested = executed, §7).
+// roster size is a clear out-of-range error — the count is NEVER clamped (requested = executed).
 func (r Roster) SelectTopN(n int) (Plan, error) {
 	if err := r.Validate(); err != nil {
 		return Plan{}, err
@@ -225,8 +225,8 @@ func (r Roster) SelectTopN(n int) (Plan, error) {
 	selected := make(AttributionOrdered, n)
 	copy(selected, preferred)
 	// Canonicalize ATTRIBUTION order independently of preference so the selected set's envelope IDs are stable.
-	// Both orders are carried: they are the same SET, and losing the preference order is what previously forced
-	// a selection (canonicalizer-b) to read an alphabetical ordering it had no business reading.
+	// Both orders are carried: they are the same SET, and losing the preference order would force
+	// a selection (canonicalizer-b) to read an alphabetical ordering it has no business reading.
 	sort.Slice(selected, func(i, j int) bool { return selected[i].triple() < selected[j].triple() })
 	return Plan{
 		Explorers: selected, Preferred: preferred, Collator: r.Collator,

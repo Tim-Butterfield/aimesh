@@ -1,6 +1,6 @@
 package schema
 
-// Tests for the FIXED-SPACE modes' app-owned round artifacts (design §3 Compare + Forecast rows). The
+// Tests for the FIXED-SPACE modes' app-owned round artifacts. The
 // prompts are asserted the same way every other mode's are — the exact field names must be RENDERED, because
 // a prompt that only says "match the schema" gets improvised field names from a real model — plus the two
 // things unique to these modes: the declared space must be embedded machine-readably, and the DIRECTION must

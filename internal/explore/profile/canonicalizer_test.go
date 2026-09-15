@@ -1,6 +1,6 @@
 package profile
 
-// The PROFILE half of the canonicalizer spec (design §4): a profile may name the two identities that
+// The PROFILE half of the canonicalizer spec: a profile may name the two identities that
 // propose the canonicalization, the 0-or-2 rule is enforced on the way in AND on the way out, and the
 // pair survives a save/load round trip. A profile is where a half-specified governance rule would persist
 // unnoticed, so the validation lives at the persistence boundary rather than only at the surfaces.

@@ -14,10 +14,8 @@ import (
 // Two obligations meet here.
 //
 //  1. THE PROTOCOL ONE. A schema `$ref` that resolves to a network URI must never be dereferenced
-//     automatically. Until now that held only by accident — Compile takes bytes and has no directory,
-//     so `$ref: "https://…"` failed because we tried to open it as a FILE. "It happens to fail" is not
-//     a compliance story: the refusal is now explicit, named, and stated at compile time, and it says
-//     why. We implement no opt-in fetch mode and will not: a schema is a declaration, and a
+//     automatically. "It happens to fail" (Compile takes bytes and has no directory) is not a
+//     compliance story: the refusal is explicit, named, and stated at compile time, and it says why. We implement no opt-in fetch mode and will not: a schema is a declaration, and a
 //     declaration that reaches the network is a fetch nobody authorized.
 //
 //  2. THE LOCAL ONE. A self-referential `$defs` chain would recurse without limit. Today the exposure

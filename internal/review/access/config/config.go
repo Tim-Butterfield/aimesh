@@ -188,25 +188,22 @@ type Defaults struct {
 	ProfileForAdapter map[string]string `json:"profileForAdapter"`
 }
 
-// Surfaces holds per-surface mode defaults and per-surface policy capabilities.
+// Surfaces holds per-surface mode defaults and per-surface policy capabilities for the CLI surfaces
+// (`cli`, `ci`). The MCP and ACP servers read no configuration: they gate writes with their own
+// `--allow-writes` launch grant, so entries for them here have no effect.
 type Surfaces struct {
 	DefaultModeBySurface map[string]string `json:"defaultModeBySurface"`
-	// CapabilitiesBySurface grants named POLICY CAPABILITIES to a surface. A capability is
-	// deliberately part of the config store rather than an out-of-band launch exception: the
-	// write-authority ceiling a surface gets is a FUNCTION of this config (see SurfaceCeiling), so
-	// granting a capability RAISES the ceiling instead of stepping around it. A ceiling that could
-	// be bypassed by a flag would not be a ceiling at all — it would be a default.
-	//
-	// The only capability today is CapabilityAllowRemediate (the MCP surface's `review_remediate`
-	// tool). `aimesh review mcp --allow-remediate` sets it on the in-memory `mcp` surface for that
-	// server process; an operator can equally set it in config for every MCP server they launch.
+	// CapabilitiesBySurface grants named POLICY CAPABILITIES to a surface. The write-authority ceiling
+	// a surface gets is a FUNCTION of this config (see SurfaceCeiling), so granting a capability RAISES
+	// the ceiling instead of stepping around it. The only capability is CapabilityAllowRemediate.
 	CapabilitiesBySurface      map[string][]string `json:"capabilitiesBySurface,omitempty"`
 	DegradeWhenModeUnavailable *bool               `json:"degradeWhenModeUnavailable,omitempty"` // *bool: merge-safe
 }
 
 // CapabilityAllowRemediate is the policy capability that lets a surface WRITE as the result of a
 // review: it raises that surface's write-authority ceiling to `apply`. Without it, a surface whose
-// default mode is `report` cannot reach patch/apply however the request is spelled.
+// default mode is `report` (the shipped `ci` entry) cannot reach patch/apply however the request is
+// spelled.
 const CapabilityAllowRemediate = "allowRemediate"
 
 // HasCapability reports whether `surface` has been granted `capability`.
@@ -221,13 +218,18 @@ func (s Surfaces) HasCapability(surface, capability string) bool {
 
 // SurfaceCeiling is the write-authority ceiling for a surface: its configured default mode,
 // RAISED to `apply` when the surface holds CapabilityAllowRemediate. A surface with no configured
-// entry keeps the historical fall-through of `apply` — the ceiling is a config statement, and an
-// absent statement is not a restriction (a surface that must fail closed, like `mcp`, ships with an
-// explicit `report` entry).
+// entry resolves to `apply` — the ceiling is a config statement, and an absent statement is not a
+// restriction (a surface that must fail closed, like `ci`, ships with an explicit `report` entry).
+//
+// The agent surfaces (`acp`, `mcp`) always resolve to `apply`, and a config entry for them is ignored:
+// those servers read no configuration and gate writes with their own `--allow-writes` launch grant.
 //
 // It is the ONE evaluation point: resolution, the surfaces, and the remediation path all read the
 // ceiling from here, so no two of them can disagree about what a config permits.
 func (c Config) SurfaceCeiling(surface string) review.Mode {
+	if IsAgentSurface(surface) {
+		return review.ModeApply
+	}
 	ceiling := review.ModeApply
 	if m, ok := c.Surfaces.DefaultModeBySurface[surface]; ok && m != "" {
 		ceiling = review.Mode(m)
@@ -238,9 +240,13 @@ func (c Config) SurfaceCeiling(surface string) review.Mode {
 	return ceiling
 }
 
+// IsAgentSurface reports whether surface is one of the agent-driven servers (`acp`, `mcp`), whose write
+// authority comes from their launch arguments rather than from configuration.
+func IsAgentSurface(surface string) bool { return surface == "acp" || surface == "mcp" }
+
 // WithSurfaceCapability returns a COPY of c with `capability` granted to `surface`. It copies the
-// capability map rather than mutating it, so a launch-time grant cannot leak into a shared config
-// snapshot other components are reading.
+// capability map rather than mutating it, so a grant cannot leak into a shared config snapshot other
+// components are reading.
 func WithSurfaceCapability(c Config, surface, capability string) Config {
 	if c.Surfaces.HasCapability(surface, capability) {
 		return c
@@ -374,7 +380,7 @@ func WithExampleProfiles(cfg Config) Config {
 }
 
 // FakeProfile is the SHIPPED but HIDDEN test-only profile key. Its lanes use the built-in
-// deterministic `fake` adapter (the coverage the `default` profile used to carry), so tests, the
+// deterministic `fake` adapter, so tests, the
 // golden-run baseline, and the ACP validation fake-only smoke have a runnable fake-only profile
 // WITHOUT the shipped `default` profile being pre-wired to fake — a fresh install ships `default`
 // UNCONFIGURED (honestly Doctor-flagged). Like the `fake` ADAPTER (hidden from AdapterViews), this
@@ -410,7 +416,7 @@ func Default() Config {
 				},
 			},
 			// Shipped-but-HIDDEN deterministic fake profile (see FakeProfile / IsHiddenProfile). It
-			// carries the fake lanes the `default` profile used to have, so tests, the golden-run
+			// carries fake lanes for every required role, so tests, the golden-run
 			// baseline, and the ACP validation fake-only smoke stay green without shipping `default`
 			// pre-wired to fake. Hidden from the normal SPA profile list + setup guidance.
 			FakeProfile: {
@@ -497,24 +503,19 @@ func Default() Config {
 			ProfileForAdapter: map[string]string{"*": "default"},
 		},
 		Surfaces: Surfaces{
-			// Per-surface write-authority CEILINGS: deliberate, config-visible POLICY (the
-			// capability exists on every surface; only the default exposure differs by risk).
+			// Per-surface write-authority CEILINGS for the CLI surfaces: deliberate, config-visible
+			// POLICY.
 			//
 			// THESE ARE CEILINGS, NOT DEFAULTS. A run that names no mode gets `report` on every
 			// surface (see ResolvePlan) — the entries here bound what a surface may do when it IS
 			// asked. `cli` sits at `apply` so that `--apply` works there at all, NOT so that an
-			// unadorned `aimesh review run .` writes; that inversion is exactly what was fixed.
+			// unadorned `aimesh review run .` writes. `ci` sits at `report`: an unattended run writes
+			// only when the config grants it the `allowRemediate` capability.
 			//
-			// `acp` sits at `report`: an ACP session is driven by an external host, so a live
-			// workspace write must be an explicit opt-in
-			// (`surfaces: {defaultModeBySurface: {acp: apply}}`) rather than something the ceiling
-			// permits by default. `mcp` sits at `report` for the same reason and one more: its
-			// caller is a MODEL. Writing there additionally requires the `allowRemediate`
-			// capability (`surfaces: {capabilitiesBySurface: {mcp: [allowRemediate]}}`, or
-			// `aimesh review mcp --allow-remediate`), which is what RAISES the ceiling — the entry
-			// here is never bypassed.
+			// The ACP and MCP servers have no entry: they read no configuration and gate writes with
+			// their own `--allow-writes` launch grant (see SurfaceCeiling).
 			DefaultModeBySurface: map[string]string{
-				"cli": "apply", "ci": "report", "acp": "report", "mcp": "report",
+				"cli": "apply", "ci": "report",
 			},
 			DegradeWhenModeUnavailable: boolPtr(true),
 		},
@@ -637,10 +638,9 @@ func validateConfigBytes(path string, b []byte) error {
 	return err
 }
 
-// ComponentName is review's subdirectory of the shared `.aimesh/` state root. Review's config used to
-// live in an app-private `.reviewmesh/`, from when review was a separate application; one state root
-// with a component subdirectory per domain means one `init`, one VCS exclusion, and one home override
-// instead of several that had to agree.
+// ComponentName is review's subdirectory of the shared `.aimesh/` state root. One state root with a
+// component subdirectory per domain means one `init`, one VCS exclusion, and one home override
+// instead of several that would have to agree.
 const ComponentName = "review"
 
 // ComponentDir is review's config directory under a base directory: <base>/.aimesh/review. The base is
@@ -716,7 +716,7 @@ type Layers struct {
 }
 
 // Adapter-path provenance labels. Adapter binary paths are sourced SOLELY from the shared
-// `.aimesh/adapters.yaml` layers (config.yaml no longer carries them), in scope order user < project.
+// `.aimesh/adapters.yaml` layers (config.yaml does not carry them), in scope order user < project.
 const (
 	adapterPathSourceUserShared    = "user (.aimesh/adapters.yaml)"
 	adapterPathSourceProjectShared = "project (.aimesh/adapters.yaml)"

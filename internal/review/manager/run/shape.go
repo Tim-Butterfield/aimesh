@@ -51,6 +51,7 @@ func (m *Manager) shapeOf(req Request, plan review.RunPlan, seats []review.LaneR
 		})
 	}
 
+	shape.SkippedSteps = review.SkippedOptionalSteps(plan)
 	shape.Egress = shapeEgress(shape.Seats, shape.Lanes)
 
 	// A host adjudication costs a call only when there is a host lane AND it is not the

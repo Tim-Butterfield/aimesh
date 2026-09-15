@@ -65,8 +65,7 @@ func FilePath(aimeshHome string) string { return filepath.Join(aimeshHome, FileN
 
 // UserHomeBase returns the BASE directory that contains the user-scope `.aimesh/` (i.e. `.aimesh` lives
 // at <base>/.aimesh). It delegates to localstate, which owns the one AIMESH_HOME override for every
-// component's state — this used to hold its own copy of that lookup, back when the two apps each had a
-// competing home variable of their own.
+// component's state.
 func UserHomeBase() (string, error) { return localstate.UserHomeBase() }
 
 // UserLocationsPath is the user-scope adapters.yaml path: <UserHomeBase>/.aimesh/adapters.yaml.

@@ -1,14 +1,9 @@
 package cli
 
-// This file is exploremesh's PRINT-BOUNDARY exit-code mapping. Before it, every exploremesh failure
-// collapsed to exit 1 regardless of what went wrong, so a script could not tell a missing binary from a
-// malformed profile from an internal bug — while `reviewmesh` had exposed the shared meshcore fault
-// taxonomy (0/1/2/3/4/5/6/7/8) since its first release. That asymmetry is now gone: BOTH binaries map an
-// error to the SAME table (docs/architecture.md "Halt taxonomy"), and they do it the same way — the error
-// carries its class (meshcore/fault) and the surface merely reads it here.
-//
-// This is a DELIBERATE breaking change to exploremesh's exit codes. Anything scripting `exploremesh` on
-// "non-zero means failure" is unaffected; anything scripting it on the literal 1 must move to the table.
+// This file is exploremesh's PRINT-BOUNDARY exit-code mapping. A script must be able to tell a missing
+// binary from a malformed profile from an internal bug, so BOTH apps map an error to the SAME shared
+// meshcore fault taxonomy (0/1/2/3/4/5/6/7/8; docs/architecture.md "Halt taxonomy"), and they do it the
+// same way — the error carries its class (meshcore/fault) and the surface merely reads it here.
 
 import (
 	"errors"

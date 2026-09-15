@@ -41,7 +41,7 @@ func remediateFixture(t *testing.T, granted bool) (*Manager, string) {
 		},
 	}
 	if granted {
-		cfg = config.WithSurfaceCapability(cfg, "mcp", config.CapabilityAllowRemediate)
+		cfg = config.WithSurfaceCapability(cfg, "ci", config.CapabilityAllowRemediate)
 	}
 	return &Manager{
 		Cfg:         cfg,
@@ -72,7 +72,7 @@ func baseRequest(t *testing.T, ws string, mode review.Mode) RemediateRequest {
 		t.Fatalf("capture workspace identity: %v", err)
 	}
 	return RemediateRequest{
-		Workspace: ws, WorkspaceIdentity: id, Mode: mode, Surface: "mcp", Profile: "remediate-fixture",
+		Workspace: ws, WorkspaceIdentity: id, Mode: mode, Surface: "ci", Profile: "remediate-fixture",
 		SourceRunID: "run-source", Findings: findings, Decisions: decisions,
 		Shown:      map[string]bool{"sample.go": true},
 		BaseHashes: BaseHashes(ws, []string{"sample.go"}),
@@ -92,14 +92,14 @@ func readReceipt(t *testing.T, runDir string) Receipt {
 	return r
 }
 
-// The CEILING is authoritative. Without the capability the `mcp` surface resolves apply down to
+// The CEILING is authoritative. Without the capability the `ci` surface resolves apply down to
 // report, and the remediation refuses rather than writing at the lower mode — a silent downgrade
 // here would be a write nobody authorized... or, worse, an apply that quietly did nothing.
 func TestRemediate_RefusedWithoutTheCapability(t *testing.T) {
 	m, ws := remediateFixture(t, false)
 	_, err := m.Remediate(context.Background(), baseRequest(t, ws, review.ModeApply))
 	if err == nil {
-		t.Fatal("apply must be refused when the mcp surface has no allowRemediate capability")
+		t.Fatal("apply must be refused when the ci surface has no allowRemediate capability")
 	}
 	if got := fault.ReasonOf(err); got != ReasonRemediateModeRefused {
 		t.Fatalf("reasonCode = %q, want %q", got, ReasonRemediateModeRefused)
@@ -330,19 +330,31 @@ func TestBaseHashes_RecordAbsenceAndDetectChange(t *testing.T) {
 // The surface ceiling is ONE function, and a granted capability RAISES it rather than bypassing it.
 func TestSurfaceCeiling_CapabilityRaisesRatherThanBypasses(t *testing.T) {
 	cfg := config.Default()
-	if got := cfg.SurfaceCeiling("mcp"); got != review.ModeReport {
-		t.Fatalf("shipped mcp ceiling = %q, want report", got)
+	cfg.Surfaces.DefaultModeBySurface["web"] = "report"
+	if got := cfg.SurfaceCeiling("ci"); got != review.ModeReport {
+		t.Fatalf("shipped ci ceiling = %q, want report", got)
 	}
-	granted := config.WithSurfaceCapability(cfg, "mcp", config.CapabilityAllowRemediate)
-	if got := granted.SurfaceCeiling("mcp"); got != review.ModeApply {
-		t.Fatalf("granted mcp ceiling = %q, want apply", got)
+	granted := config.WithSurfaceCapability(cfg, "ci", config.CapabilityAllowRemediate)
+	if got := granted.SurfaceCeiling("ci"); got != review.ModeApply {
+		t.Fatalf("granted ci ceiling = %q, want apply", got)
 	}
 	// The grant is a COPY: the snapshot other components hold is untouched.
-	if cfg.SurfaceCeiling("mcp") != review.ModeReport {
+	if cfg.SurfaceCeiling("ci") != review.ModeReport {
 		t.Fatal("WithSurfaceCapability mutated the original config")
 	}
 	// It is scoped to the surface it names.
-	if granted.SurfaceCeiling("acp") != review.ModeReport {
-		t.Fatal("granting mcp changed the acp ceiling")
+	if granted.SurfaceCeiling("web") != review.ModeReport {
+		t.Fatal("granting ci changed another surface's ceiling")
+	}
+}
+
+// The agent surfaces are gated by their launch grant, so their ceiling is apply whatever the config says.
+func TestSurfaceCeiling_AgentSurfacesIgnoreConfig(t *testing.T) {
+	cfg := config.Default()
+	cfg.Surfaces.DefaultModeBySurface["mcp"] = "report"
+	for _, surface := range []string{"acp", "mcp"} {
+		if got := cfg.SurfaceCeiling(surface); got != review.ModeApply {
+			t.Fatalf("%s ceiling = %q, want apply", surface, got)
+		}
 	}
 }

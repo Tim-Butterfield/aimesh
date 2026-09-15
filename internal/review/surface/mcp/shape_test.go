@@ -7,19 +7,14 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// TestDryRun_TheShapeReachesTheWire is the parity defect this closes.
+// TestDryRun_TheShapeReachesTheWire: a dry run's SHAPE reaches an MCP caller, as it does on the CLI.
 //
-// `dryRun` was accepted, plumbed and honoured on all three surfaces — the run resolved everything,
-// spent nothing and set status `planned`. Only the CLI reported the SHAPE. Over MCP a caller received
-// `status: "planned"` with an empty finding set and nothing else, which is indistinguishable from a
-// review that found nothing, and the input schema's own description promised the object that was
-// missing.
-//
-// A dry run whose disclosure does not arrive has cost the caller a round trip to learn nothing.
+// Without it a caller would receive `status: "planned"` with an empty finding set and nothing else,
+// which is indistinguishable from a review that found nothing. A dry run whose disclosure does not
+// arrive has cost the caller a round trip to learn nothing.
 func TestDryRun_TheShapeReachesTheWire(t *testing.T) {
 	ws := workspaceFixture(t)
-	// The manager's own dry-run stop is proven in the run package; what was broken, and what this
-	// pins, is the PROJECTION — an outcome carrying a shape reaching the wire with it.
+	// The manager's own dry-run stop is proven in the run package; what this pins is the PROJECTION — an outcome carrying a shape reaching the wire with it.
 	planned := &review.RunOutcome{
 		Status: "planned",
 		Shape: &review.RunShape{
@@ -32,7 +27,7 @@ func TestDryRun_TheShapeReachesTheWire(t *testing.T) {
 			},
 		},
 	}
-	c := serve(t, newServer(t, &fakeReviewer{outcome: planned}, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, &fakeReviewer{outcome: planned}, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	res := c.tool(t, "review_report", map[string]any{"workspace": ws, "dryRun": true})
 	if res.rpc != nil {
 		t.Fatalf("a dry run must not error: %+v", res.rpc)
@@ -76,7 +71,7 @@ func TestDryRun_TheShapeReachesTheWire(t *testing.T) {
 // "this was planned, not performed", so a real run must not carry one.
 func TestDryRun_ARealRunCarriesNoShape(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	res := c.tool(t, "review_report", map[string]any{"workspace": ws})
 	if res.rpc != nil {
 		t.Fatalf("unexpected error: %+v", res.rpc)

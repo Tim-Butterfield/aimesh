@@ -229,7 +229,7 @@ func TestResources_PublishRefusesWhatItCannotAddress(t *testing.T) {
 	}
 }
 
-// --- content-addressed identity (migration design §7.4) ---
+// --- content-addressed identity ---
 //
 // Under the modern era a run artifact is ADVERTISED at a URI carrying its content digest, so the digest
 // becomes part of the cache key rather than a freshness hint the client is free to ignore. These tests

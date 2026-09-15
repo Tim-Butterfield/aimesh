@@ -57,7 +57,7 @@ func ACPInstanceNames(locPath string) []string {
 
 // This file is the WRITE side of the shared adapter-location substrate: adapter binary PATHS are
 // persisted to `.aimesh/adapters.yaml` (the path-only file shared with exploremesh) and NOWHERE else —
-// config.yaml no longer carries them, so `.aimesh/adapters.yaml` is the single source of truth for
+// config.yaml does not carry them, so `.aimesh/adapters.yaml` is the single source of truth for
 // paths. Each seam is a single atomic read-modify-write of the scope's adapters.yaml.
 
 // SharedUserLocationsPath is the user-scope adapters.yaml write target (AIMESH_HOME-anchored).

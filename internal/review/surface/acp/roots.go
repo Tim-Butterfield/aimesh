@@ -1,48 +1,18 @@
 package acp
 
-// TRUSTED ROOTS — who is allowed to say what this agent may read.
+// ROOTS — which directories a call may read.
 //
-// The CLI's confinement model is "the path a human typed IS the consent": `reviewmesh review
-// <dir>` makes <dir> the allowed root because a person named it. That reasoning does NOT
-// transfer to ACP. Here the caller is a peer PROCESS: an editor extension, another agent, or
-// anything else that can speak JSON-RPC on this machine. If a request's own `workspace` were
-// treated as its own root, containment would be tautological — the peer could name any
-// readable directory and have it copied and rendered into prompts that are shipped to
-// external model CLIs.
+// An agent-driven surface has no single launch folder: an IDE can change folders after starting its
+// agents, and several conversations can be active at once. So nothing is inferred from where this
+// process started. Every call (an MCP tool call, an ACP turn) declares the absolute directories it is
+// about, and CallScope builds that call's resolver from exactly those paths. The operator's optional
+// `--root` directories are a CEILING every declared path must lie inside (ResolveCeiling).
 //
-// So the roots are established OUT OF BAND, before any request exists:
-//
-//   - `aimesh review acp --root <dir>` (repeatable) — the launching human's consent, exactly the
-//     CLI's path argument moved to launch time.
-//   - No `--root`: the process working directory at launch, because an IDE spawns its agents
-//     in the project the user opened — CONSENT BY LAUNCH CONTEXT. That inference is only
-//     honest when the cwd looks like a project, so a degenerate cwd (the filesystem root, the
-//     home directory itself, a system directory) is REFUSED rather than adopted.
-//   - `--no-default-root` declines the inference entirely: explicit roots only.
-//
-// Every request path is then judged against that set and may only NARROW it. Nothing a
-// request contains can widen it.
-//
-// # The degenerate rule applies to EXPLICIT roots too
-//
-// Running the degenerate rule only on the inferred cwd would make it decorative: the
-// documented flag walks straight past it, so `aimesh review acp --root /` would be accepted and
-// grant whole-machine confinement — the exact condition the rule exists to prevent. Both
-// the denylist and the degenerate rule judge EVERY root, explicit or inferred.
-//
-// An operator who genuinely wants a very broad root keeps a way to say so — but only by
-// SAYING it: `--allow-broad-root` is an explicit, documented opt-in that applies to explicit
-// `--root` values only. It never applies to the inferred cwd, because the inference's whole
-// justification ("an IDE started us in the project") is what a degenerate cwd disproves.
-//
-// # Both rules are applied to the CANONICAL root
-//
-// A denylist or a degenerate-name rule that runs on the path AS SPELLED is one symlink away
-// from silence: `--root ./work` pointing at `/` (or at `~/.ssh`) has no degenerate spelling
-// and no protected component. The path is canonicalized FIRST and both rules are applied to
-// the canonical form, so the refusal fires on the object rather than on the name. The path
-// the operator typed is still what is returned and recorded — the resolver canonicalizes
-// roots itself, so nothing downstream depends on this function doing it.
+// Two rules judge every root, declared or operator-named, and both on the CANONICAL form so a symlink
+// cannot alias past them: the non-overridable read denylist (a protected path is never a root), and
+// the degenerate-root rule (the filesystem root, a home directory or its parent, or a system/shared
+// tree is never a project). An operator may waive the degenerate rule for an explicit `--root` with
+// `--allow-broad-root`; a path a call declares can never waive it.
 
 import (
 	"fmt"
@@ -52,17 +22,13 @@ import (
 	"strings"
 
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
+	"github.com/Tim-Butterfield/aimesh/meshcore/pathexpand"
 	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 )
 
 // Stable MACHINE reason codes for a trusted-root refusal at launch (lower_snake, never
 // sentences), so a host/wrapper can branch on them the way it branches on a run halt.
 const (
-	// ReasonNoTrustedRoot — `--no-default-root` was given with no `--root`.
-	ReasonNoTrustedRoot = "acp_no_trusted_root"
-	// ReasonDegenerateDefaultRoot — the launch cwd is not a plausible project root, so it is
-	// NOT adopted as the default trusted root.
-	ReasonDegenerateDefaultRoot = "acp_degenerate_default_root"
 	// ReasonDegenerateRoot — an EXPLICIT `--root` is a location that is never a project (the
 	// filesystem root, a home directory, a system/shared tree). It is a separate code from
 	// ReasonDegenerateDefaultRoot because the remedy differs: the operator named this root,
@@ -76,220 +42,158 @@ const (
 	ReasonRootDenied = "acp_root_denied"
 )
 
-// RootSource is the PROVENANCE of a resolved trusted-root set: whether a human typed it or this
-// process inferred it.
-//
-// It exists because the two are not the same consent, and the 2026-07-28 MCP revision makes the
-// difference load-bearing. That revision deletes `roots/list`, so a client can no longer narrow a
-// server the way it could under 2025-06-18 — which means the SAME launch configuration would grant
-// strictly more filesystem authority to a client merely because it speaks a newer revision. The fix
-// is to stop treating an inferred cwd as a trusted root on that era (see mcp.Server's waiver), and
-// that is only expressible if the resolver says where its answer came from.
-//
-// A launch cannot tell the two apart after the fact: `--root /repo` and a launch cwd of `/repo`
-// arrive as the same []string. Answering "explicit" for both would be a claim nothing checked, which
-// is why the resolver returns this rather than a caller guessing.
-type RootSource string
-
+// Reason codes for a path a CALL declares as its scope.
 const (
-	// RootsNone accompanies every error return: the resolver never returns roots with an error, and
-	// never returns an empty set with a nil error.
-	RootsNone RootSource = "none"
-	// RootsExplicit means at least one `--root` survived validation. A human typed it.
-	RootsExplicit RootSource = "explicit"
-	// RootsInferredCwd means the set came from the launch working directory fallback. Nobody typed
-	// it; it was inferred from where the process happened to start.
-	RootsInferredCwd RootSource = "inferred_cwd"
+	// ReasonCallPathRelative — a declared path is not absolute. A server shares no working directory
+	// with its caller, so a relative path has no meaning to it.
+	ReasonCallPathRelative = "scope_call_path_relative"
+	// ReasonCallNoPath — the call declared no path at all.
+	ReasonCallNoPath = "scope_call_no_path"
+	// ReasonOutsideCeiling — a declared path is outside the operator's `--root` ceiling.
+	ReasonOutsideCeiling = "scope_outside_root_ceiling"
 )
 
-// RootOptions is what the launching command knows about the trusted roots.
-type RootOptions struct {
-	// Surface names the launching subcommand ("acp" when empty). It appears only in the operator
-	// notice a waived broad root prints, so `reviewmesh mcp` — which reuses this resolver unchanged,
-	// because a peer-process caller is a peer-process caller whatever protocol it speaks — does not
-	// print a notice attributing it to `acp`.
-	Surface string
-	// Explicit are the `--root` directories, in the order given.
-	Explicit []string
-	// NoDefault declines the launch-cwd default (`--no-default-root`).
-	NoDefault bool
-	// AllowBroadRoot is the explicit operator opt-in for an EXPLICIT `--root` that the
-	// degenerate rule would otherwise refuse (`/`, a home directory, a system/shared tree).
-	// It exists so the rule is a refusal an operator can override by SAYING SO, never a
-	// silent acceptance — and it deliberately does NOT extend to the inferred launch cwd or
-	// to the non-overridable read denylist, neither of which is an operator's to waive.
-	AllowBroadRoot bool
-	// AllowInferredRoot adopts the launch cwd even when it carries no PROJECT MARKER
-	// (`--allow-inferred-root`). Without it, a marker-less cwd yields NO roots — not an error, so
-	// the server still starts and still serves everything that consumes no trusted root.
-	//
-	// It does not reach the degenerate rule or the read denylist above: `/` and `~` stay refused
-	// whatever this says, because "the operator meant this" is not evidence that a directory is a
-	// project — it is only evidence that they accept the consequence for one that might not be.
-	AllowInferredRoot bool
-	// Cwd is the process working directory at launch ("" → os.Getwd). Injectable for tests.
-	Cwd string
+// ValidateOptions says how ValidateRoot judges one candidate root.
+type ValidateOptions struct {
+	// Label names the path in refusals, e.g. "--root" or "workspace".
+	Label string
+	// AllowBroad waives the degenerate-root rule. Only an operator's explicit `--root` with
+	// `--allow-broad-root` sets it; a path a call declares never does.
+	AllowBroad bool
 	// Home is the user's home directory ("" → os.UserHomeDir). Injectable for tests.
 	Home string
 }
 
-// ResolveTrustedRoots returns the absolute trusted roots for an ACP server, THEIR PROVENANCE, or a
-// typed *fault.Fault explaining why the launch must fail closed. It performs no I/O beyond
-// stat-ing the candidate roots, and it never returns an empty root set with a nil error:
-// "no roots" is always an error at launch, because a server with no roots can serve nothing
-// but inline workspaces and the operator should learn that immediately, not on first request.
-//
-// The provenance return is not decoration. `--root /repo` and a launch cwd of `/repo` produce the
-// same []string, so after this function nothing can tell them apart — and under MCP's 2026-07-28
-// revision they must be told apart, because that revision removes the client's ability to narrow a
-// server and an INFERRED root would therefore silently grant more authority than it did before. A
-// caller that needs the distinction gets it here or not at all.
-func ResolveTrustedRoots(o RootOptions) ([]string, RootSource, error) {
-	var roots []string
-	var broad []string // explicit roots the degenerate rule flagged and --allow-broad-root waived
-	for _, raw := range o.Explicit {
-		r := strings.TrimSpace(raw)
-		if r == "" {
+// ValidateRoot judges one candidate root and returns its absolute form. It refuses a path that cannot
+// be resolved or is not a directory, a protected path (on its spelling and its canonical form, so a
+// symlink cannot alias past the rule), and — unless AllowBroad — a location that is never a project:
+// the filesystem root, a home directory or its parent, or a system/shared tree. When AllowBroad waived
+// the degenerate rule, broad names why the root was broad.
+func ValidateRoot(raw string, o ValidateOptions) (abs, broad string, err error) {
+	label := strings.TrimSpace(o.Label)
+	if label == "" {
+		label = "root"
+	}
+	r := strings.TrimSpace(raw)
+	a, aerr := filepath.Abs(r)
+	if r == "" || aerr != nil {
+		return "", "", rootFault(ReasonRootUnusable, fmt.Sprintf("%s %q cannot be resolved", label, raw))
+	}
+	canon := canonicalRoot(a)
+	fi, serr := os.Stat(canon)
+	if serr != nil {
+		return "", "", rootFault(ReasonRootUnusable, fmt.Sprintf("%s %q cannot be used: %v", label, raw, serr))
+	}
+	if !fi.IsDir() {
+		return "", "", rootFault(ReasonRootUnusable, fmt.Sprintf("%s %q is not a directory", label, raw))
+	}
+	for _, form := range []string{a, canon} {
+		if rule := scope.DeniedRead(form); rule != "" {
+			return "", "", rootFault(ReasonRootDenied, fmt.Sprintf("%s %q is a protected path (rule %s) and can never be a root", label, raw, rule))
+		}
+	}
+	if why := degenerateRoot(canon, o.Home); why != "" {
+		if !o.AllowBroad {
+			remedy := "name the project directory instead"
+			if label == "--root" {
+				remedy += "; if this breadth is genuinely intended, say so explicitly with `--allow-broad-root`"
+			}
+			return "", "", rootFault(ReasonDegenerateRoot, fmt.Sprintf("refusing %s %q as a root: %s. %s", label, raw, why, remedy))
+		}
+		broad = why
+	}
+	return a, broad, nil
+}
+
+// ExpandRoots expands each `--root` value with the same path grammar `--adapter` paths use (`%VAR%` on
+// Windows, `$VAR`/`${VAR}` elsewhere, a leading `~`). An undefined variable is an error, never an empty
+// expansion, so the launch refuses rather than bounding calls by a different directory.
+func ExpandRoots(raw []string, env pathexpand.Env) ([]string, error) {
+	out := make([]string, 0, len(raw))
+	for _, r := range raw {
+		if strings.TrimSpace(r) == "" {
 			continue
 		}
-		abs, err := filepath.Abs(r)
+		p, err := pathexpand.Expand(strings.TrimSpace(r), env)
 		if err != nil {
-			return nil, RootsNone, rootFault(ReasonRootUnusable, fmt.Sprintf("--root %q cannot be resolved: %v", raw, err))
+			return nil, fault.Wrap(fault.Usage, fmt.Sprintf("--root %q cannot be expanded", r), err).WithReason(fault.ReasonOf(err))
 		}
-		// CANONICALIZE BEFORE JUDGING. Both rules below are about WHAT this root really is,
-		// and a symlink is a one-step alias past either of them.
-		canon := canonicalRoot(abs)
-		fi, serr := os.Stat(canon)
-		if serr != nil {
-			return nil, RootsNone, rootFault(ReasonRootUnusable, fmt.Sprintf("--root %q cannot be used: %v", raw, serr))
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// ResolveCeiling validates the operator's `--root` directories into the CEILING every call's scope must
+// fall inside. No `--root` is no ceiling (nil, nil): nothing is inferred from the launch directory.
+func ResolveCeiling(explicit []string, allowBroad bool, surface, home string) ([]string, error) {
+	var roots, broad []string
+	for _, raw := range explicit {
+		if strings.TrimSpace(raw) == "" {
+			continue
 		}
-		if !fi.IsDir() {
-			return nil, RootsNone, rootFault(ReasonRootUnusable, fmt.Sprintf("--root %q is not a directory (a trusted root is a project directory)", raw))
+		abs, why, err := ValidateRoot(raw, ValidateOptions{Label: "--root", AllowBroad: allowBroad, Home: home})
+		if err != nil {
+			return nil, err
 		}
-		// A root that is itself protected is refused as a ROOT, not merely inside one: the
-		// denylist exists so secrets never reach a prompt, and naming `~/.ssh` as the root is
-		// the most direct way to ask for exactly that. Both the spelling and the canonical
-		// form are judged, so neither a relative name nor a symlink alias walks past it.
-		for _, form := range []string{abs, canon} {
-			if rule := scope.DeniedRead(form); rule != "" {
-				return nil, RootsNone, rootFault(ReasonRootDenied, fmt.Sprintf(
-					"--root %q is a protected path (rule %s) and can never be a trusted root", raw, rule))
-			}
-		}
-		// The degenerate rule applies to an EXPLICIT root as well. Checking only the inferred
-		// cwd left the documented flag as a complete bypass: `--root /` granted whole-machine
-		// confinement, which is precisely what the rule exists to prevent.
-		if why := degenerateRoot(canon, o.Home); why != "" {
-			if !o.AllowBroadRoot {
-				return nil, RootsNone, rootFault(ReasonDegenerateRoot, fmt.Sprintf(
-					"refusing --root %q as a trusted root: %s. Name the project directory instead; "+
-						"if this breadth is genuinely intended, say so explicitly with `--allow-broad-root`", raw, why))
-			}
+		if why != "" {
 			broad = append(broad, fmt.Sprintf("%s (%s)", abs, why))
 		}
 		roots = append(roots, abs)
 	}
-	// A waived breadth is a RECORDED fact, never a silent one: the operator opted in, and the
-	// launch says out loud what was opted into.
 	if len(broad) > 0 {
-		surface := strings.TrimSpace(o.Surface)
-		if surface == "" {
+		if strings.TrimSpace(surface) == "" {
 			surface = "acp"
 		}
-		fmt.Fprintf(os.Stderr, "aimesh review %s: --allow-broad-root: accepting %d broad trusted root(s): %s\n",
+		fmt.Fprintf(os.Stderr, "aimesh review %s: --allow-broad-root: accepting %d broad root ceiling(s): %s\n",
 			surface, len(broad), strings.Join(broad, "; "))
 	}
-	if len(roots) > 0 {
-		return roots, RootsExplicit, nil
-	}
-	if o.NoDefault {
-		return nil, RootsNone, rootFault(ReasonNoTrustedRoot,
-			"--no-default-root was given with no --root: this agent would have no trusted root and would refuse every request path; pass `--root <project-dir>` (repeatable)")
-	}
-	cwd := strings.TrimSpace(o.Cwd)
-	if cwd == "" {
-		wd, err := os.Getwd()
+	return roots, nil
+}
+
+// CallScope builds the resolver for ONE call from the paths that call declared — its workspace and any
+// extra roots. Every path must be absolute, must pass ValidateRoot with no breadth waiver, and must lie
+// inside ceiling when the operator set one. The resolver's roots are exactly the declared paths, so each
+// call is judged against its own scope and never against another call's.
+func CallScope(paths, ceiling []string, home string) (*scope.Resolver, error) {
+	var ceil *scope.Resolver
+	if len(ceiling) > 0 {
+		c, err := scope.New(ceiling...)
 		if err != nil {
-			return nil, RootsNone, rootFault(ReasonRootUnusable, fmt.Sprintf("no --root was given and the working directory cannot be determined: %v", err))
+			return nil, fault.Wrap(fault.Containment, "the root ceiling cannot be resolved", err).WithHalt("M6").WithReason(ReasonRootUnusable)
 		}
-		cwd = wd
+		ceil = c
 	}
-	abs, err := filepath.Abs(cwd)
-	if err != nil {
-		return nil, RootsNone, rootFault(ReasonRootUnusable, fmt.Sprintf("no --root was given and the working directory %q cannot be resolved: %v", cwd, err))
-	}
-	// Same order as above, and on the CANONICAL form for the same reason: a cwd that is a
-	// symlink into a system tree has an innocuous spelling. `--allow-broad-root` deliberately
-	// does NOT reach here — the inference's justification is that an IDE opened this project,
-	// which a degenerate cwd disproves, so there is nothing to waive.
-	canon := canonicalRoot(abs)
-	if why := degenerateRoot(canon, o.Home); why != "" {
-		return nil, RootsNone, rootFault(ReasonDegenerateDefaultRoot, fmt.Sprintf(
-			"refusing to adopt the launch working directory %q as the trusted root: %s. "+
-				"The default only holds when an IDE started this agent IN the project the user opened; "+
-				"launch with `aimesh review acp --root <project-dir>` instead", abs, why))
-	}
-	for _, form := range []string{abs, canon} {
-		if rule := scope.DeniedRead(form); rule != "" {
-			return nil, RootsNone, rootFault(ReasonRootDenied, fmt.Sprintf(
-				"refusing to adopt the launch working directory %q as the trusted root: it is a protected path (rule %s); launch with `aimesh review acp --root <project-dir>`", abs, rule))
+	var roots []string
+	for _, raw := range paths {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			continue
 		}
-	}
-	// THE INFERENCE MUST REST ON EVIDENCE, NOT ON WHERE THE PROCESS HAPPENED TO START.
-	//
-	// The justification for adopting a cwd at all is "a host opened this agent IN the project the
-	// user opened". A PROJECT MARKER is what makes that checkable. Without one the directory is
-	// merely where the process was spawned — and the degenerate-root rule above does not catch the
-	// realistic over-grant, because `~/projects` or `~/src` is neither home nor home's parent, yet
-	// adopting it hands a model read access across every project the user owns instead of one.
-	//
-	// This also replaces an era-conditional refusal that was keyed on the wrong variable. It refused
-	// an inferred cwd on the newest MCP revision because that revision removes the client's ability
-	// to narrow the server — but a LEGACY client that simply declines the roots capability is not
-	// narrowing the server either, and it was granted the unnarrowed cwd silently. The risk was
-	// never "which protocol revision"; it was "is there any reason to believe this directory is the
-	// work". So the rule is now the same on both eras, and it asks that question directly.
-	// NOT ADOPTING IS NOT THE SAME AS FAILING TO LAUNCH. A marker-less cwd yields NO roots and no
-	// error: the server starts, every filesystem path is refused with `scope_no_roots_configured`
-	// (which already names `--root`), and the paths that consume no trusted root — an inline
-	// workspace — still work.
-	//
-	// Killing the process here instead would hand an MCP host "server disconnected" with the reason
-	// on a stderr channel the stdio spec explicitly permits hosts to discard. A live server that
-	// explains itself on the first call beats a dead one that explained itself where nobody looked.
-	if !o.AllowInferredRoot && !hasProjectMarker(abs) {
-		return nil, RootsNone, nil
-	}
-	return []string{abs}, RootsInferredCwd, nil
-}
-
-// projectMarkers are the files and directories whose presence makes "this directory is a project"
-// an observation rather than an assumption. Ecosystem conventions only — each one exists on
-// machines this tool has never seen, which is the same admission test the containment denylist
-// uses. A marker-less tree is not refused outright; it needs `--root` or the explicit waiver.
-var projectMarkers = []string{
-	".git", ".hg", ".svn",
-	"go.mod", "package.json", "Cargo.toml", "pyproject.toml", "setup.py",
-	"pom.xml", "build.gradle", "build.gradle.kts",
-	"Gemfile", "composer.json", "CMakeLists.txt", "Makefile",
-	".aimesh",
-}
-
-// ProjectMarkers returns the marker names, for a surface that has to TELL an operator which ones
-// it looked for. A refusal that says "no project marker" without saying what one is has named a
-// rule the reader cannot act on.
-func ProjectMarkers() []string { return append([]string(nil), projectMarkers...) }
-
-// hasProjectMarker reports whether dir carries any projectMarkers entry. Presence only — the
-// content is never read, and a marker of the wrong TYPE (a `.git` file rather than a directory,
-// as a git worktree uses) still counts, because it is equally good evidence.
-func hasProjectMarker(dir string) bool {
-	for _, m := range projectMarkers {
-		if _, err := os.Lstat(filepath.Join(dir, m)); err == nil {
-			return true
+		if !filepath.IsAbs(p) {
+			return nil, fault.New(fault.Usage, fmt.Sprintf("%q is not an absolute path; every path a call declares must be absolute, because this server does not share a working directory with its caller", raw)).
+				WithReason(ReasonCallPathRelative)
 		}
+		abs, _, err := ValidateRoot(p, ValidateOptions{Label: "declared path", Home: home})
+		if err != nil {
+			return nil, fault.New(fault.Containment, err.Error()).WithHalt("M6").WithReason(fault.ReasonOf(err))
+		}
+		if ceil != nil {
+			if _, derr := ceil.ResolveRead(abs); derr != nil {
+				return nil, fault.New(fault.Containment, fmt.Sprintf("%q is outside the operator's --root ceiling; a call may declare only paths inside it", raw)).
+					WithHalt("M6").WithReason(ReasonOutsideCeiling)
+			}
+		}
+		roots = append(roots, abs)
 	}
-	return false
+	if len(roots) == 0 {
+		return nil, fault.New(fault.Usage, "the call declares no path; name the absolute workspace directory it is about").
+			WithReason(ReasonCallNoPath)
+	}
+	r, err := scope.New(roots...)
+	if err != nil || r == nil {
+		return nil, fault.Wrap(fault.Containment, "the declared paths cannot be resolved", err).WithHalt("M6").WithReason(ReasonRootUnusable)
+	}
+	return r, nil
 }
 
 // degenerateRoot reports WHY dir is not a plausible project root, or "" when it is. The rule

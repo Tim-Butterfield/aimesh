@@ -3,7 +3,6 @@ package mcp_test
 import (
 	"testing"
 
-	"github.com/Tim-Butterfield/aimesh/internal/review"
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
 )
@@ -19,15 +18,10 @@ import (
 //
 // So: any keyword outside the validator's declared vocabulary fails the build. It protects OUR
 // schemas from drifting outside OUR validator; it establishes nothing about general 2020-12 support.
-//
-// AGAINST THE OLD CODE THIS DOES NOT COMPILE, because nothing published the vocabulary to check
-// against — which was the defect.
 func TestPublishedToolSchemas_UseOnlyTheValidatorsDeclaredVocabulary(t *testing.T) {
-	// AllowRemediate so that review_remediate — the one tool that writes, and the one with the
-	// largest schema — is registered and therefore checked.
+	// Every tool is registered, review_remediate — the one with the largest schema — included.
 	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) {
-		s.Roots, s.AllowRemediate = []string{t.TempDir()}, true
-		s.PolicyCeiling = review.ModeApply
+		s.Ceiling, s.AllowWrites = []string{t.TempDir()}, true
 	})
 	tools := s.Core().Tools()
 	if len(tools) < 6 {
@@ -60,8 +54,7 @@ func TestPublishedToolSchemas_UseOnlyTheValidatorsDeclaredVocabulary(t *testing.
 // check that keeps that failure out of production rather than finding it there.
 func TestPublishedToolSchemas_CompileWithinTheBounds(t *testing.T) {
 	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) {
-		s.Roots, s.AllowRemediate = []string{t.TempDir()}, true
-		s.PolicyCeiling = review.ModeApply
+		s.Ceiling, s.AllowWrites = []string{t.TempDir()}, true
 	})
 	for _, tool := range s.Core().Tools() {
 		for _, raw := range [][]byte{tool.InputSchema, tool.OutputSchema} {
@@ -80,8 +73,7 @@ func TestPublishedToolSchemas_CompileWithinTheBounds(t *testing.T) {
 // property. A client that caches a tool list keyed on its order has no other way to find out.
 func TestToolsList_IsDeterministicAndInRegistrationOrder(t *testing.T) {
 	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) {
-		s.Roots, s.AllowRemediate = []string{t.TempDir()}, true
-		s.PolicyCeiling = review.ModeApply
+		s.Ceiling, s.AllowWrites = []string{t.TempDir()}, true
 	})
 	c := serve(t, s)
 

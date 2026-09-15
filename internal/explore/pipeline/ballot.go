@@ -1,6 +1,6 @@
 package pipeline
 
-// This file is the BALLOT STAGE (design §3 Shortlist row / §4) — the two host steps that bracket the
+// This file is the BALLOT STAGE — the two host steps that bracket the
 // ballot round a ballot-bearing mode declares:
 //
 //	freezeDecision   BEFORE the ballot round is dispatched: fix + hash the candidate-universe revision, the
@@ -27,7 +27,7 @@ import (
 )
 
 // freezeDecision fixes + hashes the decision inputs and records them on the Result BEFORE the ballot round is
-// dispatched (design §4). It is called only for a mode that declares a Ballot contract; every other mode
+// dispatched. It is called only for a mode that declares a Ballot contract; every other mode
 // leaves Result.Decision nil and never acquires a decision by accident.
 func (r *runner) freezeDecision(confirmed canon.Result, pres canon.Presentation) error {
 	criteria := r.spec.Ballot.Criteria(r.raw)
@@ -52,7 +52,7 @@ func (r *runner) freezeDecision(confirmed canon.Result, pres canon.Presentation)
 	return nil
 }
 
-// tallyBallots parses the recorded ballot round and computes the HOST tally (design §4). It runs after the
+// tallyBallots parses the recorded ballot round and computes the HOST tally. It runs after the
 // ballot round, so it can only ever read ballots that were cast under the already-frozen framing.
 //
 // An explorer whose ballot is unusable — no ballot round envelope, an unparseable body, or an entry naming a
@@ -92,7 +92,7 @@ func (r *runner) tallyBallots(confirmed canon.Result, formulationHash string) er
 		}
 		b.EnvelopeRef = schema.EnvelopeRef(ballotRound.Index(), env.Order)
 		// The voter's stated reasoning is MODEL PROSE: it is moved into the collatorNarrative namespace here and
-		// never travels on the machine record of the ballot (§0 F-C).
+		// never travels on the machine record of the ballot.
 		if b.Rationale != "" {
 			narrative = append(narrative, govern.Narrative{Source: env.Identity, Phase: schema.PhaseBallot, Prose: b.Rationale})
 		}

@@ -18,7 +18,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// --- G2: every model call runs IN the isolated copy ---
+// --- every model call runs IN the isolated copy ---
 
 // callRecorder is a deterministic adapter that RECORDS the model.Call it was handed. It
 // answers every phase with schema-valid output (reviewer/cross-check/verifier findings, a host
@@ -110,7 +110,7 @@ func recorderManager(t *testing.T, rec *callRecorder) *Manager {
 	}
 }
 
-// TestModelCalls_RunInTheIsolatedCopy is the G2 pin: EVERY model call reviewmesh makes carries
+// TestModelCalls_RunInTheIsolatedCopy pins that EVERY model call reviewmesh makes carries
 // a WorkDir that is the isolated copy, never the empty value.
 //
 // An empty WorkDir is not neutral — meshcore/model/shell only sets cmd.Dir when WorkDir is
@@ -218,7 +218,7 @@ func TestCollectRefusal_HaltsAndIsRecorded(t *testing.T) {
 	}
 }
 
-// --- G1 (manager half): trusted roots govern authority documents ---
+// --- trusted roots govern authority documents ---
 
 // TestTrustedRoots_ConfineAuthorityPaths pins that an agent surface's out-of-band roots reach
 // the Manager's AUTHORITATIVE authority resolution: a declared `path` outside them is refused

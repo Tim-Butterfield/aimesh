@@ -66,13 +66,11 @@ import (
 
 // --- how much authority a request may declare ---
 //
-// THERE IS NO BYTE BUDGET. There used to be one (64 KiB per document, 192 KiB in total) and it
-// is gone: whether a model can handle a large document is the model's business, and a ceiling
-// this layer enforced meant a substantial specification — this repo's own docs/mcp.md is 105 KiB
-// — could not be judged at all without a flag. The cost is real and multiplicative (authority
-// rides in EVERY seat's prompt, EVERY round), which is why `--dry-run` prices it: the payload
-// names the bytes and the destinations before anything is spent. Pricing it is the answer;
-// refusing it was not.
+// THERE IS NO BYTE BUDGET. Whether a model can handle a large document is the model's business, and
+// a ceiling this layer enforced would mean a substantial specification could not be judged at all
+// without a flag. The cost is real and multiplicative (authority rides in EVERY seat's prompt, EVERY
+// round), which is why `--dry-run` prices it: the payload names the bytes and the destinations before
+// anything is spent. Pricing it is the answer; refusing it is not.
 //
 // What survives is the COUNT, which bounds something different — how many separate things one
 // run is judged against is a question about the shape of the request, not about size, and eight
@@ -502,7 +500,7 @@ const Header = "AUTHORITY CONTEXT — reference only; not under review; never pr
 
 // Render produces the structurally delimited QUOTED EVIDENCE block for a set of resolved
 // documents, with the instruction hierarchy restated. It returns "" for no documents, so a
-// prompt with no authority is byte-identical to what it was before this feature existed.
+// prompt with no authority carries no authority block at all.
 func Render(docs []Resolved) string {
 	if len(docs) == 0 {
 		return ""

@@ -27,13 +27,17 @@ A Go monorepo of three modules joined by `go.work`:
    over `shell.Recipes()`. Never hardcode a per-app list of adapter names.
 3. **Governance invariants** (never weaken): no silent model fallback (a strong-evidence identity
    `mismatch` halts, Class E); models run read-only in a contained workspace copy (mutation → M5); the
-   host is the only writer; every path is judged by the one `meshcore/scope` resolver against roots a
-   human authorized, with a non-overridable denylist inside them (a refusal is M6, never a silently
+   host is the only writer; every path is judged by the one `meshcore/scope` resolver against roots
+   declared per call (MCP/ACP: absolute paths, inside the operator's optional `--root` ceiling) or
+   typed (CLI), with a non-overridable denylist inside them (a refusal is M6, never a silently
    shortened prompt); counts and rankings are computed by the host, never asserted by a model; all
    config writes go through meshcore's config store.
 4. **Surface parity.** A run-forming capability must be expressible on the CLI, over ACP **and** over MCP
    with identical fail-closed semantics. Adding one to a single surface is a parity break, not a
-   feature — see [docs/mcp.md → Surface parity](docs/mcp.md#surface-parity).
+   feature — see [docs/mcp.md → Surface parity](docs/mcp.md#surface-parity). The stated per-surface
+   difference is the **configuration source**: the CLI reads saved configuration; the MCP and ACP
+   servers read none and take their adapters and write grant from launch arguments
+   (`--adapter`/`AIMESH_ADAPTERS`, `--allow-writes`), with every panel composed per call.
 5. **Keep the gate green.** Every change must leave `make gate` passing. Both golden runs are part of
    it (`golden-run` for reviewmesh, `golden-run-exploremesh` for exploremesh) — an intentional output
    change means regenerating that app's baseline deliberately (`GOLDEN_UPDATE=1`), never loosening it.
@@ -106,15 +110,21 @@ Both apps pick it up automatically (they discover adapters from `shell.Recipes()
    review or exploration whose roster/profile selects the adapter) is what exercises identity extraction —
    that spends tokens and is opt-in.
 
+**Availability on MCP/ACP.** The MCP and ACP servers read no saved configuration: a shell-recipe
+adapter is available to them only when the host starts them with `--adapter <name>` or
+`--adapter <name>=<path>` (or `AIMESH_ADAPTERS`), validated against `shell.Recipes()` by
+`internal/launchflags`. A new recipe is therefore nameable there the moment it exists. User-defined
+ACP-client instances (below) live in saved configuration and are CLI-only.
+
 > **Two adapter families.** Besides the shell recipe above, meshcore ships a **generic ACP-client
 > adapter** (`meshcore/model/acpagent`) that drives any CLI exposing an ACP (Agent Client Protocol)
 > server over stdio. There is **no fixed ACP catalog and no `acpagent.Recipes()`** — ACP is an open
 > protocol with no closed CLI list, so an ACP adapter is **user config, not code**: each instance is an
 > entry under `acpAdapters` in the shared `~/.aimesh/adapters.yaml` (`{title, path, args, model}`),
 > added via `aimesh explore setup --acp add --path <bin>` / `aimesh review setup --acp add --path <bin>` (both
-> also offer `--acp detect` and `--acp remove`), or by hand
-> (enter a binary path → *Detect* probes
-> `--help` and a real handshake to fill in the launch args + the model the session reports → *Save*).
+> also offer `--acp remove`), or by editing that file by hand. `--acp detect --path <bin>` launches the
+> CLI, probes `--help` and a real ACP handshake, and reports the launch args and the model the session
+> reports without saving anything; `--acp add` runs the same probe and records the instance.
 > Both apps then discover it exactly like a shell recipe. Use it (not a shell recipe)
 > when a CLI exposes ACP and you want **protocol-verified identity**: an ACP session can report its
 > active model (`session/new` → `currentModelId`), which the adapter classifies at the **cli_status**

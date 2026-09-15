@@ -1,6 +1,6 @@
 package schema
 
-// This file holds the FORECAST mode's app-owned TASK INPUTS + round artifact (design §3 Forecast row).
+// This file holds the FORECAST mode's app-owned TASK INPUTS + round artifact.
 //
 // Forecast is the other FIXED-SPACE mode, and it is the most deterministic thing exploremesh does. The
 // TARGET, the UNIT and the HORIZON are declared by the user before any explorer speaks, so every explorer
@@ -23,7 +23,7 @@ import (
 	"strings"
 )
 
-// ValidateForecastTask checks the DECLARED estimation target is usable BEFORE any spend (design §3): what
+// ValidateForecastTask checks the DECLARED estimation target is usable BEFORE any spend: what
 // is being estimated, in what unit, over what horizon. It is the mode's ValidateTask, so every surface
 // refuses an under-declared forecast with the same message — pooling numbers whose units nobody fixed is
 // arithmetic over things that are not the same quantity.

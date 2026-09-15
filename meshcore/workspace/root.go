@@ -52,10 +52,9 @@ const (
 	// build/artifact directory (`node_modules`, `dist`, `.cache`) or the agent/IDE client
 	// config family (`.vscode`, `.claude`, `.cursor`, `.aimesh`, …).
 	//
-	// It is a CAVEAT, never a refusal — dropping these is correct and the run proceeds. What
-	// was wrong is that it used to happen in silence, while a hardlinked file got a caveat
-	// for the same class of reason. That silence has grown teeth: in 2026 `.claude/` and
-	// `.cursor/` hold rules and prompts that ARE source, so a user can reasonably ask a
+	// It is a CAVEAT, never a refusal — dropping these is correct and the run proceeds, but not
+	// in silence, just as a hardlinked file gets a caveat for the same class of reason:
+	// `.claude/` and `.cursor/` hold rules and prompts that ARE source, so a user can reasonably ask a
 	// review to look at them and never learn it did not. docs/security.md makes the argument
 	// against exactly this — "a reviewer cannot object to a file it was never shown".
 	ReasonExcluded Reason = "workspace_excluded"

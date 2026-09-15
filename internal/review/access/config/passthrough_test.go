@@ -103,7 +103,7 @@ func TestProfileLane_StillHeldToTheCatalog(t *testing.T) {
 	}
 }
 
-// TestComposedSeat_CarriesTheHintAnyway. Under pass-through a typo no longer refuses, so the hint
+// TestComposedSeat_CarriesTheHintAnyway. Under pass-through a typo does not refuse, so the hint
 // stops being a nicety and becomes the only warning: without it, "claude-opus-5" would go silently
 // to the provider and fail there.
 func TestComposedSeat_CarriesTheHintAnyway(t *testing.T) {

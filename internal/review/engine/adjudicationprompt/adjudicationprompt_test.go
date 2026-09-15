@@ -47,7 +47,7 @@ func TestRender_HostAddressedCorrectiveWholeFiles(t *testing.T) {
 		t.Error("the host prompt does not carry the whole file")
 	}
 	if strings.Contains(out, "[truncated]") {
-		t.Error("the host prompt claims a truncation that no longer happens")
+		t.Error("the host prompt claims a truncation that does not happen")
 	}
 	if !strings.Contains(out, "applied: Use a constant") {
 		t.Error("missing prior dispositions")

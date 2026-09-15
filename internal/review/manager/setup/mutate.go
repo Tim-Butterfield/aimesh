@@ -172,7 +172,7 @@ func (m *Manager) writeTarget() (string, error) {
 }
 
 // sharedWriteTarget resolves the SHARED adapters.yaml FILE (.aimesh/adapters.yaml) for the selected
-// write scope — the destination for adapter binary PATHS, which no longer go into config.yaml. Project
+// write scope — the destination for adapter binary PATHS, which config.yaml does not carry. Project
 // scope is ROOT-anchored: it BLOCKS with guidance when the folder is not inside a repo, never silently
 // falling back to a cwd-relative path (paths are a repo-wide fact). User scope is AIMESH_HOME-anchored.
 func (m *Manager) sharedWriteTarget() (string, error) {
@@ -796,7 +796,7 @@ func (m *Manager) DeleteSavedModel(key string) (DeleteSavedModelResult, error) {
 
 // writeAdapterPathShared persists a validated adapter binary path to the scope's SHARED
 // adapters.yaml (`.aimesh/adapters.yaml`) — the single seam SetAdapterPath + ConfigureAdapterPath
-// share. Adapter binary paths live ONLY here (config.yaml no longer carries them), so this is a single
+// share. Adapter binary paths live ONLY here (config.yaml does not carry them), so this is a single
 // atomic write to the resolved scope target.
 func (m *Manager) writeAdapterPathShared(name, binPath string) (Result, error) {
 	var res Result

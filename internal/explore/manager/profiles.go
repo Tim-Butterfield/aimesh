@@ -9,7 +9,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/profile"
 )
 
-// This file is the manager's MULTI-profile read/write seam (design §7) and the ONLY seam that writes a
+// This file is the manager's MULTI-profile read/write seam and the ONLY seam that writes a
 // roster. The roster projections (RosterView / DoctorReport / PrivacyView / …) read the DEFAULT profile;
 // these seams manage the FULL profile set (list / get / set-default / save / delete). Every write goes
 // through persistSetLocked (validate → atomic write of the whole set → reload → re-derive the cached

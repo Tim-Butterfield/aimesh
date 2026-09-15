@@ -98,7 +98,7 @@ func TestSetAdapterPath_PreservesExistingAndUpdates(t *testing.T) {
 
 // SetAdapterPath must produce the SAME shared-file result as a direct config.SetSharedAdapterPath —
 // the manager owns validation + the legacy strip, but the actual path write is the shared-file seam,
-// with no divergent write logic. (Adapter binary paths no longer go through the config.yaml patch
+// with no divergent write logic. (Adapter binary paths do not go through the config.yaml patch
 // path; that engine primitive is covered by the engine's own tests.)
 func TestSetAdapterPath_MatchesDirectSharedWrite(t *testing.T) {
 	bin := execFile(t, "claude")

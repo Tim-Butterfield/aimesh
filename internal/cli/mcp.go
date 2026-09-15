@@ -7,13 +7,13 @@ package cli
 // processes, two tool lists to keep straight and two places to state posture; one entry means the
 // host launches `aimesh mcp` and gets the whole tool.
 //
-// Every flag here is LAUNCH-time, and that is not an oversight. The capability grants
-// (--allow-remediate) and the trusted-root ceiling CANNOT be per-call:
-// the caller on the other end of this wire is a model, and a model that could grant itself write
-// access, name the file the server appends to, or widen its own filesystem reach would make the
-// grant meaningless. Everything a caller may legitimately vary per run — the workspace, a narrowing
-// `roots`, the profile or panel, waitSeconds, maxParallel — is a tool parameter instead, so one
-// configured server serves many repos without the operator editing a config and restarting a host.
+// Every flag here is LAUNCH-time, and that is not an oversight. The grants (--adapter, --allow-writes,
+// --verify-cmd, --allow-protected-paths) and the --root ceiling CANNOT be per-call: the caller on the
+// other end of this wire is a model, and a model that could grant itself write access, choose who
+// receives content, or widen its own filesystem reach would make the grant meaningless. Everything a
+// caller may legitimately vary per run — the workspace, extra `roots`, the panel and its models,
+// waitSeconds, maxParallel — is a tool parameter instead, so one configured server serves many
+// workspaces without the operator editing a config and restarting a host.
 
 import (
 	"flag"
@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	explorecli "github.com/Tim-Butterfield/aimesh/internal/explore/surface/cli"
+	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 	"github.com/Tim-Butterfield/aimesh/internal/mcpflags"
 	"github.com/Tim-Butterfield/aimesh/internal/mcpserve"
 	reviewcli "github.com/Tim-Butterfield/aimesh/internal/review/surface/cli"
@@ -35,23 +36,21 @@ import (
 // domainFlags names which domain owns each domain-specific flag, so a flag whose domain is not being
 // served can be REFUSED rather than silently ignored.
 //
-// Silently ignoring is the failure that matters here: `--only explore --allow-remediate` reads to an
-// operator as "explore, and remediation is on". Accepting it quietly would leave them believing they
-// had granted a capability that the served domain does not even have.
+// Silently ignoring is the failure that matters here: `--only explore --allow-writes` reads to an
+// operator as "explore, and writes are on". Accepting it quietly would leave them believing they had
+// granted a capability that the served domain does not even have. `--adapter` is absent because both
+// domains use it.
 var domainFlags = map[string]mcpserve.Domain{
 	// NOTE: `framing` is deliberately ABSENT. It is transport posture for the whole process (see
 	// internal/mcpflags), so refusing it under `--only explore` told a user their flag "would do
 	// nothing" when framing is precisely what it would have done.
 	"root":                  mcpserve.DomainReview,
-	"no-default-root":       mcpserve.DomainReview,
 	"allow-broad-root":      mcpserve.DomainReview,
-	"allow-inferred-root":   mcpserve.DomainReview,
-	"allow-remediate":       mcpserve.DomainReview,
+	"allow-writes":          mcpserve.DomainReview,
 	"verify-cmd":            mcpserve.DomainReview,
 	"verify-timeout":        mcpserve.DomainReview,
 	"verify-baseline":       mcpserve.DomainReview,
 	"allow-protected-paths": mcpserve.DomainReview,
-	"roster":                mcpserve.DomainExplore,
 	"no-capture":            mcpserve.DomainExplore,
 }
 
@@ -63,8 +62,12 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 	// The shared flags are registered ONCE — which is the whole reason internal/mcpflags exists. Both
 	// domains declare them, and registering the same name twice on one flag set panics.
 	sh := mcpflags.Register(fs, reviewmcp.DefaultWaitSeconds)
-	buildReview := reviewcli.RegisterMCPFlags(fs, sh)
-	buildExplore := explorecli.RegisterMCPFlags(fs, sh)
+	// The launch grants are registered ONCE here, by the command that owns the flag set, and handed to
+	// each domain builder.
+	adapters := launchflags.RegisterAdapters(fs)
+	writes := launchflags.RegisterWrites(fs)
+	buildReview := reviewcli.RegisterMCPFlags(fs, sh, adapters, writes)
+	buildExplore := explorecli.RegisterMCPFlags(fs, sh, adapters)
 	if err := fs.Parse(args); err != nil {
 		return int(fault.Usage)
 	}
@@ -78,18 +81,12 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 		return code
 	}
 
-	// ONE UNCONFIGURED DOMAIN MUST NOT TAKE THE OTHER DOWN WITH IT.
+	// ONE DOMAIN THAT CANNOT START MUST NOT TAKE THE OTHER DOWN WITH IT.
 	//
-	// Each domain refuses at launch when it has no usable configuration — the deliberate
-	// fresh-install posture, and it stays. What was wrong was the COMPOSITION: `aimesh mcp` builds
-	// both, and a single `return code` from either one killed the process. On a fresh install that
-	// is every install, and `{"command": "aimesh", "args": ["mcp"]}` is the config docs/mcp.md hands
-	// people to paste — so the documented first run reported "server disconnected" with the reason
-	// on a stderr channel MCP hosts are permitted to discard.
-	//
-	// So: when both were asked for, a domain that cannot be built is SKIPPED and said out loud, and
-	// the other one serves. An explicit `--only <domain>` still fails hard, because there the user
-	// named the thing that cannot start and has nothing else to fall back to.
+	// A domain refuses to build only when its own launch arguments are invalid. When both were asked
+	// for, a domain that cannot be built is SKIPPED and said out loud, and the other one serves: a host
+	// that discards stderr would otherwise see only "server disconnected". An explicit `--only
+	// <domain>` still fails hard, because there the user named the thing that cannot start.
 	// Framing comes from the SHARED flag, so it holds whichever domain(s) actually build — an
 	// explore-only server can be pinned to content-length exactly as a review-only one can.
 	srv := &mcpserve.Server{Only: domain, Diagnostics: errw, Version: version.Get().Version, Framing: *sh.Framing}
@@ -102,7 +99,7 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 				return code
 			}
 			lastCode = code
-			fmt.Fprintln(errw, "aimesh mcp: serving EXPLORE only — the review domain is not configured (its refusal is above). Configure it with `aimesh review setup`, or pass --only explore to silence this.")
+			fmt.Fprintln(errw, "aimesh mcp: serving EXPLORE only — the review domain could not start (its refusal is above). Fix its launch arguments, or pass --only explore to silence this.")
 		} else {
 			// The composed server owns the transport; framing is already set from the shared flag
 			// above, so only the era posture travels up here.
@@ -116,7 +113,7 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 				return code
 			}
 			lastCode = code
-			fmt.Fprintln(errw, "aimesh mcp: serving REVIEW only — the explore domain is not configured (its refusal is above). Configure it with `aimesh explore setup`, or pass --only review to silence this.")
+			fmt.Fprintln(errw, "aimesh mcp: serving REVIEW only — the explore domain could not start (its refusal is above). Fix its launch arguments, or pass --only review to silence this.")
 		} else {
 			srv.Explore = s
 			if srv.Review == nil {
@@ -126,7 +123,7 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 	}
 	// Both failed: there is no server to run, so this is the same hard failure as before.
 	if srv.Review == nil && srv.Explore == nil {
-		fmt.Fprintln(errw, "aimesh mcp: neither domain is configured, so there are no tools to serve. Run `aimesh review setup` and/or `aimesh explore setup` first.")
+		fmt.Fprintln(errw, "aimesh mcp: neither domain could start, so there are no tools to serve. Fix the launch arguments named above.")
 		return lastCode
 	}
 	// Narrow what is ADVERTISED to what actually built, so the tool list never promises a domain

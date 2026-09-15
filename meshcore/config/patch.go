@@ -2,7 +2,7 @@
 // format detection + conversion, pure map-level patch application, and a "validate before
 // write / load" mechanism where the SCHEMA VALIDATOR IS INJECTED by the caller. It knows
 // nothing of any app's typed schema (profiles, lanes, roles, explorers, collators) — an app
-// supplies a ValidateBytes closure that enforces its own schema. This is the §4 ConfigAccess
+// supplies a ValidateBytes closure that enforces its own schema. This is the ConfigAccess
 // contract: meshcore applies validated patches, never learns the roster schema.
 package config
 

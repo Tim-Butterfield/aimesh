@@ -148,14 +148,13 @@ func textOf(res *sdk.CallToolResult) string {
 	return b.String()
 }
 
-// TestConformance_FromRunFromDiskIsWireVisibleToAnSDKClient. This change altered the refusal surface
-// of the ONE tool that writes: a `fromRun` naming a run the in-memory registry no longer holds used
-// to answer `unknown_run_id` and now resolves from the run's own directory and APPLIES. A host
-// decides whether to ask a human on the strength of `isError` and reads the outcome out of
-// `structuredContent`, so the change is asserted here through the OFFICIAL SDK client — the same
-// three things a real host reads, read by a client nobody in this repo wrote.
+// TestConformance_FromRunFromDiskIsWireVisibleToAnSDKClient. A `fromRun` naming a run the in-memory
+// registry does not hold resolves from the run's own directory and APPLIES. A host decides whether to
+// ask a human on the strength of `isError` and reads the outcome out of `structuredContent`, so this is
+// asserted through the OFFICIAL SDK client — the same three things a real host reads, read by a client
+// nobody in this repo wrote.
 //
-// Both halves are asserted, because a write tool that started succeeding is only half the claim: the
+// Both halves are asserted, because a write tool that succeeds is only half the claim: the
 // handle that must STILL be refused is refused over the same transport, as a domain refusal carrying
 // one reason code rather than as a protocol error.
 func TestConformance_FromRunFromDiskIsWireVisibleToAnSDKClient(t *testing.T) {
@@ -164,13 +163,12 @@ func TestConformance_FromRunFromDiskIsWireVisibleToAnSDKClient(t *testing.T) {
 
 	// A server that never saw that run — a restarted one, in every respect that matters here.
 	session := connect(t, newServer(t, f.mgr, func(s *mcp.Server) {
-		s.Roots, s.AllowRemediate = []string{f.ws}, true
-		s.PolicyCeiling = review.ModeApply
+		s.Ceiling, s.AllowWrites = []string{f.ws}, true
 	}))
 	ctx := context.Background()
 
 	res, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_remediate", Arguments: map[string]any{
-		"fromRun": sourceRun, "output": "apply", "allowWrite": true,
+		"fromRun": sourceRun, "workspace": f.ws, "output": "apply", "allowWrite": true,
 	}})
 	if err != nil {
 		t.Fatalf("a from-disk apply must not be a protocol error: %v", err)
@@ -189,7 +187,7 @@ func TestConformance_FromRunFromDiskIsWireVisibleToAnSDKClient(t *testing.T) {
 
 	// The fail-closed half, over the same transport.
 	bad, berr := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_remediate", Arguments: map[string]any{
-		"fromRun": t.TempDir(), "output": "apply", "allowWrite": true,
+		"fromRun": t.TempDir(), "workspace": f.ws, "output": "apply", "allowWrite": true,
 	}})
 	if berr != nil {
 		t.Fatalf("an unresolvable handle is a domain refusal, not a protocol error: %v", berr)
@@ -224,7 +222,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 	}
 	ws := workspaceFixture(t)
 	rv := &eventingReviewer{}
-	session := connect(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }), opts)
+	session := connect(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }), opts)
 	ctx := context.Background()
 
 	// --- lifecycle: a successful Connect already proves version negotiation + echo, since the SDK client
@@ -266,7 +264,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 	}
 
 	// --- tools/call: success
-	ok, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws}})
+	ok, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws, "panel": defaultPanel()}})
 	if err != nil {
 		t.Fatalf("tools/call review_report: %v", err)
 	}
@@ -299,7 +297,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 	mu.Lock()
 	progress, tokens = nil, nil
 	mu.Unlock()
-	if _, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws}}); err != nil {
+	if _, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws, "panel": defaultPanel()}}); err != nil {
 		t.Fatalf("review_report: %v", err)
 	}
 	// A negative has nothing to wait FOR, so this one settles instead: without a pause it would pass
@@ -313,7 +311,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 	}
 
 	// --- progress WITH a token: echoed verbatim and monotonic.
-	params := &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws}}
+	params := &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws, "panel": defaultPanel()}}
 	params.Meta = sdk.Meta{"progressToken": "tok-review"}
 	if _, err := session.CallTool(ctx, params); err != nil {
 		t.Fatalf("review_report with progress: %v", err)
@@ -352,7 +350,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 	mu.Lock()
 	logs = nil
 	mu.Unlock()
-	if _, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws}}); err != nil {
+	if _, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws, "panel": defaultPanel()}}); err != nil {
 		t.Fatalf("review_report: %v", err)
 	}
 	waitFor(t, "notifications/message after logging/setLevel", func() bool {
@@ -374,13 +372,13 @@ func TestConformance_CancellationStopsTheRunAndCommitsNothing(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block)
 	rv := &eventingReviewer{block: block}
-	session := connect(t, newServer(t, rv, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	session := connect(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		_, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_report",
-			Arguments: map[string]any{"workspace": ws, "idempotencyKey": "cancel-me", "waitSeconds": 60}})
+			Arguments: map[string]any{"workspace": ws, "panel": defaultPanel(), "idempotencyKey": "cancel-me", "waitSeconds": 60}})
 		done <- err
 	}()
 	// Give the call time to reach the server and start the run, then cancel it. The SDK turns a
@@ -401,7 +399,7 @@ func TestConformance_CancellationStopsTheRunAndCommitsNothing(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		res, err := session.CallTool(context.Background(), &sdk.CallToolParams{Name: "review_report",
-			Arguments: map[string]any{"workspace": ws, "idempotencyKey": "cancel-me", "waitSeconds": 1}})
+			Arguments: map[string]any{"workspace": ws, "panel": defaultPanel(), "idempotencyKey": "cancel-me", "waitSeconds": 1}})
 		if err != nil {
 			t.Fatalf("re-issue with the same key: %v", err)
 		}
@@ -426,7 +424,7 @@ func TestConformance_CancellationStopsTheRunAndCommitsNothing(t *testing.T) {
 // a cursor must be HONORED rather than ignored — including a foreign one, which is -32602 per spec.
 func TestConformance_ToolsListCursorIsHonored(t *testing.T) {
 	ws := workspaceFixture(t)
-	s := newServer(t, &eventingReviewer{}, func(sv *mcp.Server) { sv.Roots, sv.AllowRemediate = []string{ws}, true })
+	s := newServer(t, &eventingReviewer{}, func(sv *mcp.Server) { sv.Ceiling, sv.AllowWrites = []string{ws}, true })
 	s.Core().PageSize = 2 // exercise real paging
 	session := connect(t, s)
 	ctx := context.Background()
@@ -468,7 +466,7 @@ func TestConformance_ToolsListCursorIsHonored(t *testing.T) {
 // version of the same claim is in subprocess_test.go.
 func TestConformance_StdoutIsPureJSONRPCWhileRunning(t *testing.T) {
 	ws := workspaceFixture(t)
-	s := newServer(t, &eventingReviewer{}, func(sv *mcp.Server) { sv.Roots = []string{ws} })
+	s := newServer(t, &eventingReviewer{}, func(sv *mcp.Server) { sv.Ceiling = []string{ws} })
 	var out lockedBuffer
 	sr, cw := io.Pipe()
 	served := make(chan struct{})
@@ -491,7 +489,7 @@ func TestConformance_StdoutIsPureJSONRPCWhileRunning(t *testing.T) {
 	send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "logging/setLevel", "params": map[string]any{"level": "debug"}})
 	send(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": map[string]any{
 		"name": "review_report", "_meta": map[string]any{"progressToken": 9},
-		"arguments": map[string]any{"workspace": ws},
+		"arguments": map[string]any{"workspace": ws, "panel": defaultPanel()},
 	}})
 
 	deadline := time.Now().Add(15 * time.Second)

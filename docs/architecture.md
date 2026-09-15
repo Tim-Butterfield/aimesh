@@ -73,10 +73,10 @@ This boundary is what makes meshcore extractable: publishing it later as its own
 
 Both apps follow the same layered shape (an IDesign volatility-based decomposition): **Clients** (CLI / ACP / web surfaces) → **Managers** (the write/decision authority) → **Engines** (stateless algorithms) → meshcore (adapters, workspace, config, audit) → **Resources**. Capability is added by *re-composing* the same components — a new adapter behind the existing contract, a new surface, a new sequence — not by adding structural layers.
 
-- **reviewmesh** composes them into the review domain: an ordered **blind reviewer panel** (1..16 seats) plus the single-slot cross_check/verifier/author_remediator roles, a `Finding` schema, and a blind-panel → adjudicate → cross-check → verify → remediate pipeline. Reviewers are read-only; the host is the only writer. Its surfaces are the CLI, an ACP agent (`aimesh review acp`), an MCP server (`aimesh review mcp` — `review_report`, plus `review_remediate` only when the operator grants the `allowRemediate` capability). See [review.md](review.md).
+- **reviewmesh** composes them into the review domain: an ordered **blind reviewer panel** (1..16 seats) plus the single-slot cross_check/verifier/author_remediator roles, a `Finding` schema, and a blind-panel → adjudicate → cross-check → verify → remediate pipeline. Reviewers are read-only; the host is the only writer. Its surfaces are the CLI, an ACP agent (`aimesh review acp`), an MCP server (`aimesh review mcp` — `review_report` and `review_remediate`, which supplies the diff on every server and writes the workspace only when the operator launched with `--allow-writes`). See [review.md](review.md).
 - **exploremesh** composes them into the exploration domain: named **profiles** of ordered explorers + one collator, a byte-identical explorer payload, and an app-owned **mode** registry that selects what one run means — from the default `map` synthesis through `catalog`/`challenge`/`shortlist`/`ai-collab` (emergent space: the explorers author the entities, so any cross-explorer grouping goes through a recorded, append-only **canonicalization** ledger) to `compare`/`forecast` (fixed space: the user declares the universe up front, so no canonicalizer runs and the host computes the whole result). Counts, rankings and pooled numbers are computed by the **host**, never asserted by a model. Its surfaces are the CLI, an ACP agent (`aimesh explore acp`), an MCP server (`aimesh explore mcp` — job-shaped tools, an admission/spend governor, and a governance block that the declared output schema makes `required`) that deliberately cannot run an exploration. It has no workspace and no patch/apply, so it never edits a file the user owns; the two things it does write are its own run artifacts (under `$EXPLOREMESH_ARTIFACT_DIR` — by default the project-local `.aimesh/explore/runs/` when one exists, else the OS temp dir) and, only on an explicit `aimesh explore export --sqlite <path>`, the derived evidence database — whose destination is scope-resolved, denylisted, no-clobber-gated behind `--force` and published by an atomic rename. See [explore.md](explore.md).
 
-The three run-capable surfaces are held to a **surface-parity invariant**: every run-forming capability — mode and mode params, profile selection, ad-hoc panel composition by identifier, `count`, prior context, run capture — is expressible on all of them with identical fail-closed semantics. Only transport mechanics (flags vs `_meta` vs tool params; the MCP job shape) and deliberate, config-visible write-authority ceilings may differ. See [mcp.md](mcp.md#surface-parity).
+The three run-capable surfaces are held to a **surface-parity invariant**: every run-forming capability — mode and mode params, panel composition by identifier, prior context, run capture — is expressible on all of them with identical fail-closed semantics. Transport mechanics (flags vs `_meta` vs tool params; the MCP job shape) may differ, and so may the **configuration source**: the CLI reads saved configuration (profiles, the model catalog, adapter locations, write-authority ceilings), while the MCP and ACP servers read none and take their **launch configuration** — the adapters they may use, the `--allow-writes` grant, an optional `--root` ceiling — from the arguments in the host's server configuration, with each call composing its panel and declaring its scope. See [mcp.md](mcp.md).
 
 The one-way UI rule holds in both: **UI → app HTTP endpoints → app manager + meshcore**. The UI never calls meshcore directly, and meshcore contains zero UI.
 
@@ -122,15 +122,14 @@ script that branches on exploremesh's exit codes branches on reviewmesh's the sa
 One case exits 7 **without halting**, and it is stated here rather than discovered.
 
 A finding whose target resolves to a **protected path** (meshcore's non-overridable write denylist:
-`.env*`, `.git/`, agent client config, `~/.aimesh/**`) used to halt the entire run at authorization
-time. Nothing was written — that part was right — but every *other* accepted finding in a paid run was
-discarded with it, and a caller who did not already know which finding was protected had to burn a run
-to find out. So a protected-path target is now a **recorded refusal**: the finding is marked
-`applyable: false` with `applyRefusalReason: "protected_path"`, the remaining findings are applied
-normally, and the refusal is surfaced as a first-class fact.
+`.env*`, `.git/`, agent client config, `~/.aimesh/**`) is a **recorded refusal**: nothing is written
+to it, the finding is marked `applyable: false` with `applyRefusalReason: "protected_path"`, the
+remaining findings are applied normally, and the refusal is surfaced as a first-class fact. Halting
+the whole run instead would discard every *other* accepted finding in a paid run, and a caller who
+did not already know which finding was protected would have to burn a run to find out.
 
-Surfaced, because a *silent* skip letting a run report success is the failure the original halt existed
-to prevent. Every surface therefore reports the run as **not cleanly successful**:
+Surfaced, because a *silent* skip letting a run report success would be a write outcome nobody could
+see. Every surface therefore reports the run as **not cleanly successful**:
 
 | Surface | Coarse "not clean" signal | Structured detail |
 |---|---|---|

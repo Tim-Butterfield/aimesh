@@ -212,7 +212,7 @@ func ParseSelfReportJSON(stdout []byte) (SelfReport, bool) {
 // may be wrapped in ``` fences or light prose. It does NOT repair JSON and, like
 // schema.NormalizeReviewerOutput, REJECTS multiple top-level objects (a second object after the first
 // → nil) so a self-report response is held to the same single-object rule as a bare result. Returns nil
-// if no single balanced object is found. Kept dependency-free for the identity path (design review G2).
+// if no single balanced object is found. Kept dependency-free for the identity path.
 func firstJSONObject(raw []byte) []byte {
 	s := string(raw)
 	if i := strings.Index(s, "```"); i >= 0 { // strip a leading ```lang fence + a trailing ``` fence
@@ -312,7 +312,7 @@ func AgyModelString(sr SelfReport) string { return strings.TrimSpace(sr.Model + 
 // TRAILING "thinking" effort-suffix word (the synonym "High Thinking" ≡ "High" — only in the effort/
 // suffix position, never a "Thinking" token inside the model name), and strips all spacing/punctuation
 // (incl. parentheses). It canonicalizes ONLY surface form; it NEVER drops the version, provider family,
-// or the effort LEVEL, so a real different model or effort level stays a non-match (design review G4).
+// or the effort LEVEL, so a real different model or effort level stays a non-match.
 func agyCanon(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.TrimRight(s, " )")        // drop a trailing parenthetical/space so the suffix is exposed

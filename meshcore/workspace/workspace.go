@@ -848,8 +848,8 @@ func copyTree(srcRoot, dstRoot *os.Root) ([]Caveat, error) {
 		rel := filepath.FromSlash(p)
 		if IsExcluded(rel) {
 			// RECORDED HERE, because this is where a real run drops them. The collector runs on
-			// the COPY, where an excluded path no longer exists, so it has nothing left to notice
-			// — which is exactly why the omission used to be invisible end to end. Recording it
+			// the COPY, where an excluded path does not exist, so it has nothing left to notice
+			// and the omission would be invisible end to end. Recording it
 			// at the copy is also what keeps PreviewPayload honest: the dry run walks the LIVE
 			// tree and would otherwise report exclusions the run never mentioned.
 			//

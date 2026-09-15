@@ -1,6 +1,6 @@
 package pipeline
 
-// Tests for the FIXED-SPACE modes (design §3 Compare + Forecast rows). What they pin, above the individual
+// Tests for the FIXED-SPACE modes (compare and forecast). What they pin, above the individual
 // assertions, is that these two modes are governed WITHOUT the canonicalization machinery — one blind
 // round, no canonicalizer call, no confirmation round, no partition — and that every number in their
 // results is computed by the host before the collator is ever asked anything.
@@ -228,7 +228,7 @@ func TestCompare_FilterGateExcludesAnOptionBeforeDominance(t *testing.T) {
 	}
 }
 
-// TestCompare_NoWeightsMeansNoScalarRanking pins §3's rule: absent user weights there is NO scalar ranking,
+// TestCompare_NoWeightsMeansNoScalarRanking pins the rule: absent user weights there is NO scalar ranking,
 // and the result SAYS SO rather than leaving a reader to notice the absence.
 func TestCompare_NoWeightsMeansNoScalarRanking(t *testing.T) {
 	reg, plan := env(t, []fake.Scenario{fake.Valid, fake.Valid, fake.Valid}, fake.Valid)
@@ -396,7 +396,7 @@ func TestForecast_NonNumericEstimateIsRejected(t *testing.T) {
 }
 
 // TestForecast_AbstentionIsReflectedInTheDenominators pins the dual denominators over a DELIBERATE
-// abstention (§1): the panel denominator is untouched, the respondents denominator shrinks, and the two are
+// abstention: the panel denominator is untouched, the respondents denominator shrinks, and the two are
 // reported side by side so "2 of 3" can never be read as "2 of 2".
 func TestForecast_AbstentionIsReflectedInTheDenominators(t *testing.T) {
 	reg, plan := env(t, []fake.Scenario{fake.Valid, fake.Valid, fake.Abstain}, fake.Valid)
@@ -483,7 +483,7 @@ func TestFixedSpaceModes_RunOneBlindRoundWithNoCanonicalizerOrConfirmation(t *te
 	}
 }
 
-// TestFixedSpaceModes_CollatorNarrativeCarriesNoGovernanceValue pins §0 F-C for the fixed-space path: the
+// TestFixedSpaceModes_CollatorNarrativeCarriesNoGovernanceValue pins host-only governance values for the fixed-space path: the
 // collator's contribution lands in the quarantined narrative namespace, and the result is identical whether
 // or not the collator says anything usable — because every number predates the call.
 func TestFixedSpaceModes_CollatorNarrativeCarriesNoGovernanceValue(t *testing.T) {

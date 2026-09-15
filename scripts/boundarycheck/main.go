@@ -4,12 +4,10 @@
 //   - the two domains import each other;
 //   - a meshcore EXPORTED identifier contains an app-domain denylist term (strict tier).
 //
-// THE DOMAIN↔DOMAIN CHECK IS NOW THE ONLY THING ENFORCING THAT BOUNDARY. review and explore used to be
-// separate Go modules, so the module graph refused a cross-import on its own and this check was a second
-// opinion. Collapsing to one module (they are never released independently — a module is a unit of
-// distribution, not organization) removed that backstop deliberately, on the understanding that the
-// check below replaces it. Deleting or weakening it silently re-opens app↔app coupling with nothing else
-// watching.
+// THE DOMAIN↔DOMAIN CHECK IS THE ONLY THING ENFORCING THAT BOUNDARY. review and explore share one Go
+// module (they are never released independently — a module is a unit of distribution, not
+// organization), so the module graph does not refuse a cross-import; the check below does. Deleting or
+// weakening it silently opens app↔app coupling with nothing else watching.
 //
 // Denylist tiers: exported identifiers = FAIL (strict); comments in non-test files = WARN
 // (baseline, tighten later); test files = report-only (skipped). Denylist terms are matched

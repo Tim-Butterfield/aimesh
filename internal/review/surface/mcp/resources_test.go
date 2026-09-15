@@ -16,10 +16,9 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file closes the finding that made MCP `patch` mode a broken output mode: a doubly-gated governed
-// write completed, wrote a diff, returned a run-record-relative NAME plus a sha256 — and the caller had
-// no mechanism by which to obtain the artifact it had just paid for. `runDir` is deliberately dropped,
-// stdout is the JSON-RPC transport, and `resources/*` did not exist.
+// This file covers how an MCP caller collects a `patch` remediation's diff: the receipt names the
+// artifact and hashes it, `runDir` is deliberately withheld and stdout is the JSON-RPC transport, so
+// `resources/*` is the only route to the bytes the caller paid for.
 //
 // What is asserted here is the whole round trip: remediate → link → fetch → the same bytes. Plus the two
 // properties that must survive it — no host path on the wire, and nothing readable but this run's own
@@ -108,7 +107,7 @@ func remediateForPatch(t *testing.T, c *client, ws string) *response {
 	}
 	resp, _ := c.call(t, "tools/call", map[string]any{
 		"name":      "review_remediate",
-		"arguments": map[string]any{"fromRun": runID, "output": "patch", "allowWrite": true},
+		"arguments": map[string]any{"fromRun": runID, "workspace": ws, "output": "patch", "allowWrite": true},
 	})
 	return resp
 }
@@ -118,7 +117,7 @@ func remediateForPatch(t *testing.T, c *client, ws string) *response {
 func TestPatchIsRetrievableEndToEndOverTheProtocol(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := newPatchingReviewer(t)
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 
 	resp := remediateForPatch(t, c, ws)
 	structured, _ := resp.Result["structuredContent"].(map[string]any)
@@ -164,7 +163,7 @@ func TestPatchIsRetrievableEndToEndOverTheProtocol(t *testing.T) {
 func TestPatchResourceURICarriesNoHostPath(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := newPatchingReviewer(t)
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 
 	resp := remediateForPatch(t, c, ws)
 	structured, _ := resp.Result["structuredContent"].(map[string]any)
@@ -197,7 +196,7 @@ func TestPatchResourceURICarriesNoHostPath(t *testing.T) {
 func TestResourcesRefuseAnythingOutsideTheRunsOwnArtifacts(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := newPatchingReviewer(t)
-	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Roots, s.AllowRemediate = []string{ws}, true }))
+	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
 	resp := remediateForPatch(t, c, ws)
 	structured, _ := resp.Result["structuredContent"].(map[string]any)
 	receipt, _ := structured["receipt"].(map[string]any)
@@ -230,7 +229,7 @@ func TestResourcesRefuseAnythingOutsideTheRunsOwnArtifacts(t *testing.T) {
 // link to an artifact that does not exist.
 func TestResourcesListIsEmptyBeforeAnythingIsProduced(t *testing.T) {
 	ws := workspaceFixture(t)
-	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots = []string{ws} }))
+	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 	list, _ := c.call(t, "resources/list", map[string]any{})
 	if list.Error != nil {
 		t.Fatalf("resources/list: %+v", list.Error)
@@ -245,7 +244,7 @@ func TestResourcesListIsEmptyBeforeAnythingIsProduced(t *testing.T) {
 // capability will never call the method, so the declaration is load-bearing rather than decorative.
 func TestResourcesCapabilityIsDeclared(t *testing.T) {
 	ws := workspaceFixture(t)
-	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Roots = []string{ws} })
+	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} })
 	sr, cw := io.Pipe()
 	cr, sw := io.Pipe()
 	done := make(chan struct{})

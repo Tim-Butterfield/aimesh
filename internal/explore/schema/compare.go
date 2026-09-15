@@ -1,13 +1,13 @@
 package schema
 
-// This file holds the COMPARE mode's app-owned TASK INPUTS + round artifacts (design §3 Compare row).
+// This file holds the COMPARE mode's app-owned TASK INPUTS + round artifacts.
 //
 // Compare is a FIXED-SPACE mode, and that single fact decides its whole shape. The option set and the
 // criteria are DECLARED BY THE USER BEFORE ANY EXPLORER SPEAKS, so:
 //
 //   - there is nothing to canonicalize. Two explorers writing "Postgres" mean the same option because the
 //     host handed them both the string — matching them is arithmetic over a declared universe, not the
-//     entity-resolution JUDGMENT §0 F-B exists to keep visible. So Compare runs ONE blind round with no
+//     entity-resolution JUDGMENT the canonicalization record exists to keep visible. So Compare runs ONE blind round with no
 //     canonicalizer, no confirmation round and no partition revision. Bolting canonicalization onto it
 //     would not make it safer; it would manufacture a contestable judgment where none exists.
 //   - the CELL is the unit of evidence. Every explorer answers the same options×criteria grid, so a
@@ -31,7 +31,7 @@ import (
 	"strings"
 )
 
-// Direction is a criterion's SCALE ORIENTATION — which end of the value range is better (design §3). It is
+// Direction is a criterion's SCALE ORIENTATION — which end of the value range is better. It is
 // declared by the user with the criterion and consumed by the HOST's Pareto rule; no model ever decides it.
 type Direction string
 
@@ -71,9 +71,9 @@ const (
 	RoleFilter CriterionRole = "filter"
 )
 
-// CompareCriterion is ONE declared evaluation criterion (design §3 Compare row): its name, the direction
+// CompareCriterion is ONE declared evaluation criterion: its name, the direction
 // its scale runs in, its role, and an OPTIONAL user-supplied weight. The weight is the ONLY thing that can
-// license a scalar ranking — absent it the host emits the Pareto/trade-off view and says why (§4: a single
+// license a scalar ranking — absent it the host emits the Pareto/trade-off view and says why (a single
 // number over several criteria is a weighting, and a weighting nobody declared is one the host invented).
 type CompareCriterion struct {
 	Name      string        `json:"name"`
@@ -117,7 +117,7 @@ func (c CompareCriterion) Validate() error {
 	return nil
 }
 
-// ValidateCompareTask checks the DECLARED comparison space is usable BEFORE any spend (design §3): a
+// ValidateCompareTask checks the DECLARED comparison space is usable BEFORE any spend: a
 // non-empty option set with no duplicates, and a non-empty, individually valid criterion set with no
 // duplicates. It is the mode's ValidateTask, so every surface rejects a malformed declaration with one
 // message and a panel is never paid for a comparison that has nothing to compare.
@@ -208,7 +208,7 @@ func NormalizeVerdict(v any) FilterVerdict {
 // compareExplorerFields is the Compare mode's FIXED round-1 explorer schema. `evaluations` is a repeated
 // OBJECT because a cell is a record — flattening it into parallel arrays would make the option↔criterion↔
 // value pairing an inference. `optionsEvaluated` is the explorer's explicit COVERAGE declaration over the
-// DECLARED option universe: it is the field the fixed-space degraded register is keyed on (§1 — a real host
+// DECLARED option universe: it is the field the fixed-space degraded register is keyed on (a real host
 // register is honest here precisely because the key universe was given to the explorers).
 var compareExplorerFields = []Field{
 	{Name: "evaluations", Type: TypeObject, Required: true, Repeated: true},

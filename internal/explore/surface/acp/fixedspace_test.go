@@ -85,7 +85,7 @@ func TestServer_FixedSpaceTaskInputsViaMeta(t *testing.T) {
 	resp, err := client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "choose a store"}},
-		"_meta": map[string]any{"exploremesh": map[string]any{
+		"_meta": map[string]any{"exploremesh": map[string]any{"panel": testPanel(),
 			"criteria": []string{"operability"},
 			"mode":     "compare",
 			"options":  []string{"alpha", "beta"},
@@ -129,7 +129,7 @@ func TestServer_ForecastTargetViaMeta(t *testing.T) {
 	resp, err := client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "size the migration"}},
-		"_meta": map[string]any{"exploremesh": map[string]any{
+		"_meta": map[string]any{"exploremesh": map[string]any{"panel": testPanel(),
 			"criteria": []string{"trend"}, "mode": "forecast",
 			"target": "peak rps", "unit": "requests/second", "horizon": "12 months",
 			"conditioningEvent": "the capacity constraint lifts",
@@ -147,7 +147,7 @@ func TestServer_ForecastTargetViaMeta(t *testing.T) {
 
 // TestServer_UnderDeclaredFixedSpaceTaskIsInvalidParams pins the fail-closed posture: a fixed-space mode
 // whose space was not declared is invalid-params with a message naming what to supply — the same posture
-// absent criteria and an unknown profile already take, and the refusal happens before any dispatch.
+// absent criteria and a missing panel already take, and the refusal happens before any dispatch.
 func TestServer_UnderDeclaredFixedSpaceTaskIsInvalidParams(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -181,7 +181,7 @@ func TestServer_UnderDeclaredFixedSpaceTaskIsInvalidParams(t *testing.T) {
 			resp, err := client.Call("session/prompt", map[string]any{
 				"sessionId": sid,
 				"prompt":    []any{map[string]any{"type": "text", "text": "do the thing"}},
-				"_meta":     map[string]any{"exploremesh": tc.meta},
+				"_meta":     map[string]any{"exploremesh": withPanel(tc.meta)},
 			})
 			if err != nil {
 				t.Fatalf("session/prompt: %v", err)
@@ -214,7 +214,7 @@ func TestServer_FixedSpaceEchoIsHonest(t *testing.T) {
 	resp, err := client.Call("session/prompt", map[string]any{
 		"sessionId": sid,
 		"prompt":    []any{map[string]any{"type": "text", "text": "choose a store"}},
-		"_meta": map[string]any{"exploremesh": map[string]any{
+		"_meta": map[string]any{"exploremesh": map[string]any{"panel": testPanel(),
 			"criteria": []string{"operability"}, "mode": "compare", "options": []string{"alpha", "beta"},
 			"compareCriteria": []any{map[string]any{"name": "speed", "direction": "higher_is_better"}},
 		}},

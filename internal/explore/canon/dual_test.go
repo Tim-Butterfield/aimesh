@@ -84,7 +84,7 @@ func TestCanonicalizeDual_BothAgree_Merges(t *testing.T) {
 	}
 }
 
-// TestCanonicalizeDual_OneProposes_ContestedSplits is the headline invariant (§0 F-B): a merge only ONE
+// TestCanonicalizeDual_OneProposes_ContestedSplits is the headline invariant: a merge only ONE
 // canonicalizer proposes is CONTESTED and resolved by SPLITTING — the direction that can undercount
 // corroboration but can never manufacture it — and the refused merge is recorded with its proposer.
 func TestCanonicalizeDual_OneProposes_ContestedSplits(t *testing.T) {

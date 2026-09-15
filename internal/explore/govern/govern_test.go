@@ -48,8 +48,8 @@ func frozen(t *testing.T, n int) Panel {
 	return p
 }
 
-// TestNewBlindBaseline_RefusesAnythingButBlindRound1 is the ANTI-ECHO invariant as a property of the TYPE
-// (§0 F-A): a later round — or a round 1 recorded as non-blind — cannot become a counting baseline, so no call
+// TestNewBlindBaseline_RefusesAnythingButBlindRound1 is the ANTI-ECHO invariant as a property of the TYPE:
+// a later round — or a round 1 recorded as non-blind — cannot become a counting baseline, so no call
 // site can launder post-mediation echo into an independence count even deliberately.
 func TestNewBlindBaseline_RefusesAnythingButBlindRound1(t *testing.T) {
 	if _, err := NewBlindBaseline(blindRound1(2)); err != nil {
@@ -111,7 +111,7 @@ func TestCorroboration_CountsDistinctBlindSourcesOnly(t *testing.T) {
 			t.Errorf("a later-round ref must never be a contributing source: %v", claim.ContributingSourceIDs)
 		}
 	}
-	// Every claim is pinned to its inputs (§0 F-C / §9).
+	// Every claim is pinned to its inputs.
 	if claim.FormulationHash != "form-1" || claim.PartitionRevisionHash != "rev-1" ||
 		claim.RulesVersion != RulesVersion || claim.PolicyHash != pan.PolicyHash ||
 		claim.Query != CorroborationQuery || claim.BaselineRoundID != "round-1" {
@@ -126,7 +126,7 @@ func TestCorroboration_CountsDistinctBlindSourcesOnly(t *testing.T) {
 	}
 }
 
-// TestDenominators_DualWithAbstention pins §1's dual denominators: the PANEL denominator never moves, the
+// TestDenominators_DualWithAbstention pins the dual denominators: the PANEL denominator never moves, the
 // RESPONDENTS denominator excludes non-responses, and the distinct tallies stay separately visible.
 func TestDenominators_DualWithAbstention(t *testing.T) {
 	pan := frozen(t, 4).WithOutcome(Outcome{
@@ -165,7 +165,7 @@ func TestDenominators_DualWithAbstention(t *testing.T) {
 	}
 }
 
-// TestFreeze_HashesPolicyBeforeJudgments pins §4's freeze: membership is copied, the policy is hashed
+// TestFreeze_HashesPolicyBeforeJudgments pins the freeze: membership is copied, the policy is hashed
 // deterministically, and an invalid policy is refused. The hash is what proves the policy predates the counts.
 func TestFreeze_HashesPolicyBeforeJudgments(t *testing.T) {
 	members := []schema.ExplorerIdentity{ex("a"), ex("b")}
@@ -206,7 +206,7 @@ func TestFreeze_HashesPolicyBeforeJudgments(t *testing.T) {
 	}
 }
 
-// TestCorroboration_ContestedPartition_RangeAndWithheld pins §4's conditional result: over a contested mapping
+// TestCorroboration_ContestedPartition_RangeAndWithheld pins the conditional result: over a contested mapping
 // the count is computed for BOTH plausible partitions, emitted as a range, and the definitive label is WITHHELD.
 func TestCorroboration_ContestedPartition_RangeAndWithheld(t *testing.T) {
 	base, _ := NewBlindBaseline(blindRound1(3))
@@ -281,7 +281,7 @@ func TestCorroboration_ContestedPartition_RangeAndWithheld(t *testing.T) {
 	}
 }
 
-// TestClaim_HonestLabelingAndNarrativeSplit pins §0 F-B/F-C: a claim's rendering never asserts consensus, a
+// TestClaim_HonestLabelingAndNarrativeSplit pins honest labeling and the narrative split: a claim's rendering never asserts consensus, a
 // single-source count is labeled salience, and ALL model prose lives in the collatorNarrative namespace — a
 // Claim has no field that can carry model text.
 func TestClaim_HonestLabelingAndNarrativeSplit(t *testing.T) {

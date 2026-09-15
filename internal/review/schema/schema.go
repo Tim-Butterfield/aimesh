@@ -317,8 +317,8 @@ func NormalizeLocation(loc string) string {
 // Fingerprint is the deterministic identity of a finding for DEDUP: file|normalizedLocation, with
 // both title and KIND excluded.
 //
-// KIND USED TO BE PART OF THIS, on the reasoning that merging two findings of different kind at one
-// location would drop a genuinely distinct issue. Measured evidence overturned it. On a real
+// KIND IS NOT PART OF THIS, although merging two findings of different kind at one location might
+// seem to drop a genuinely distinct issue. Measured evidence decides it. On a real
 // two-vendor run (2026-08-11, run dir 20260811T130527-1690) a single seat reported the same defect
 // at a BYTE-IDENTICAL file and location twice, once as `inconsistency` and once as `fail` — so a
 // model relabelling its own finding defeated its own dedup. Across 20 findings the agreement count
