@@ -22,9 +22,8 @@ import (
 
 // --- harness -----------------------------------------------------------------------------
 
-// authorityProbe is a deterministic adapter that RECORDS the prompt it was given for every
-// role/phase and answers each one with schema-valid output. It is what lets these tests
-// assert what each judging phase actually SAW, rather than trusting that the wiring is right.
+// authorityProbe is a deterministic adapter that records the prompt it was given for every role and
+// phase and answers each with schema-valid output, so tests can assert what each judging phase saw.
 type authorityProbe struct {
 	mu      sync.Mutex
 	prompts map[string][]string // "<role>/<phase>" → prompts, in call order
@@ -48,8 +47,8 @@ func (p *authorityProbe) get(k string) []string {
 	return append([]string(nil), p.prompts[k]...)
 }
 
-// findingIDRe matches the `"id": "fN"` entries of the findings array the adjudication prompt
-// embeds (the OUTPUT CONTRACT's placeholder ids are upper-case F, so they never match).
+// findingIDRe matches the `"id": "fN"` entries of the findings array in the adjudication prompt. The
+// output contract's placeholder ids use an upper-case F, so they never match.
 var findingIDRe = regexp.MustCompile(`"id":\s*"(f\d+)"`)
 
 func (p *authorityProbe) Invoke(ctx context.Context, c model.Call) (model.Result, error) {
@@ -65,8 +64,8 @@ func (p *authorityProbe) Invoke(ctx context.Context, c model.Call) (model.Result
 	case string(review.PhaseAdjudicate):
 		var adjs []string
 		for _, m := range findingIDRe.FindAllStringSubmatch(c.Prompt, -1) {
-			// decisionState `applied` is deliberately ACTIONABLE: these tests need the
-			// write-path rule to be the thing that stops a write, not a non-apply state.
+			// decisionState `applied` is actionable, so in these tests the write-path rule, not a
+			// non-apply state, is what stops a write.
 			adjs = append(adjs, fmt.Sprintf(
 				`{"findingId":%q,"validity":"valid","decisionState":"applied","severityAdjusted":"high","reasoning":"probe"}`, m[1]))
 		}
@@ -111,7 +110,7 @@ func probeManager(t *testing.T, p *authorityProbe, roles ...string) *Manager {
 }
 
 // authorityWorkspace builds a workspace with a reviewable file and an in-repo design doc —
-// the common shape, where the authority document lives INSIDE the tree under review.
+// the common shape, where the authority document lives inside the tree under review.
 func authorityWorkspace(t *testing.T, spec string) (ws, specPath string) {
 	t.Helper()
 	ws = t.TempDir()
@@ -191,8 +190,8 @@ func TestAuthority_PathDocEmbedded_ManifestRecorded(t *testing.T) {
 	}
 }
 
-// A hash pin that no longer matches HALTS: the document changed between the run that took
-// the pin and this one, so nothing may be judged (or written) against it.
+// A hash pin that does not match halts: the document changed since the run that took the pin, so
+// nothing may be judged or written against it.
 func TestAuthority_HashMismatchHalts(t *testing.T) {
 	ws, specPath := authorityWorkspace(t, "the CURRENT spec\n")
 	p := newProbe("main.go")
@@ -215,9 +214,7 @@ func TestAuthority_HashMismatchHalts(t *testing.T) {
 	}
 }
 
-// NO SILENT TRUNCATION, end to end: a large authority document reaches the reviewer's prompt
-// WHOLE. There is no byte budget — how much a model can take is the model's business —
-// so the property left to defend is that nothing shortens the document on the way in.
+// A large authority document reaches the reviewer's prompt whole; nothing shortens it on the way in.
 func TestAuthority_ALargeDocumentReachesThePromptWhole(t *testing.T) {
 	const size = (64 << 10) + 512 // comfortably larger than a small document
 	big := strings.Repeat("Z", size)
@@ -250,8 +247,7 @@ func TestAuthority_ALargeDocumentReachesThePromptWhole(t *testing.T) {
 	}
 }
 
-// PROVENANCE SPLIT, half one: inline authority is refused outright in a write-capable mode,
-// before any run directory or model call exists.
+// Inline authority is refused in a write-capable mode, before any run directory or model call exists.
 func TestAuthority_InlineRefusedInApplyMode(t *testing.T) {
 	ws, _ := authorityWorkspace(t, "spec\n")
 	p := newProbe("main.go")
@@ -272,8 +268,8 @@ func TestAuthority_InlineRefusedInApplyMode(t *testing.T) {
 	}
 }
 
-// PROVENANCE SPLIT, half two: in report mode inline authority IS allowed, reaches the
-// analysis lanes, and is EXCLUDED from the host-adjudication prompt.
+// In report mode inline authority is allowed and reaches the analysis lanes, but is excluded from the
+// host-adjudication prompt.
 func TestAuthority_InlineNeverReachesAdjudicator(t *testing.T) {
 	ws, specPath := authorityWorkspace(t, "PATH-INTENT-MARKER\n")
 	p := newProbe("main.go")
@@ -307,9 +303,8 @@ func TestAuthority_InlineNeverReachesAdjudicator(t *testing.T) {
 	}
 }
 
-// THE WRITE-PATH RULE. A finding whose only support is authority text is REPORTED, marked
-// not-applyable with a machine reason, and never written — while an ordinary finding against
-// a workspace file in the same configuration still applies (so the test is non-vacuous).
+// A finding supported only by authority text is reported, marked not applyable with a machine reason,
+// and never written, while an ordinary finding in the same configuration still applies.
 func TestAuthority_AuthorityOnlyFinding_ReportedNeverApplied(t *testing.T) {
 	spec := "the intent\n"
 
@@ -362,7 +357,7 @@ func TestAuthority_AuthorityOnlyFinding_ReportedNeverApplied(t *testing.T) {
 }
 
 // A denylisted path is refused as authority through the shared scope resolver — naming it is
-// consent to READ a path, never permission to read a secret.
+// consent to read a path, never permission to read a secret.
 func TestAuthority_DenylistedPathRefused(t *testing.T) {
 	ws, _ := authorityWorkspace(t, "spec\n")
 	env := filepath.Join(ws, ".env")
@@ -397,9 +392,8 @@ func TestAuthority_DenylistedPathRefused(t *testing.T) {
 	}
 }
 
-// Authority must reach EVERY judging phase — reviewer, cross_check, verifier AND the host
-// adjudicator — with the same framing. If one phase judged without the intent, the phases
-// would not be judging the same thing.
+// Authority reaches every judging phase (reviewer, cross_check, verifier and the host adjudicator) with
+// the same framing, so all phases judge against the same intent.
 func TestAuthority_ReachesEveryJudgingPhase(t *testing.T) {
 	ws, specPath := authorityWorkspace(t, "ALL-PHASES-MARKER: the stated intent\n")
 	p := newProbe("main.go")

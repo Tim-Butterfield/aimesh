@@ -1,9 +1,7 @@
-// Package adjudicationprompt renders the host-adjudication prompt — a pure Engine
-// transformation (data in → string out). The Manager supplies the reviewer findings
-// and the bounded workspace snippets (read via WorkspaceAccess); this package never
-// does I/O. The prompt asks the host (author_remediator, semantic_adjudicate) to
-// INDEPENDENTLY judge each finding and emit one HostAdjudicationResult JSON object.
-// Enum lists are kept in lockstep with internal/schema's validators.
+// Package adjudicationprompt renders the host-adjudication prompt without I/O. Given the reviewer
+// findings and workspace files, the prompt asks the author_remediator to judge each finding
+// independently and return one HostAdjudicationResult JSON object whose enum values must match
+// package schema's validators.
 package adjudicationprompt
 
 import (
@@ -14,9 +12,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// FileSnippet is one WHOLE workspace file shown to the host. The collector does not clip a file
-// or stops early (see workspace.Snippet), so the host adjudicates against the same complete files
-// the reviewers saw.
+// FileSnippet is one workspace file shown to the host, carried in full like the reviewers' files.
 type FileSnippet struct {
 	Path    string
 	Content string
@@ -30,23 +26,19 @@ type Input struct {
 	Addressed   []string // prior dispositions as readable lines
 	Corrective  bool
 	ParserError string
-	// RequestSelfReportIdentity, set by the Manager ONLY for weak self-report-strategy host adapters,
-	// asks the model to wrap its answer with a self-reported model/effort stripped before the strict
-	// HostAdjudication schema is parsed. Absent/ignored → the bare object still parses (unknown identity).
+	// RequestSelfReportIdentity asks the model to wrap its answer with a self-reported model and
+	// effort, stripped before parsing. It is set only for self-report host adapters.
 	RequestSelfReportIdentity bool
-	// SelfCritique renders the DISMISSAL-VERIFICATION framing (methodology § Final self-critique): every
-	// finding below was already REJECTED as invalid; the host re-checks each against the files and only
-	// OVERTURNS a rejection (marks it valid) when the dismissal was clearly wrong. The PRIOR DISPOSITIONS
-	// block carries each finding's original rejection reason.
+	// SelfCritique renders the dismissal-verification framing: every finding was already rejected,
+	// and the host marks one valid only when its dismissal was clearly wrong. The prior-dispositions
+	// block carries each original rejection reason.
 	SelfCritique bool
-	// Authority is the pre-rendered AUTHORITY CONTEXT block (internal/engine/authority.Render)
-	// — the same quoted-evidence rendering the reviewer lanes receive, so every judging phase
-	// judges the SAME intent. Per the provenance split, the caller supplies the PATH-ONLY
-	// projection here: inline caller-supplied authority never reaches host adjudication.
+	// Authority is the pre-rendered authority block for path documents only (Set.AdjudicatorBlock);
+	// inline authority never reaches host adjudication.
 	Authority string
 }
 
-// selfReportWrapperInstruction is appended for self-report-strategy host adapters (see reviewprompt).
+// selfReportWrapperInstruction is appended for self-report host adapters (see reviewprompt).
 const selfReportWrapperInstruction = "IDENTITY WRAPPER (this tool cannot report its model any other way):\n" +
 	"- Instead of the bare object above, output ONE JSON object of this shape:\n" +
 	"  { \"reviewmeshIdentity\": { \"model\": \"<the model you are ACTUALLY running>\", \"effort\": \"<actual effort>\", \"source\": \"self_report\" },\n" +
@@ -103,8 +95,8 @@ func Render(in Input) string {
 	b.WriteString("- `validity` and `decisionState` and a non-empty `reasoning` are REQUIRED for every adjudication.\n")
 	b.WriteString("- Do NOT invent new findings. Adjudicate ONLY the findings listed below.\n\n")
 
-	// Validity rubric — the 7 invalid reasons (methodology § Validity judgment rubric). A finding is
-	// valid only when factually correct, in-scope, actionable, and not contradicted by conventions.
+	// Validity rubric: a finding is valid only when factually correct, in scope, actionable, and not
+	// contradicted by conventions.
 	b.WriteString("VALIDITY — mark a finding `invalid` if ANY of these apply (else `valid`):\n")
 	b.WriteString("- Unsupported: the shown files do not substantiate it, or it relies on a file not shown.\n")
 	b.WriteString("- Out-of-scope: it concerns code/files outside the review set, or an excluded/internal path.\n")
@@ -114,7 +106,7 @@ func Render(in Input) string {
 	b.WriteString("- Duplicate: already covered by another finding here or by a prior disposition.\n")
 	b.WriteString("- Conflicts with an explicit user instruction or a higher-confidence prior finding.\n\n")
 
-	// Severity baseline — auto-downgrade suggestion-tier findings; never raise (methodology § Severity baseline).
+	// Severity baseline: downgrade suggestion-tier findings, never raise.
 	b.WriteString("SEVERITY — set `severityAdjusted` per this baseline:\n")
 	b.WriteString("- ALWAYS suggestions — CANNOT be high/critical, cap at `low`: formatting/whitespace/markdown structure; wording or clarity preference; terminology harmonization that doesn't change meaning; speculative edge-case hardening for scenarios not evidenced; redundant checks for already-covered conditions; regex/command expansion for hypothetical names not in the evidence.\n")
 	b.WriteString("- May be high/critical ONLY when: it violates stated governance/contracts/invariants; breaks executability or determinism; or demonstrates a concrete failure scenario.\n")

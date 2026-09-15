@@ -10,23 +10,13 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the MODERN ERA on the wire: `server/discover`, the per-request `_meta` contract, the
-// era latch, and the two methods 2026-07-28 removed.
-//
-// AGAINST A TREE WITH NO MODERN ERA EVERY TEST HERE FAILS, and most of them fail to COMPILE rather than to
-// assert — `mcp.ProtocolVersion20260728`, `mcp.SupportedVersions`, `mcp.ProtocolLegacy` and
-// `mcp.CodeUnsupportedProtocolVersion` did not exist, because no modern version was accepted anywhere.
-// That is stated rather than dressed up as a behavioral failure: a test that cannot compile against
-// the old tree proves the API is new, and the tests that DO compile (the `server/discover` -32601, and
-// the era of a served request) are the ones that prove the behavior is new. Both are named below.
-//
-// The order the latch validates in is the thing under test, more than any single answer. Four
-// assertions carry it: a malformed opener does not latch, a `-32022` opener does not latch, two
-// concurrent modern openers both succeed, and two openers of different eras produce exactly one served
-// request and one teaching refusal.
+// This file tests the modern era on the wire: `server/discover`, the per-request `_meta` contract, the
+// era latch, and the methods 2026-07-28 removed. The latch tests assert that a malformed or `-32022`
+// opener does not latch, that concurrent modern openers both succeed, and that openers of different eras
+// yield one served request and one teaching refusal.
 
-// modernMeta builds a well-formed per-request protocol context. `basic/index` marks
-// `protocolVersion` and `clientCapabilities` REQUIRED and `clientInfo` not.
+// modernMeta builds a well-formed per-request protocol context; `protocolVersion` and
+// `clientCapabilities` are required and `clientInfo` is not.
 func modernMeta(version string) map[string]any {
 	return map[string]any{
 		mcp.MetaKeyProtocolVersion:    version,
@@ -79,8 +69,7 @@ func TestDiscover_AdvertisesEveryImplementedRevisionModernFirst(t *testing.T) {
 		t.Errorf("supportedVersions[0] = %q, want the modern revision first", got[0])
 	}
 
-	// The modern result envelope rides on the probe: it is a DiscoverResult, which exists only in the
-	// modern revision. server/utilities/caching names `server/discover` first in the cacheable set.
+	// The probe's DiscoverResult carries the modern result envelope, including caching hints.
 	if resp.Result["resultType"] != "complete" {
 		t.Errorf("resultType = %v, want \"complete\"", resp.Result["resultType"])
 	}
@@ -108,15 +97,11 @@ func TestDiscover_AdvertisesNoLoggingCapability(t *testing.T) {
 	if caps == nil || caps["tools"] == nil {
 		t.Fatalf("capabilities = %v, want tools declared", resp.Result["capabilities"])
 	}
-	// `server/utilities/logging` is a DEPRECATION NOTICE in 2026-07-28 and its named stdio migration —
-	// stderr — is what this server already does, so it emits no notifications/message on this era.
-	// Declaring the capability that gates them would be a false advertisement, and it would invite
-	// exactly the confusion the decision exists to prevent: a host reads the capability, sets a log
-	// level, and gets silence.
+	// No log notifications are sent on the modern era, so the logging capability is not declared.
 	if _, declared := caps["logging"]; declared {
 		t.Error("server/discover declared the `logging` capability while emitting no notifications/message on this era — `server/utilities/logging`: \"Servers that emit log message notifications MUST declare the `logging` capability\", and the honest reading of a server that emits none is not to declare it")
 	}
-	// And legacy `initialize` is UNTOUCHED: it still declares logging exactly as it always did.
+	// Legacy `initialize` still declares logging.
 	init := handshake(t, c)
 	icaps, _ := init.Result["capabilities"].(map[string]any)
 	if icaps["logging"] == nil {
@@ -163,9 +148,8 @@ func TestDiscover_RequiresTheProtocolMetaAndNamesWhatWeSupport(t *testing.T) {
 		if resp.Error.Code != mcp.CodeInvalidParams {
 			t.Errorf("%s: code = %d, want %d", tc.name, resp.Error.Code, mcp.CodeInvalidParams)
 		}
-		// -32602 is NOT a recognized modern error, so per `basic/transports/stdio` a dual-era client
-		// treats us as legacy and falls back to `initialize` — which this process serves. Nobody is
-		// stranded by the rejection.
+		// -32602 is not a recognized modern error, so a dual-era client falls back to `initialize`,
+		// which this process serves.
 		if resp.Error.Data == nil || resp.Error.Data["supported"] == nil {
 			t.Errorf("%s: the refusal named no supported versions", tc.name)
 		}
@@ -180,10 +164,8 @@ func TestDiscover_UnsupportedVersionIsTheRecognizedModernError(t *testing.T) {
 		if resp.Error == nil {
 			t.Fatalf("%s: the probe was served", version)
 		}
-		// `basic/versioning`: "If the server does not implement the requested version … it MUST
-		// respond with an UnsupportedProtocolVersionError listing the versions it does support."
-		// A LEGACY version here is refused too: it is in our advertised list because a client may
-		// choose it, but it is reached through `initialize`, not through `_meta`.
+		// An unimplemented version gets UnsupportedProtocolVersionError with the supported list. A
+		// legacy version is refused here too, since it is reached through `initialize`, not `_meta`.
 		if resp.Error.Code != mcp.CodeUnsupportedProtocolVersion {
 			t.Errorf("%s: code = %d, want %d (UnsupportedProtocolVersion)", version, resp.Error.Code, mcp.CodeUnsupportedProtocolVersion)
 		}
@@ -197,19 +179,17 @@ func TestDiscover_UnsupportedVersionIsTheRecognizedModernError(t *testing.T) {
 	}
 }
 
-// --- the era latch: what does NOT latch ---
+// --- the era latch: what does not latch ---
 
 func TestLatch_AMalformedModernOpenerDoesNotLatch(t *testing.T) {
 	c, stop := serve(t, newServer())
 	defer stop()
-	// Modern-SHAPED (it carries the protocol-version key, so the era gate reads it) but malformed: no
-	// clientCapabilities. It reaches -32602 and must go no further.
+	// Modern-shaped (it carries the protocol-version key) but malformed: no clientCapabilities.
 	resp, _ := c.call(t, "tools/list", map[string]any{"_meta": map[string]any{mcp.MetaKeyProtocolVersion: modern}})
 	if resp.Error == nil || resp.Error.Code != mcp.CodeInvalidParams {
 		t.Fatalf("malformed modern opener: %+v, want -32602", resp.Error)
 	}
-	// THE ASSERTION: a following `initialize` still succeeds. If the malformed request had latched, a
-	// well-formed legacy client would be stranded by a frame it never sent.
+	// A following `initialize` still succeeds.
 	if got, _ := c.call(t, "initialize", map[string]any{"protocolVersion": mcp.LatestProtocolVersion}); got.Error != nil {
 		t.Fatalf("initialize after a malformed modern opener: %+v — one malformed request permanently selected the process's era", got.Error)
 	}
@@ -222,9 +202,7 @@ func TestLatch_AnUnsupportedVersionOpenerDoesNotLatch(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != mcp.CodeUnsupportedProtocolVersion {
 		t.Fatalf("unsupported-version opener: %+v, want -32022", resp.Error)
 	}
-	// THE ASSERTION: the client retries from our list and IS SERVED. That is the flow
-	// `basic/transports/stdio` describes — "Use one of the versions in its advertised `supported`
-	// list" — and it only works if `-32022` left the era unlatched.
+	// The client's retry from the advertised list is served, which requires -32022 not to latch.
 	retry, _ := c.call(t, "tools/list", modernParams(modern, nil))
 	if retry.Error != nil {
 		t.Fatalf("the retry from our own advertised list was refused: %+v", retry.Error)
@@ -253,9 +231,8 @@ func TestLatch_AnUnknownOrRemovedMethodDoesNotLatch(t *testing.T) {
 func TestLatch_UnparseableParamsDoNotLatch(t *testing.T) {
 	c, stop := serve(t, newServer())
 	defer stop()
-	// A well-formed modern envelope naming a tool this server does not have. It is refused at
-	// admission step 5, before the latch: a request whose params we are about to refuse is not a
-	// request we are serving, so it has no business choosing the era.
+	// A well-formed modern envelope naming a tool this server does not have is refused at admission
+	// step 5, before the latch.
 	resp, _ := c.call(t, "tools/call", modernParams(modern, map[string]any{"name": "not_a_tool"}))
 	if resp.Error == nil || resp.Error.Code != mcp.CodeInvalidParams {
 		t.Fatalf("unknown tool under modern: %+v, want -32602", resp.Error)
@@ -279,7 +256,7 @@ func TestLatch_ARefusedInitializeDoesNotLatchEither(t *testing.T) {
 	}
 }
 
-// --- the era latch: what DOES latch, and what happens after ---
+// --- the era latch: what does latch, and what happens after ---
 
 func TestLatch_AValidModernRequestLatchesModernAndInitializeThenNamesOurVersions(t *testing.T) {
 	c, stop := serve(t, newServer())
@@ -298,9 +275,7 @@ func TestLatch_AValidModernRequestLatchesModernAndInitializeThenNamesOurVersions
 	if got.Error == nil {
 		t.Fatal("initialize succeeded on a modern-latched process")
 	}
-	// `basic/versioning`: a modern server "SHOULD name the protocol versions it supports in any error
-	// it returns to an `initialize` request, on any transport: legacy clients have no fall-forward
-	// mechanism, and this message may be the only diagnostic they can surface to users."
+	// The refusal names the supported versions, since a legacy client may surface only this message.
 	sup, _ := got.Error.Data["supported"].([]any)
 	if len(sup) != len(mcp.SupportedVersions) {
 		t.Errorf("the initialize refusal named no supported versions: %+v", got.Error)
@@ -327,15 +302,15 @@ func TestLatch_AModernRequestAfterALegacyHandshakeIsTaughtRatherThanServed(t *te
 	if !strings.Contains(resp.Error.Message, "legacy") {
 		t.Errorf("the refusal does not say what happened: %q", resp.Error.Message)
 	}
-	// And the legacy session is UNHARMED by the refusal.
+	// The legacy session still works after the refusal.
 	if ok, _ := c.call(t, "tools/call", map[string]any{"name": "echo", "arguments": map[string]any{"text": "hi"}}); ok.Error != nil {
 		t.Fatalf("the legacy session broke after refusing a modern request: %+v", ok.Error)
 	}
 }
 
 func TestLatch_TwoPipelinedModernOpenersBothSucceed(t *testing.T) {
-	// A host that pipelines its first two calls is the COMMON case, not an exotic one. Both frames are
-	// in the server's input before it has answered either, so both are openers.
+	// A host that pipelines its first two calls is common. Both frames arrive before either is
+	// answered, so both are openers.
 	got := pipelined(t, newServer(),
 		frame(101, "tools/list", modernParams(modern, nil)),
 		frame(102, "tools/call", modernParams(modern, map[string]any{"name": "echo", "arguments": map[string]any{"text": "hi"}})),
@@ -357,7 +332,7 @@ func TestLatch_TwoPipelinedModernOpenersBothSucceed(t *testing.T) {
 func TestLatch_TwoPipelinedOpenersOfDifferentErasYieldOneServedAndOneRefusal(t *testing.T) {
 	// Run it repeatedly: the claim is "on every run", and a latch that was merely usually right would
 	// pass a single-shot test.
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		got := pipelined(t, newServer(),
 			frame(201, "initialize", map[string]any{"protocolVersion": mcp.LatestProtocolVersion}),
 			frame(202, "tools/list", modernParams(modern, nil)),
@@ -390,13 +365,9 @@ func frame(id int, method string, params map[string]any) wireFrame {
 	return wireFrame{id: id, method: method, params: params}
 }
 
-// pipelined feeds a server EVERY frame before it has answered any of them, and returns the responses
-// by id.
-//
-// It uses a pre-filled reader rather than the shared io.Pipe harness deliberately, and the reason is
-// the test's whole point: over an unbuffered pipe the client's SECOND write blocks until the server's
-// FIRST response has been read, so "two requests in flight at once" cannot be expressed there at all.
-// A test that cannot express the condition it names is not a test of it.
+// pipelined feeds a server every frame before it has answered any, and returns the responses by id. It
+// uses a pre-filled reader because over an unbuffered pipe the second write would block until the first
+// response was read.
 func pipelined(t *testing.T, s *mcp.Server, frames ...wireFrame) map[int]*response {
 	t.Helper()
 	var in strings.Builder
@@ -416,7 +387,7 @@ func pipelined(t *testing.T, s *mcp.Server, frames ...wireFrame) map[int]*respon
 		t.Fatalf("serve: %v", err)
 	}
 	got := map[int]*response{}
-	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+	for line := range strings.SplitSeq(strings.TrimSpace(out.String()), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -434,7 +405,7 @@ func pipelined(t *testing.T, s *mcp.Server, frames ...wireFrame) map[int]*respon
 	return got
 }
 
-// --- --protocol legacy: a GENUINELY legacy server ---
+// --- --protocol legacy: a fully legacy server ---
 
 func TestProtocolLegacy_DiscoverIsAnUnknownMethodAndTheProcessStillServesInitialize(t *testing.T) {
 	c, stop := serve(t, newServer(func(s *mcp.Server) { s.Protocol = mcp.ProtocolLegacy }))
@@ -447,13 +418,11 @@ func TestProtocolLegacy_DiscoverIsAnUnknownMethodAndTheProcessStillServesInitial
 	if resp.Error.Code != mcp.CodeMethodNotFound {
 		t.Errorf("code = %d, want %d — the same answer any other unimplemented method gets", resp.Error.Code, mcp.CodeMethodNotFound)
 	}
-	// NO `result` MEMBER IN ANY FORM. An error response carrying a result is not a JSON-RPC error, and
-	// a client that reads `result` first would see a DiscoverResult-shaped thing that is not one.
+	// An error response carries no `result` member.
 	if resp.Result != nil {
 		t.Errorf("the legacy-mode refusal carried a result member: %v", resp.Result)
 	}
-	// The specification's own "Dual-era client / Legacy server" row: "Works. stdio: the probe returns
-	// a non-modern error or times out, and the client falls back to `initialize`." So it must.
+	// A dual-era client then falls back to `initialize`, which must work.
 	handshake(t, c)
 	ok, _ := c.call(t, "tools/call", map[string]any{"name": "echo", "arguments": map[string]any{"text": "hi"}})
 	if ok.Error != nil {
@@ -467,9 +436,8 @@ func TestProtocolLegacy_DiscoverIsAnUnknownMethodAndTheProcessStillServesInitial
 func TestProtocolLegacy_NoModernMetaIsParsedAtAll(t *testing.T) {
 	c, stop := serve(t, newServer(func(s *mcp.Server) { s.Protocol = mcp.ProtocolLegacy }))
 	defer stop()
-	// A modern-shaped `tools/list` before any handshake is answered as the LEGACY server would answer
-	// it — pre-initialization — not with -32602, -32022 or a modern result. The `_meta` is simply not
-	// read for modern fields here.
+	// A modern-shaped `tools/list` before any handshake gets the legacy pre-initialization refusal,
+	// not -32602, -32022 or a modern result.
 	resp, _ := c.call(t, "tools/list", modernParams(modern, nil))
 	if resp.Error == nil {
 		t.Fatal("a legacy-pinned process served a modern-shaped request")
@@ -478,8 +446,7 @@ func TestProtocolLegacy_NoModernMetaIsParsedAtAll(t *testing.T) {
 		t.Errorf("code = %d, want %d (the legacy pre-initialization refusal)", resp.Error.Code, mcp.CodeNotInitialized)
 	}
 	handshake(t, c)
-	// And once the session is live it is served as a LEGACY request: the `_meta` it carried names a
-	// revision this mode does not implement, and it changes nothing.
+	// Once the session is live it is served as a legacy request; its modern `_meta` changes nothing.
 	ok, _ := c.call(t, "tools/list", modernParams(modern, nil))
 	if ok.Error != nil {
 		t.Fatalf("tools/list: %+v", ok.Error)
@@ -523,11 +490,7 @@ func TestModern_EmitsNoLogNotificationsUnderEveryLogLevelShape(t *testing.T) {
 			resp, notes := c.call(t, "tools/call", map[string]any{
 				"name": "chatty", "arguments": map[string]any{}, "_meta": meta,
 			})
-			// A malformed level does NOT refuse the request. The `-32602`-for-an-unrecognized-level
-			// SHOULD on `server/utilities/logging` attaches to servers implementing per-request
-			// logging; this one does not, so the field is ACCEPTED AND IGNORED. Rejecting a whole
-			// tools/call over the spelling of a field we were never going to act on would be hostile,
-			// and would make the non-adoption more visible than adoption.
+			// A malformed level does not refuse the request; the field is accepted and ignored.
 			if resp.Error != nil {
 				t.Fatalf("the request was refused over a log level this server never reads: %+v", resp.Error)
 			}
@@ -541,9 +504,7 @@ func TestModern_EmitsNoLogNotificationsUnderEveryLogLevelShape(t *testing.T) {
 }
 
 func TestModern_ProgressStillFlows(t *testing.T) {
-	// Declining protocol logging costs nothing a modern client needs, and this is the check on that
-	// claim rather than the assertion of it: `notifications/progress` is NOT deprecated and is the
-	// live channel for in-flight visibility.
+	// `notifications/progress` still flows on the modern era.
 	s := newServer(func(s *mcp.Server) {
 		s.Register(mcp.Tool{Name: "worker", InputSchema: json.RawMessage(`{"type":"object"}`)},
 			func(ctx context.Context, c *mcp.Call) (*mcp.CallToolResult, error) {
@@ -602,10 +563,7 @@ func TestModern_ServerToClientRequestsAreRefusedBeforeAnythingIsWritten(t *testi
 	case <-time.After(5 * time.Second):
 		t.Fatal("the handler never reached its outgoing request")
 	}
-	// `basic/transports/stdio` §Receiving Messages: "The server MUST NOT write JSON-RPC *requests* to
-	// `stdout`." The refusal is at the write function, not at the one caller, because an
-	// outgoing-request mechanism that is safe only because today's single caller checks first is not
-	// safe — it is lucky.
+	// The modern stdio transport forbids server-to-client requests; Server.Request itself refuses.
 	if reqErr == nil {
 		t.Fatal("Server.Request succeeded on the modern era")
 	}

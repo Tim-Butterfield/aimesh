@@ -1,23 +1,15 @@
 package schema
 
-// This file holds the round-1 prompt of the shipped AI-COLLAB composition. The owner's ai-collab decomposes into three exploremesh stages — each agent SHORTLISTS its
-// own findings blind, then the agents CHALLENGE each other's findings through the collator-mediated
-// cross-review, then one terminal collation — so the composition needs exactly one artifact of its own: a
-// blind round-1 prompt that asks for the agent's OWN findings about the task rather than an attack on a
-// supplied artifact.
-//
-// Everything else it uses is the Challenge mode's, unchanged: the same findings schema, the same closed
-// severity enum, the same round-2 CROSS-REVIEW contract, the same canonicalize+confirm governance and the
-// same severity-triaged terminal register. That reuse is the point — if the composition needed its own copy
-// of any of those, the claim that ai-collab decomposes into exploremesh's modes would be false.
+// This file holds the round-1 prompt of the ai-collab mode. Each agent lists its own findings blind, the
+// agents then challenge each other's findings in a mediated cross-review, and one collation ends the run.
+// Everything after round 1 reuses the challenge mode: its findings schema, severity values, cross-review
+// round, canonicalization and confirmation, and terminal register.
 
 import "strings"
 
-// CollabFindingsPrompt is the deterministic, app-owned round-1 prompt of the ai-collab composition: shortlist
-// YOUR OWN findings, blind. It renders the SAME findings schema Challenge round-1 uses (including the exact
-// nested field names and the closed severity enum), because the two rounds produce the same kind of artifact
-// — the only difference is where the material comes from: a supplied artifact there, the agent's own analysis
-// here.
+// CollabFindingsPrompt builds the ai-collab round-1 prompt, which asks each agent for its own findings
+// about the task. It renders the challenge findings schema, including the nested fields and severity
+// values.
 func CollabFindingsPrompt(raw RawTask) string {
 	var b strings.Builder
 	b.WriteString("You are one agent of a collaborating panel. Working ALONE — you are not being shown any ")
@@ -40,8 +32,7 @@ func CollabFindingsPrompt(raw RawTask) string {
 		b.WriteString(raw.PriorContext)
 		b.WriteString("\n")
 	}
-	// An ai-collab run MAY still carry an artifact (the panel is often collaborating ON something); it is
-	// simply not required, which is the one task-level difference from Challenge.
+	// Unlike challenge, ai-collab accepts an artifact without requiring one.
 	if art := RenderArtifactUnderReview(raw.Artifact); art != "" {
 		b.WriteString("\n")
 		b.WriteString(art)

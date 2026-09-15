@@ -5,22 +5,15 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// shapeOf computes what this run WOULD do, for a dry run to disclose. See review.RunShape for
-// what the numbers mean and why the call count is a range.
-//
-// It runs at the dry-run stop, so it is handed the ALREADY-RESOLVED plan and panel: it invents
-// nothing and re-resolves nothing. It has two remaining failures, and both are things a dry run
-// exists to hand over for free: the panel round budget (a budget below the seat count would
-// silently drop a seat) and a containment refusal while previewing the payload — the same refusal
-// the real run's collector would hit, at the same rules, before rather than after the copy.
+// shapeOf computes what this run would do, for a dry run to disclose (see review.RunShape). It uses
+// the already-resolved plan and panel. It fails on the same round-budget error and containment refusal
+// the real run would hit.
 func (m *Manager) shapeOf(req Request, plan review.RunPlan, seats []review.LaneResolution, maxOuter int) (review.RunShape, error) {
 	maxInner := 1
 	if m.Cfg.Review.MaxInnerIterations != nil && *m.Cfg.Review.MaxInnerIterations > 0 {
 		maxInner = *m.Cfg.Review.MaxInnerIterations
 	}
-	// The same budget the real cycle builds, computed here for the same reason the real cycle
-	// builds it before spending: a panel that cannot give every seat one round is a config error,
-	// and a dry run exists to hand those over for free.
+	// The same round budget the real cycle builds.
 	budget, berr := newPanelBudget(m.Cfg.Review.MaxPanelRounds, maxInner, len(seats))
 	if berr != nil {
 		return review.RunShape{}, berr
@@ -38,9 +31,8 @@ func (m *Manager) shapeOf(req Request, plan review.RunPlan, seats []review.LaneR
 			SeatID: s.SeatID, Adapter: s.Adapter, Model: s.Model, Effort: s.Effort,
 		})
 	}
-	// RoleReviewer is the panel's FIRST SEAT kept in the role map as a compatibility alias (see
-	// review.RunPlan), so listing it here would report seat 1 twice — once as a seat and once as
-	// a lane — and invite a reader to add it into the total.
+	// RoleReviewer aliases the panel's first seat in the role map (see review.RunPlan), so skip it to
+	// avoid listing seat 1 twice.
 	for _, role := range sortedRoles(plan.Lanes) {
 		if role == review.RoleReviewer {
 			continue
@@ -54,10 +46,8 @@ func (m *Manager) shapeOf(req Request, plan review.RunPlan, seats []review.LaneR
 	shape.SkippedSteps = review.SkippedOptionalSteps(plan)
 	shape.Egress = shapeEgress(shape.Seats, shape.Lanes)
 
-	// A host adjudication costs a call only when there is a host lane AND it is not the
-	// deterministic `fake` adapter — adjudicate() returns the in-process judgement without
-	// invoking anything in either other case, so counting one there would overstate every
-	// default-configured run.
+	// Host adjudication costs a call only with a non-fake host lane; otherwise adjudicate decides in
+	// process.
 	hostLane, hasHost := plan.Lanes[review.RoleAuthorRemediator]
 	hostCall := 0
 	if hasHost && hostLane.Adapter != "fake" {
@@ -67,12 +57,11 @@ func (m *Manager) shapeOf(req Request, plan review.RunPlan, seats []review.LaneR
 	_, hasCC := plan.Lanes[review.RoleCrossCheck]
 	_, hasVerifier := plan.Lanes[review.RoleVerifier]
 
-	// FLOOR: every seat runs exactly one round, every informed lane runs once, and every
-	// adjudication is deterministic because nothing contested was found. This is a run that
-	// converges immediately, which is the ordinary run.
+	// Floor: every seat runs one round, every informed lane runs once, and no adjudication call is
+	// needed.
 	cycleMin := len(seats)
-	// CEILING: the panel spends its whole shared round budget, and each informed lane's output is
-	// contested enough to cost its own host adjudication.
+	// Ceiling: the panel spends its whole round budget and every lane's output needs a host
+	// adjudication.
 	cycleMax := budget.total + hostCall
 	if req.IncludeHostReview && hasHost {
 		cycleMin++
@@ -94,9 +83,8 @@ func (m *Manager) shapeOf(req Request, plan review.RunPlan, seats []review.LaneR
 		shape.OuterCycles = maxOuter
 	}
 
-	// Run-level calls, outside the cycle: the final self-critique re-checks the host's own
-	// dismissals (nothing dismissed → no call), and the ACP validation probe fires only for the
-	// validator that asks for it.
+	// Run-level calls outside the cycle: the final self-critique (only when something was dismissed),
+	// or the host readiness check when ValidateHostAdjudication is set.
 	runLevelMax := 0
 	if req.ValidateHostAdjudication {
 		if plan.Mode == review.ModeReport {
@@ -106,22 +94,15 @@ func (m *Manager) shapeOf(req Request, plan review.RunPlan, seats []review.LaneR
 		runLevelMax += hostCall
 	}
 
-	// READINESS PROBES are model calls, so they are priced in BOTH bounds: unlike everything else in
-	// the ceiling they are not contingent on anything, so a run that enables them cannot make fewer.
-	// A dry run counts them and performs none of them (they spend; see Request.VerifyReadiness).
+	// Readiness probes always run when enabled, so they count in both bounds.
 	if req.VerifyReadiness {
 		shape.ReadinessProbes = len(probeTargets(plan, seats))
 	}
 	shape.MinModelCalls = cycleMin + shape.ReadinessProbes
 	shape.MaxModelCalls = shape.OuterCycles*cycleMax + runLevelMax + shape.ReadinessProbes
 
-	// WHAT THOSE CALLS WOULD CARRY. Priced separately from the calls themselves because it varies
-	// independently of them: the same panel over a monorepo and over one package costs the same
-	// and shows the reviewers something entirely different. The preview walks the LIVE tree under
-	// the collector's own rules and copies nothing — see workspace.PreviewPayload.
-	// The waiver is passed through so the preview describes the tree the RUN would be allowed to
-	// copy. Without it a dry run of a protected root would refuse while the real run succeeded —
-	// the exact inequivalence PreviewPayload exists to rule out.
+	// Preview the payload the calls would carry by walking the live tree under the collector's rules,
+	// copying nothing. The protected-path waiver is passed so the preview matches the real run.
 	pay, perr := workspace.PreviewPayloadWith(req.Workspace, req.AllowProtectedPaths)
 	if perr != nil {
 		return review.RunShape{}, collectFault(perr)
@@ -130,9 +111,8 @@ func (m *Manager) shapeOf(req Request, plan review.RunPlan, seats []review.LaneR
 	return shape, nil
 }
 
-// payloadOf projects the workspace preview into the shape's disclosure. Paths are sorted here (the
-// preview keeps walk order), so the artifact is deterministic and two dry runs of the same
-// workspace are comparable.
+// payloadOf projects the workspace preview into the shape, with paths sorted so dry runs are
+// comparable.
 func payloadOf(p workspace.Payload) review.ShapePayload {
 	out := review.ShapePayload{Files: len(p.Files), Bytes: p.TotalBytes, Paths: []string{}}
 	for _, f := range p.SortedFiles() {

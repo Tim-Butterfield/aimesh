@@ -8,12 +8,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// SELECTIVE APPLY on the MCP surface. `review_report`'s findings carry a host-computed `fingerprint`,
-// because a caller cannot select on values it was never told and `review_remediate` takes a selector
-// rather than handing one out. An EMPTY `select` is a -32602, never "apply everything".
+// review_report's findings carry a host-computed fingerprint for review_remediate's select. An empty
+// select is invalid params, never "apply everything".
 
-// TestSelect_MCP_FingerprintIsDisclosedByReviewReport is the DISCLOSURE CHANNEL. Without it selective apply on
-// MCP is an assertion rather than a mechanism.
+// review_report discloses each finding's fingerprint.
 func TestSelect_MCP_FingerprintIsDisclosedByReviewReport(t *testing.T) {
 	ws := workspaceFixture(t)
 	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
@@ -34,7 +32,7 @@ func TestSelect_MCP_FingerprintIsDisclosedByReviewReport(t *testing.T) {
 	if !strings.HasPrefix(fp, "sha1:") {
 		t.Errorf("fingerprint = %q, want the host-computed identity", fp)
 	}
-	// THE SECURITY PROPERTY, visible right here: the disclosed selector is not the finding's id.
+	// The disclosed selector is not the finding's id.
 	if fp == row["id"] {
 		t.Fatal("the disclosed selector IS the model-authored id — a model that could relabel findings could then steer which one a follow-up selection names")
 	}
@@ -43,9 +41,7 @@ func TestSelect_MCP_FingerprintIsDisclosedByReviewReport(t *testing.T) {
 	}
 }
 
-// TestSelect_MCP_ThreadsToTheWritePathUnexamined. This surface resolves no fingerprint and knows
-// which findings a selector names only from what comes back — which is what keeps `select` one rule
-// rather than three.
+// The selection reaches the write path unexamined; this surface resolves no fingerprint.
 func TestSelect_MCP_ThreadsToTheWritePathUnexamined(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
@@ -67,9 +63,7 @@ func TestSelect_MCP_ThreadsToTheWritePathUnexamined(t *testing.T) {
 	}
 }
 
-// TestSelect_MCP_EmptySelectIsRefusedBeforeAnySpend. An empty narrowing filter names ZERO findings.
-// Accepting it would let a call read as a normal apply while writing nothing — and it is refused
-// BEFORE admission, so no run is started for a call that can only write nothing.
+// An empty select is refused before admission, so no run starts for a call that would write nothing.
 func TestSelect_MCP_EmptySelectIsRefusedBeforeAnySpend(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
@@ -97,9 +91,7 @@ func TestSelect_MCP_EmptySelectIsRefusedBeforeAnySpend(t *testing.T) {
 	}
 }
 
-// TestSelect_MCP_UnmatchedSelectorsRideTheResultAndLeadTheText. A caller that mistyped a selector got
-// a SMALLER write than it asked for, and the difference between "that finding was applied" and "that
-// selector matched nothing" is exactly what it cannot afford to guess.
+// A mistyped selector yields a smaller write, so unmatched selectors are reported and lead the text.
 func TestSelect_MCP_UnmatchedSelectorsRideTheResultAndLeadTheText(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{selection: &review.ApplySelection{
@@ -130,16 +122,14 @@ func TestSelect_MCP_UnmatchedSelectorsRideTheResultAndLeadTheText(t *testing.T) 
 	if len(un) != 1 || un[0] != "sha1:typo" {
 		t.Fatalf("selection.unmatched = %v, want the selector that named nothing", sel["unmatched"])
 	}
-	// The text channel LEADS with it, for the same reason a refusal does: some clients show the
-	// model nothing else.
-	first := strings.SplitN(res.text, "\n", 2)[0]
+	// The text leads with it, since some clients show the model nothing else.
+	first, _, _ := strings.Cut(res.text, "\n")
 	if !strings.Contains(first, "SELECTOR MATCHED NOTHING") || !strings.Contains(first, "sha1:typo") {
 		t.Errorf("the first content line must name the unmatched selector, got %q\nfull text:\n%s", first, res.text)
 	}
 }
 
-// TestSelect_MCP_AbsentSelectionCarriesNoSelectionKey is the blast radius: an ordinary remediation is
-// byte-for-byte what it was.
+// A remediation without select carries no selection key.
 func TestSelect_MCP_AbsentSelectionCarriesNoSelectionKey(t *testing.T) {
 	ws := workspaceFixture(t)
 	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))
@@ -157,9 +147,7 @@ func TestSelect_MCP_AbsentSelectionCarriesNoSelectionKey(t *testing.T) {
 	}
 }
 
-// TestSelect_MCP_IsDeclaredInTheInputSchema. The schema is what a calling model reads, and a
-// parameter that works but is undeclared is a parameter no model will use. It must also name the
-// rule that keeps the capability safe.
+// select is declared in the input schema, including the rule that an empty list is refused.
 func TestSelect_MCP_IsDeclaredInTheInputSchema(t *testing.T) {
 	ws := workspaceFixture(t)
 	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))

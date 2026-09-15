@@ -11,10 +11,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// Each turn is judged against the paths THAT turn declares — its workspace (explicitly or as the
-// session cwd) and its `_meta.reviewmesh.roots` — inside the operator's optional --root ceiling.
+// Each turn is judged against the paths it declares (its workspace or session cwd, and its
+// _meta.reviewmesh.roots) inside the operator's optional --root ceiling.
 
-// serveCeiling runs a server launched with `ceiling` as its --root set (nil: no ceiling).
+// serveCeiling runs a server launched with ceiling as its --root set; nil means no ceiling.
 func serveCeiling(t *testing.T, mgr Reviewer, ceiling []string, lines ...string) []map[string]any {
 	t.Helper()
 	return runServer(t, &Server{Manager: mgr, Ceiling: ceiling, Adapters: harnessAdapters(t),
@@ -40,7 +40,7 @@ func reasonOf(t *testing.T, resp map[string]any) any {
 	return data["reasonCode"]
 }
 
-// With no ceiling, a turn reviews the absolute workspace it declares — no setup is needed.
+// With no ceiling, a turn reviews the absolute workspace it declares.
 func TestScope_NoCeilingReviewsTheDeclaredWorkspace(t *testing.T) {
 	dir := projectDir(t, "any-project")
 	rec := &recordReviewer{}
@@ -84,7 +84,7 @@ func TestScope_RefusesReadableDirOutsideCeiling(t *testing.T) {
 	}
 }
 
-// A path INSIDE the ceiling runs normally, unrewritten.
+// A path inside the ceiling runs normally.
 func TestScope_AllowsPathInsideCeiling(t *testing.T) {
 	ceiling := projectDir(t, "allowed")
 	sub := filepath.Join(ceiling, "service")
@@ -120,8 +120,7 @@ func TestScope_RefusesProtectedDirInsideCeiling(t *testing.T) {
 	}
 }
 
-// A session cwd the host supplies is a declared path like any other: outside the ceiling, the prompt
-// that falls back to it is refused.
+// A session cwd is a declared path: outside the ceiling, a prompt that uses it is refused.
 func TestScope_SessionCwdOutsideCeilingIsRefused(t *testing.T) {
 	ceiling := projectDir(t, "allowed")
 	other := projectDir(t, "elsewhere")
@@ -137,7 +136,7 @@ func TestScope_SessionCwdOutsideCeilingIsRefused(t *testing.T) {
 	}
 }
 
-// An explicit `session/prompt.workspace` overrides the session cwd, and is judged the same way.
+// An explicit session/prompt workspace overrides the session cwd and is judged the same way.
 func TestScope_ExplicitWorkspaceCannotEscapeCeiling(t *testing.T) {
 	ceiling := projectDir(t, "allowed")
 	other := projectDir(t, "elsewhere")
@@ -160,8 +159,8 @@ func TestScope_TraversalOutOfCeilingRefused(t *testing.T) {
 	if err := os.MkdirAll(sibling, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Built by concatenation, not filepath.Join: Join would clean the `..` away textually, and the
-	// point is that the scope check — not the caller — is what defeats it.
+	// Concatenate rather than filepath.Join, which would clean away the `..` the scope check must
+	// defeat.
 	escape := ceiling + string(filepath.Separator) + ".." + string(filepath.Separator) + "sibling"
 	rec := &recordReviewer{}
 	r := serveCeiling(t, rec, []string{ceiling},
@@ -174,8 +173,8 @@ func TestScope_TraversalOutOfCeilingRefused(t *testing.T) {
 	}
 }
 
-// `inlineWorkspace` content is materialized into a directory THIS process owns, so it consumes no
-// scope and works under any ceiling.
+// inlineWorkspace content is materialized into a directory this process owns, so it needs no
+// declared scope and works under any ceiling.
 func TestScope_InlineWorkspaceNeedsNoDeclaredPath(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveCeiling(t, rec, []string{projectDir(t, "allowed")},
@@ -193,9 +192,8 @@ func TestScope_InlineWorkspaceNeedsNoDeclaredPath(t *testing.T) {
 	}
 }
 
-// An authority document path is read through the turn's scope: a readable document outside every
-// path the turn declared is refused pre-spend, so a peer cannot exfiltrate a file by calling it
-// "the spec".
+// An authority path is read through the turn's scope, so a document outside every declared path is
+// refused before any spend.
 func TestScope_AuthorityPathOutsideTheTurnScopeRefused(t *testing.T) {
 	ws := projectDir(t, "project")
 	other := projectDir(t, "elsewhere")
@@ -241,7 +239,7 @@ func TestScope_ExtraRootsAdmitAnAuthorityDocument(t *testing.T) {
 	}
 }
 
-// An extra root outside the ceiling is refused like a workspace would be.
+// An extra root outside the ceiling is refused like a workspace.
 func TestScope_ExtraRootOutsideCeilingRefused(t *testing.T) {
 	ceiling := projectDir(t, "allowed")
 	other := projectDir(t, "elsewhere")
@@ -256,9 +254,8 @@ func TestScope_ExtraRootOutsideCeilingRefused(t *testing.T) {
 	}
 }
 
-// TestHaltError_CarriesMachineCodes pins machine-readable halts on the agent surface: a halt's
-// protocol error carries the stable reason code and the classified signal, so a host reacts to codes
-// rather than parsing the message.
+// A halt's protocol error carries the reason code and classified signal, so a host need not parse
+// the message.
 func TestHaltError_CarriesMachineCodes(t *testing.T) {
 	halt := review.HaltClass("A")
 	f := fault.New(fault.Adapter, "adapter \"x-cli\" exited 1").
@@ -290,8 +287,7 @@ func TestHaltError_CarriesMachineCodes(t *testing.T) {
 	}
 }
 
-// jsonQuote renders a path as a JSON string literal (paths may contain characters a raw
-// concatenation would break).
+// jsonQuote renders s as a JSON string literal.
 func jsonQuote(s string) string {
 	b, err := json.Marshal(s)
 	if err != nil {

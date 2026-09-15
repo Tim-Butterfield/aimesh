@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,11 +25,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// These tests drive the server over a hand-rolled JSON-RPC client. The TRANSPORT's conformance
-// against the official MCP SDK client is proved once, in the exploremesh MCP surface, over the same
-// meshcore/mcp server this package registers its tools on — this package adds no transport code, so
-// what is under test here is the reviewmesh CONTRACT: which tools exist, what they refuse, and what
-// a write is allowed to do.
+// These tests drive the server with a hand-rolled JSON-RPC client and cover the reviewmesh contract:
+// which tools exist, what they refuse, and what a write may do. conformance_test.go covers the
+// protocol with the official SDK client.
 
 // --- a minimal JSON-RPC driver ---
 
@@ -97,7 +96,7 @@ func (c *client) call(t *testing.T, method string, params any) (*response, []not
 
 func (c *client) notify(method string, params any) { c.send(method, nil, params) }
 
-// toolCall makes a tools/call and returns the CallToolResult fields a test cares about.
+// toolResult holds the CallToolResult fields a test inspects.
 type toolResult struct {
 	text       string
 	structured map[string]any
@@ -105,24 +104,21 @@ type toolResult struct {
 	rpc        *rpcErr
 }
 
-// defaultPanel is the panel a review_report call carries when a test does not name one: every run
-// composes its own seats, and most tests are about something other than the panel. A test about the
-// panel itself names one — or sends "panel": nil to omit it.
+// defaultPanel returns the panel a review_report call carries when a test names none. Send
+// "panel": nil to omit it.
 func defaultPanel() map[string]any {
 	seat := map[string]any{"adapter": "fake", "model": "m1"}
 	return map[string]any{"reviewers": []any{seat}, "author_remediator": seat}
 }
 
-// withPanel returns args with the default panel added to a review_report call that names none. A
-// "panel" key set to nil is removed instead, so a test can send a call with no panel at all.
+// withPanel adds the default panel to a review_report call that names none, and removes a "panel" key
+// set to nil.
 func withPanel(name string, args map[string]any) map[string]any {
 	if name != "review_report" {
 		return args
 	}
 	out := make(map[string]any, len(args)+1)
-	for k, v := range args {
-		out[k] = v
-	}
+	maps.Copy(out, args)
 	if p, has := out["panel"]; !has {
 		out["panel"] = defaultPanel()
 	} else if p == nil {
@@ -156,9 +152,8 @@ func (c *client) tool(t *testing.T, name string, args map[string]any) toolResult
 
 // --- fixtures ---
 
-// fakeReviewer is a deterministic in-process Manager stand-in. It spawns nothing: it records what
-// it was asked to do and returns a canned outcome, so a test can assert what the SURFACE decided
-// without a model anywhere in the picture.
+// fakeReviewer is a deterministic in-process manager stand-in. It spawns nothing: it records requests
+// and returns canned outcomes, so tests assert what the surface decided.
 type fakeReviewer struct {
 	mu            sync.Mutex
 	runs          int
@@ -167,15 +162,11 @@ type fakeReviewer struct {
 	lastRemediate run.RemediateRequest
 	runErr        error
 	outcome       *review.RunOutcome
-	// refusals, when set, makes Remediate return a PARTIAL REFUSAL: the write committed and
-	// these findings were declined for a protected path. It exists so the surface contract
-	// (isError, outcome, counts, refusals, run_status) can be tested without staging a real
-	// denylisted file — the write path's own behavior is proven in the review package.
+	// refusals, when set, makes Remediate return a partial refusal: the write committed and these findings
+	// were refused for a protected path. The write path's own behavior is tested in the run package.
 	refusals []review.ApplyRefusal
-	// selection, when set, is the ApplySelection Remediate reports back — what a narrowing
-	// `select` matched and what it did not. It is canned for the same reason `refusals` is: the
-	// surface contract (the `selection` payload key, the leading text line) is what is under test
-	// here, and the write path's own matching is proven in the review package.
+	// selection, when set, is the ApplySelection Remediate reports. Selector matching is tested in the run
+	// package.
 	selection *review.ApplySelection
 }
 
@@ -225,10 +216,8 @@ func (f *fakeReviewer) Remediate(ctx context.Context, r run.RemediateRequest) (r
 	}, nil
 }
 
-// ReadDecisionSetByID is the ON-DISK half of the from-run seam. This fake holds no run records, so it
-// answers as an agent that produced no such run — which is the right answer for every test in this
-// file, all of which drive the REGISTRY path. The on-disk path is proven against a real run.Manager in
-// fromrun_test.go, because a fake that "resolved" a handle would be asserting the very thing under test.
+// ReadDecisionSetByID answers as an agent that produced no such run: tests here use the registry path,
+// and the on-disk path is tested in fromrun_test.go against a real run.Manager.
 func (f *fakeReviewer) ReadDecisionSetByID(workspace, runID string) (*run.StoredDecisionSet, string, error) {
 	return nil, "", fault.New(fault.Usage, "no decision set: "+runID).WithReason(run.ReasonRunHandleUnknown)
 }
@@ -239,9 +228,8 @@ func (f *fakeReviewer) counts() (int, int) {
 	return f.runs, f.remediations
 }
 
-// cannedOutcome is one accepted finding with full panel provenance, one identity caveat, one
-// withheld file and one authority document — every governance-bearing field populated, so a test
-// can prove they all reach the wire.
+// cannedOutcome returns one accepted finding with full panel provenance, one identity caveat, one
+// withheld file and one authority document, so tests can check each reaches the wire.
 func cannedOutcome(mode review.Mode) review.RunOutcome {
 	return review.RunOutcome{
 		Status: "single_pass", Mode: mode, RunID: "20260101T000000-0001", RunDir: "/private/tmp/artifacts/20260101T000000-0001",
@@ -274,8 +262,8 @@ func cannedOutcome(mode review.Mode) review.RunOutcome {
 	}
 }
 
-// fakeConfig supplies the list/doctor projections. The readiness detail deliberately CONTAINS an
-// absolute path, because meshcore composes those details and this surface's job is to strip them.
+// fakeConfig supplies the list and doctor projections. Its readiness detail contains an absolute path,
+// which the surface must strip.
 type fakeConfig struct{}
 
 func (fakeConfig) Adapters() []mcp.AdapterFact {
@@ -291,7 +279,7 @@ func (fakeConfig) Readiness() (bool, []mcp.ReadinessCheck) {
 	}
 }
 
-// workspaceFixture is a real directory inside the trusted root, so base hashes are computable.
+// workspaceFixture returns a real directory, so base hashes are computable.
 func workspaceFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -305,8 +293,7 @@ func newServer(t *testing.T, rv mcp.Reviewer, tune ...func(*mcp.Server)) *mcp.Se
 	t.Helper()
 	t.Setenv("AIMESH_HOME", t.TempDir())
 	t.Setenv(fake.EnvVar, "1")
-	// claude-code is launched at an executable this test owns, so its availability is real and needs no
-	// CLI on the machine running the tests.
+	// Launch claude-code at an executable the test owns, so availability needs no installed CLI.
 	cc := filepath.Join(t.TempDir(), "claude")
 	if runtime.GOOS == "windows" {
 		cc += ".exe"
@@ -367,10 +354,10 @@ func toolNames(t *testing.T, c *client) map[string]map[string]any {
 	return out
 }
 
-// --- DOUBLE OPT-IN, gate one: the tool is not even advertised ---
+// --- write gating ---
 
-// review_remediate is listed on every server: output=patch supplies the diff without any write grant.
-// What --allow-writes changes is whether output=apply is accepted (see withheld_test.go).
+// review_remediate is listed on every server; --allow-writes decides whether output=apply is accepted
+// (see withheld_test.go).
 func TestToolsList_RemediateIsAlwaysAdvertised(t *testing.T) {
 	c := serve(t, newServer(t, &fakeReviewer{}))
 	tools := toolNames(t, c)
@@ -408,17 +395,15 @@ func TestToolsList_AnnotationsMarkTheWriteToolDestructive(t *testing.T) {
 	if idem, _ := repAnn["idempotentHint"].(bool); idem {
 		t.Fatal("review_report must not claim idempotency")
 	}
-	// Only the genuinely read-only tools claim to be read-only.
+	// Only read-only tools claim to be read-only.
 	for _, name := range []string{"review_list", "review_doctor", "review_run_status", "review_run_result"} {
 		a, _ := tools[name]["annotations"].(map[string]any)
 		if ro, _ := a["readOnlyHint"].(bool); !ro {
 			t.Fatalf("%s must carry readOnlyHint", name)
 		}
 	}
-	// And no tool's TITLE may contradict its hints. A title is what a human reads in a permission
-	// prompt, so "Review (read-only)" beside readOnlyHint:false was the exact mis-signal these
-	// annotations exist to prevent — a host asks the human on the strength of the hint, and the
-	// human decides on the strength of the title.
+	// A title must not contradict its hints: the host asks on the strength of the hint, and the user decides
+	// on the strength of the title.
 	for name, tool := range tools {
 		a, _ := tool["annotations"].(map[string]any)
 		title, _ := a["title"].(string)
@@ -430,7 +415,7 @@ func TestToolsList_AnnotationsMarkTheWriteToolDestructive(t *testing.T) {
 			t.Fatalf("%s: title %q claims to write or spend while readOnlyHint is true", name, title)
 		}
 	}
-	// Cross-referencing descriptions: each write-relevant tool names its sibling.
+	// Each write-related tool description names its sibling.
 	if !strings.Contains(tools["review_report"]["description"].(string), "review_remediate") {
 		t.Fatal("review_report's description must point at review_remediate")
 	}
@@ -439,7 +424,7 @@ func TestToolsList_AnnotationsMarkTheWriteToolDestructive(t *testing.T) {
 	}
 }
 
-// --- DOUBLE OPT-IN, gate two: allowWrite, checked before any spend ---
+// --- allowWrite, checked before any spend ---
 
 func TestRemediate_AllowWriteOmittedIsATeachingErrorBeforeAnySpend(t *testing.T) {
 	ws := workspaceFixture(t)
@@ -455,7 +440,7 @@ func TestRemediate_AllowWriteOmittedIsATeachingErrorBeforeAnySpend(t *testing.T)
 	if runs, rem := rv.counts(); runs != 0 || rem != 0 {
 		t.Fatalf("nothing may be spent: runs=%d remediations=%d", runs, rem)
 	}
-	// allowWrite: false is refused exactly like an absent one.
+	// allowWrite: false is refused like an absent one.
 	res = c.tool(t, "review_remediate", map[string]any{"fromRun": "run-x", "output": "apply", "allowWrite": false})
 	if res.rpc == nil {
 		t.Fatal("allowWrite: false must be refused")
@@ -482,14 +467,14 @@ func TestReport_PathOutsideTheCeilingIsRefusedPreSpend(t *testing.T) {
 	if runs, _ := rv.counts(); runs != 0 {
 		t.Fatalf("the refusal must happen BEFORE any spend, got %d run(s)", runs)
 	}
-	// The refusal must not enumerate the operator's roots back to the caller.
+	// The refusal must not echo the operator's roots.
 	if strings.Contains(res.text, ws) {
 		t.Fatalf("the refusal leaked a trusted-root path: %q", res.text)
 	}
 }
 
-// With no --root ceiling, a call reviews the absolute workspace it declares — no setup is needed — and
-// a broad path such as the filesystem root is still refused.
+// With no --root ceiling, a call reviews the absolute workspace it declares, and the filesystem root is
+// still refused.
 func TestReport_WithNoCeilingACallReviewsTheWorkspaceItDeclares(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
@@ -520,12 +505,12 @@ func TestReport_GovernanceFieldsAreAlwaysInStructuredContent(t *testing.T) {
 			t.Fatalf("structuredContent is missing the required field %q", key)
 		}
 	}
-	// The run directory is a HOST PATH and must never ride the wire.
+	// The run directory is a host path and must never be sent.
 	blob, _ := json.Marshal(res.structured)
 	if strings.Contains(string(blob), "/private/tmp/artifacts") {
 		t.Fatalf("the payload leaked the run directory: %s", blob)
 	}
-	// Per-seat provenance, host-computed.
+	// Per-seat provenance.
 	findings, _ := res.structured["findings"].([]any)
 	if len(findings) != 1 {
 		t.Fatalf("findings = %v", findings)
@@ -541,7 +526,7 @@ func TestReport_GovernanceFieldsAreAlwaysInStructuredContent(t *testing.T) {
 	if ds, _ := f0["dissentingSeats"].([]any); len(ds) != 1 {
 		t.Fatalf("dissentingSeats = %v, want 1", f0["dissentingSeats"])
 	}
-	// Requested-vs-executed roster, both halves.
+	// Requested and executed roster.
 	panel, _ := res.structured["panel"].(map[string]any)
 	if exec, _ := panel["executed"].([]any); len(exec) != 3 {
 		t.Fatalf("executed roster = %v, want 3 seats", panel["executed"])
@@ -549,7 +534,7 @@ func TestReport_GovernanceFieldsAreAlwaysInStructuredContent(t *testing.T) {
 	if req, _ := panel["requested"].(map[string]any); req["source"] != "adhoc" {
 		t.Fatalf("requested = %v, want source adhoc", panel["requested"])
 	}
-	// The identity caveat and the withheld file reach the caller, and the text channel says so.
+	// The identity caveat and withheld file reach the caller, in structured and text form.
 	if cav, _ := res.structured["identityCaveats"].([]any); len(cav) != 1 {
 		t.Fatalf("identityCaveats = %v, want 1", res.structured["identityCaveats"])
 	}
@@ -628,7 +613,7 @@ func TestRemediate_FromRunAppliesTheAcceptedSetAndIsIdempotent(t *testing.T) {
 	if strings.Contains(res.text, "diff --git") {
 		t.Fatal("the patch content must never be inlined in the result")
 	}
-	// The decision set reached the manager UNCHANGED, with the shown-files gate and base hashes.
+	// The decision set reached the manager unchanged, with the shown-files gate and base hashes.
 	rv.mu.Lock()
 	got := rv.lastRemediate
 	rv.mu.Unlock()
@@ -645,8 +630,8 @@ func TestRemediate_FromRunAppliesTheAcceptedSetAndIsIdempotent(t *testing.T) {
 		t.Fatalf("base hashes must be captured at report time, got %+v", got.BaseHashes)
 	}
 
-	// IDEMPOTENCY: replaying the same source run returns the ORIGINAL receipt, without a second
-	// application — even though this call carries no idempotency key at all.
+	// Replaying the same source run returns the original receipt without a second application, even with no
+	// idempotency key.
 	res2 := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	if res2.isError || res2.rpc != nil {
 		t.Fatalf("replay failed: %+v", res2)
@@ -695,7 +680,7 @@ func TestInlineWorkspace_ReviewableButNeverRemediable(t *testing.T) {
 	}
 	runID, _ := res.structured["runId"].(string)
 
-	// FAIL CLOSED: applying an inline run is refused, with the reason named.
+	// Applying an inline run is refused, naming the reason.
 	got := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "apply", "allowWrite": true})
 	if !got.isError {
 		t.Fatalf("remediating an inline run must fail closed, got %+v", got)
@@ -719,7 +704,7 @@ func TestRemediate_InlineWorkspaceParameterIsRefused(t *testing.T) {
 	}
 }
 
-// --- panel composition: compose, never configure ---
+// --- panel composition ---
 
 func TestPanel_TeachingErrors(t *testing.T) {
 	ws := workspaceFixture(t)
@@ -936,8 +921,7 @@ func TestClientRoots_IntersectNeverUnion(t *testing.T) {
 		t.Fatal("a path inside the SERVER root but outside the client's must be refused (intersection, not union)")
 	}
 
-	// A client root the server was never launched with grants nothing: the intersection is empty,
-	// so every path is refused.
+	// A client root outside the server's scope grants nothing: the intersection is empty.
 	rv2 := &fakeReviewer{}
 	c2 := serve(t, newServer(t, rv2, func(s *mcp.Server) {
 		s.Ceiling, s.ClientRoots = []string{parent}, []string{unrelated}
@@ -952,10 +936,10 @@ func TestClientRoots_IntersectNeverUnion(t *testing.T) {
 	}
 }
 
-// --- cancellation: the receipt survives the response a cancelled call never gets ---
+// --- cancellation: the receipt survives the missing response ---
 
-// blockingReviewer's remediation waits for cancellation, then reports what a cancelled write window
-// reports: a receipt that says nothing was committed.
+// blockingReviewer's remediation waits for cancellation, then reports a receipt saying nothing was
+// committed.
 type blockingReviewer struct {
 	fakeReviewer
 	entered chan struct{}
@@ -985,7 +969,7 @@ func TestRemediate_CancelledCallStillPublishesTheReceipt(t *testing.T) {
 	c := serve(t, s)
 	runID := reportRun(t, c, ws)
 
-	// Issue the remediation WITHOUT waiting for its response, then cancel it.
+	// Send the remediation without waiting, then cancel it.
 	c.id++
 	callID := c.id
 	c.send("tools/call", callID, map[string]any{
@@ -995,8 +979,7 @@ func TestRemediate_CancelledCallStillPublishesTheReceipt(t *testing.T) {
 	<-rv.entered
 	c.notify("notifications/cancelled", map[string]any{"requestId": callID, "reason": "user stopped"})
 
-	// The receipt arrives as a LOG NOTIFICATION. That is the whole point: a cancelled request gets
-	// no response, so without this the caller could never learn what the write window did.
+	// The receipt arrives as a log notification, since a cancelled request gets no response.
 	frames := make(chan []byte, 32)
 	go func() {
 		for {
@@ -1048,11 +1031,10 @@ func TestRemediate_CancelledCallStillPublishesTheReceipt(t *testing.T) {
 	}
 }
 
-// --- the declared outputSchema, checked against what actually goes on the wire ---
+// --- declared outputSchema versus the wire ---
 
-// slowReviewer blocks in RunContext until it is released, so a test can observe a run that is
-// genuinely still running: the `state: "running"` reply, a run_result fetched mid-flight, and any
-// notification the run emits AFTER the call has been answered.
+// slowReviewer blocks in RunContext until released, so a test can observe a running run: the running
+// reply, a mid-flight run_result, and notifications emitted after the call was answered.
 type slowReviewer struct {
 	fakeReviewer
 	entered chan struct{}
@@ -1070,17 +1052,15 @@ func (s *slowReviewer) RunContext(ctx context.Context, r run.Request) (review.Ru
 	case <-ctx.Done():
 		return review.RunOutcome{Status: "halted", Mode: r.Mode}, ctx.Err()
 	}
-	// A phase event emitted AFTER the inline wait has already been answered. If the progress sink
-	// is still armed, this is what leaks out against a request that was replied to long ago.
+	// A phase event after the inline wait was answered; an armed progress sink would leak it.
 	if r.OnEvent != nil {
 		r.OnEvent(audit.EventLine{EventType: "panel_completed", Level: "info", Message: "panel completed"})
 	}
 	return cannedOutcome(r.Mode), nil
 }
 
-// declaredOutputSchemas compiles each tool's `outputSchema` AS THE CLIENT RECEIVES IT. Reading it
-// back off the wire is the point: the in-package conformance table proves the payloads match the
-// schema constants, and this proves the constants are what a client is actually handed.
+// declaredOutputSchemas compiles each tool's outputSchema as the client receives it, proving the
+// constants are what a client gets.
 func declaredOutputSchemas(t *testing.T, c *client) map[string]*jsonschema.Schema {
 	t.Helper()
 	out := map[string]*jsonschema.Schema{}
@@ -1102,10 +1082,8 @@ func declaredOutputSchemas(t *testing.T, c *client) map[string]*jsonschema.Schem
 	return out
 }
 
-// TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema drives real calls and
-// judges every `structuredContent` against the schema its own tool advertised. Three payloads used
-// to fail this: a cancelled call, `run_result` on a still-running run, and `run_result` for a
-// remediation. Nothing checked, so nothing complained.
+// Every structuredContent from real calls, including a cancelled call, run_result on a running run and
+// run_result for a remediation, validates against its tool's declared outputSchema.
 func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *testing.T) {
 	ws := workspaceFixture(t)
 	outside := t.TempDir()
@@ -1144,8 +1122,7 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 		t.Run(tc.name, func(t *testing.T) { check(t, tc.tool, c.tool(t, tc.tool, tc.args)) })
 	}
 
-	// The remediation's own run, fetched through run_result: THE payload that must NOT be declared
-	// under the review schema, which it could not possibly satisfy.
+	// The remediation's own run via run_result, which must not be declared under the review schema.
 	remID := func() string {
 		res := c.tool(t, "review_remediate", map[string]any{"fromRun": runID, "workspace": ws, "output": "patch", "allowWrite": true})
 		id, _ := res.structured["runId"].(string)
@@ -1155,7 +1132,7 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 		check(t, "review_run_result", c.tool(t, "review_run_result", map[string]any{"runId": remID}))
 	})
 
-	// And a run that is genuinely still running: the `running` reply, and run_result mid-flight.
+	// A running run: the running reply and a mid-flight run_result.
 	slow := &slowReviewer{entered: make(chan struct{}), release: make(chan struct{})}
 	c2 := serve(t, newServer(t, slow, func(s *mcp.Server) { s.Ceiling, s.WaitSeconds = []string{ws}, 1 }))
 	schemas2 := declaredOutputSchemas(t, c2)
@@ -1176,13 +1153,10 @@ func TestWire_EveryStructuredContentValidatesAgainstTheDeclaredOutputSchema(t *t
 	close(slow.release)
 }
 
-// --- the progress sink is disarmed when the call is answered ---
+// --- progress stops when the call is answered ---
 
-// TestProgress_StopsWhenTheCallHasBeenAnswered pins the disarm. A progress notification is
-// correlated to the request that supplied the token; once that request has been answered — here,
-// with `state: "running"` after the inline budget expired — the run must stop emitting progress
-// against it. Without `sink.Store(nil)` the panel's later phase events kept firing at a request the
-// client already had its answer to.
+// Once the request that supplied the progress token has been answered with state "running", the run
+// stops sending progress for it.
 func TestProgress_StopsWhenTheCallHasBeenAnswered(t *testing.T) {
 	ws := workspaceFixture(t)
 	slow := &slowReviewer{entered: make(chan struct{}), release: make(chan struct{})}
@@ -1196,7 +1170,7 @@ func TestProgress_StopsWhenTheCallHasBeenAnswered(t *testing.T) {
 		"_meta":     map[string]any{"progressToken": "p1"},
 	})
 
-	// Drain to the response, keeping the notifications that arrived while the call was live.
+	// Drain to the response, keeping notifications sent while the call was live.
 	var before []notification
 	for {
 		raw, err := c.f.ReadMessage()
@@ -1229,7 +1203,7 @@ func TestProgress_StopsWhenTheCallHasBeenAnswered(t *testing.T) {
 		t.Fatal("no progress arrived while the call was live — the fixture proves nothing about disarming")
 	}
 
-	// The run now emits another PHASE event. It must not become a progress notification.
+	// The run emits another phase event, which must not become progress.
 	close(slow.release)
 	frames := make(chan []byte, 64)
 	go func() {
@@ -1265,11 +1239,10 @@ func TestProgress_StopsWhenTheCallHasBeenAnswered(t *testing.T) {
 	}
 }
 
-// --- review_remediate: the fromRun branch refuses what it cannot honour ---
+// --- review_remediate refuses fromRun arguments it cannot honor ---
 
-// TestRemediate_FromRunRefusesRunFormingParameters: the schema forbids panel/authority on
-// review_remediate, but the decoder embeds runArgs wholesale, so the server refuses them by name — each
-// names a governance input (which panel judged, which intent) that the source run already settled.
+// review_remediate refuses panel, authority, dryRun and verifyReadiness by name: the decoder embeds
+// runArgs, and those inputs belong to the source run or to a review.
 func TestRemediate_FromRunRefusesRunFormingParameters(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
@@ -1292,9 +1265,7 @@ func TestRemediate_FromRunRefusesRunFormingParameters(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			args := map[string]any{"fromRun": runID, "workspace": ws, "output": "patch", "allowWrite": true}
-			for k, v := range tc.add {
-				args[k] = v
-			}
+			maps.Copy(args, tc.add)
 			res := c.tool(t, "review_remediate", args)
 			if res.rpc == nil {
 				t.Fatalf("%s on the fromRun branch must be REFUSED, not ignored; got %+v", tc.name, res)
@@ -1308,9 +1279,7 @@ func TestRemediate_FromRunRefusesRunFormingParameters(t *testing.T) {
 		})
 	}
 
-	// There is no one-call review-and-write on this surface: it is the one write shape whose caller can
-	// be left holding no handle when its response is cancelled. The call is refused, and the refusal
-	// TEACHES the two-step path rather than merely rejecting.
+	// There is no one-call review-and-write; the refusal teaches the two-step path.
 	gone := c.tool(t, "review_remediate", map[string]any{
 		"workspace": ws, "output": "patch",
 	})
@@ -1327,9 +1296,7 @@ func TestRemediate_FromRunRefusesRunFormingParameters(t *testing.T) {
 
 // --- admission ---
 
-// There is NO lifetime run cap, and that is a decision rather than an omission: a cumulative bound is
-// cleared by restarting the process, so it never was the spend ceiling its name implied. This asserts
-// the absence — a server that has already run is still willing to run again.
+// There is no lifetime run cap: a server that has run still accepts another run.
 func TestAdmission_ThereIsNoLifetimeRunCap(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/Tim-Butterfield/aimesh/internal/review"
@@ -13,15 +14,14 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// probeTarget is one distinct thing worth asking "can you actually work?" — an adapter with the
-// model argument and effort a real call would pass it. A recipe builds the model into its argv, so
-// probing with a model the roster does not use answers a question nobody asked.
+// probeTarget is one adapter with the model argument and effort a real call would pass it.
 type probeTarget struct {
 	Adapter  string
 	ModelArg core.ModelArg
 	Effort   string
 }
 
+// String formats the target as adapter/model with any effort.
 func (t probeTarget) String() string {
 	s := t.Adapter + "/" + string(t.ModelArg)
 	if t.Effort != "" {
@@ -30,11 +30,8 @@ func (t probeTarget) String() string {
 	return s
 }
 
-// probeTargets is every DISTINCT (adapter, model, effort) this run would invoke, sorted.
-//
-// Deduplicated because readiness is a property of the CLI's trust/auth posture, not of the seat: a
-// three-seat panel on one adapter and model is one question, and asking it three times would spend
-// three times to learn the same fact.
+// probeTargets returns every distinct adapter, model and effort this run would invoke, sorted.
+// Readiness does not differ per seat, so duplicates are probed once.
 func probeTargets(plan review.RunPlan, seats []review.LaneResolution) []probeTarget {
 	seen := map[probeTarget]bool{}
 	add := func(adapter string, m core.ModelArg, effort, execution string) {
@@ -58,26 +55,10 @@ func probeTargets(plan review.RunPlan, seats []review.LaneResolution) []probeTar
 	return out
 }
 
-// verifyReadiness asks EVERY configured agent whether it can do real work, CONCURRENTLY, and refuses
-// the run if any cannot — before the first seat is dispatched.
-//
-// WHY IT IS WORTH A CALL. `Available()` proves a binary exists. It does not prove the CLI is logged
-// in, that it will accept a fresh isolated directory, or that the account can use the model named in
-// the roster — and every one of those fails only at invocation time. Without this, a panel dispatches
-// seat 1 against a 900 KB prompt, pays for it, and then discovers at seat 2 that its CLI has been
-// waiting on a folder-trust prompt all along. The deep probe asks the same question with a
-// one-token prompt instead, so the expensive discovery becomes a cheap one.
-//
-// IT SPENDS, so it is opt-in (Request.VerifyReadiness) and it is PRICED: a dry run counts one call
-// per target in both bounds and executes none of them, because a dry run that spent to prove it
-// would not have to spend has answered a different question than the one asked.
-//
-// QUOTA IS NOT PREFLIGHTABLE, and this does not pretend otherwise. A probe that passes proves
-// nothing about the next call — the window can empty between them — and the probe itself draws on
-// the same window. Trust, login, model validity and update blocks are stable properties this can
-// establish; quota is a moment, and it is caught where it happens (see meshcore/clihint's
-// QuotaExhausted). A probe that failed on quota still reports it, which is strictly better than
-// discovering it after a panel's worth of spend.
+// verifyReadiness probes every target concurrently with a one-token call and refuses the run, before
+// any seat is dispatched, if any cannot work. It catches login, folder trust, model validity and update
+// prompts, which fail only at invocation. Quota cannot be established ahead of time; it is caught when
+// a real call hits it (see meshcore/clihint).
 func (m *Manager) verifyReadiness(ctx context.Context, run *audit.Run, targets []probeTarget) error {
 	if len(targets) == 0 {
 		return nil
@@ -100,8 +81,7 @@ func (m *Manager) verifyReadiness(ctx context.Context, run *audit.Run, targets [
 		}
 		dp, ok := a.(model.DeepProber)
 		if !ok {
-			// An adapter with no deep probe is NOT a failure: it is un-probeable, and reporting it as
-			// unready would refuse runs that work. The gap is recorded rather than guessed at.
+			// An adapter without a deep probe is recorded as unprobeable, not as a failure.
 			results[i] = outcome{target: t}
 			continue
 		}
@@ -114,9 +94,7 @@ func (m *Manager) verifyReadiness(ctx context.Context, run *audit.Run, targets [
 	}
 	wg.Wait()
 
-	// EVERY failure is reported, not just the first. The seats were probed concurrently, exactly as
-	// they would be dispatched, so a run blocked on two different agents needs two different fixes —
-	// the same reason a halted panel records every seat's cause (see panel.go).
+	// Report every failure, so each blocked agent can be fixed in one pass.
 	var failed []outcome
 	for _, o := range results {
 		if o.target.Adapter == "" {
@@ -145,11 +123,12 @@ func (m *Manager) verifyReadiness(ctx context.Context, run *audit.Run, targets [
 	}
 
 	first := failed[0]
-	msg := fmt.Sprintf("%d of %d configured agent(s) cannot do real work; nothing was dispatched", len(failed), len(targets))
+	var msg strings.Builder
+	msg.WriteString(fmt.Sprintf("%d of %d configured agent(s) cannot do real work; nothing was dispatched", len(failed), len(targets)))
 	for _, o := range failed {
-		msg += fmt.Sprintf("\n  %s: %s", o.target, o.res.Detail)
+		msg.WriteString(fmt.Sprintf("\n  %s: %s", o.target, o.res.Detail))
 	}
-	f := fault.New(fault.Adapter, msg).WithHalt("A").WithReason("adapter_not_ready")
+	f := fault.New(fault.Adapter, msg.String()).WithHalt("A").WithReason("adapter_not_ready")
 	if first.res.Signal != "" {
 		f = f.WithReason(string(first.res.Signal))
 	}

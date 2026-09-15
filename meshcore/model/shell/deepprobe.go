@@ -12,47 +12,29 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// This file is the DEEP probe: the readiness question `Probe` structurally cannot answer.
-//
-// `Probe` is `<bin> --version`, with NO working directory. It proves a binary starts. It exercises no
-// authentication, no folder trust, no model argument and none of the recipe's argv — and its own
-// timeout message can only GUESS ("may be waiting on native login or a folder-trust prompt").
-//
-// Every real call runs in a FRESH ISOLATED DIRECTORY the CLI has never seen (`model.Call.WorkDir`;
-// both apps create one per call). That is where CLIs actually fail: `gemini-cli` passed `--version`
-// and then failed every single real invocation — exit 55, no output at all — until `--skip-trust`
-// entered its recipe. A real-token campaign found that; no probe in this repo could have.
-//
-// So the deep probe performs ONE bounded REAL invocation, in a representative isolated directory
-// (throwaway, with a file in it, git-initialized the same hermetic way the ACP validator does it),
-// through the SAME `Invoke` path a run takes, and classifies the outcome through meshcore/clihint.
-//
-// It spends. It is opt-in at every caller.
+// This file implements the deep readiness probe. Probe runs `<bin> --version` with no working
+// directory, which proves only that the binary starts. Real calls run in a fresh isolated directory,
+// where authentication, folder trust, the model argument and the recipe's argv all matter, so the deep
+// probe performs one bounded real invocation through Invoke in a representative isolated directory and
+// classifies the outcome with meshcore/clihint. It spends tokens and is opt-in at every caller.
 
-// deepProbeToken is what the probe asks the model to echo. A CLI that answers with it did real work;
-// one that exits 0 with an empty answer did not, and that distinction is the whole point.
+// deepProbeToken is what the probe asks the model to echo; an empty answer is not real work.
 const deepProbeToken = "AIMESH-DEEP-PROBE-OK"
 
-// deepProbePrompt is deliberately the smallest question that still requires a real model turn.
+// deepProbePrompt is the smallest question that still requires a real model turn.
 const deepProbePrompt = "Reply with exactly this text and nothing else: " + deepProbeToken
 
-// defaultDeepProbeTimeout bounds one deep probe. It is generous enough for a cold provider CLI to
-// authenticate and answer a one-token question, and far below the adapter's own per-call timeout —
-// a probe that ran for ten minutes would be a worse diagnostic than no probe.
+// defaultDeepProbeTimeout bounds one deep probe: enough for a cold CLI to authenticate and answer, and
+// well below the adapter's per-call timeout.
 const defaultDeepProbeTimeout = 120 * time.Second
 
-// deepProbeFile is the representative content the isolated directory holds. A CLI handed a completely
-// empty directory sometimes behaves differently from one handed a project, and the probe's job is to
-// resemble a run.
+// deepProbeFile is the content of the isolated directory, since some CLIs behave differently in an empty
+// directory than in a project.
 const deepProbeFile = "# aimesh readiness probe\n\nThis throwaway directory exists only to ask the CLI whether it can work here.\n"
 
-// ProbeDeep implements model.DeepProber.
-//
-// It NEVER auto-answers an interactive prompt. `Invoke` gives the child no stdin (os/exec connects
-// /dev/null), and this probe adds no argument the recipe does not already build. A CLI that blocks on
-// a trust or login prompt is detected, classified and reported WITH the fix a human must perform —
-// consenting on the operator's behalf is precisely what a trust prompt exists to prevent, and a probe
-// that clicked "yes" would make the whole diagnostic a lie.
+// ProbeDeep implements model.DeepProber. It never answers an interactive prompt: Invoke gives the child
+// no stdin and the probe adds no arguments. A CLI blocked on a trust or login prompt is reported with the
+// fix a human must perform.
 func (a *Adapter) ProbeDeep(ctx context.Context, spec model.DeepProbeSpec) model.ProbeResult {
 	bin, err := a.resolveBinary()
 	if err != nil {
@@ -77,15 +59,13 @@ func (a *Adapter) ProbeDeep(ctx context.Context, spec model.DeepProbeSpec) model
 		WorkDir: dir, Prompt: deepProbePrompt,
 	})
 	stderr, stdout := string(res.Stderr), string(res.Stdout)
-	// deepProbePrompt is what we sent, so it is subtracted before classifying — a CLI that echoes its
-	// prompt must not be able to classify itself off our text (see meshcore/clihint).
+	// The prompt is removed from the output before classifying (see meshcore/clihint).
 	sig := clihint.ForFailure(clihint.Failure{
 		Stderr: stderr, Stdout: stdout, Prompt: deepProbePrompt, ExitCode: res.ExitCode,
 		Adapter: a.Recipe.Name,
 	})
 
-	// TIMEOUT. The cheap probe guesses here; this one has a real invocation behind the guess, so the
-	// report names what was tried and what a human must do.
+	// On a timeout the report names what was tried and what to do.
 	if pctx.Err() == context.DeadlineExceeded {
 		return model.ProbeResult{
 			OK: false, Stage: "invoke", Signal: sig,
@@ -106,8 +86,7 @@ func (a *Adapter) ProbeDeep(ctx context.Context, spec model.DeepProbeSpec) model
 		}
 	}
 
-	// Exit 0 is not the same as an answer. A CLI that exits clean having written nothing has not done
-	// real work, and reporting that as ready is the failure mode this probe exists to close.
+	// Exit 0 without an answer is not readiness.
 	answer := string(res.Payload)
 	if strings.TrimSpace(answer) == "" {
 		answer = stdout
@@ -128,9 +107,9 @@ func (a *Adapter) ProbeDeep(ctx context.Context, spec model.DeepProbeSpec) model
 
 var _ model.DeepProber = (*Adapter)(nil)
 
-// isolatedProbeDir builds the representative directory a real call would get: a throwaway temp
-// directory holding a file, made a git repository the same hermetic way the ACP validator does it, so
-// a CLI whose gate is "am I inside a repository?" is not failed by the probe's own austerity.
+// isolatedProbeDir builds a directory like the one a real call gets: a throwaway temp directory holding
+// a file, made a git repository with GitInitIsolatedDir so a CLI that requires a repository is not
+// failed by the probe itself.
 func isolatedProbeDir(ctx context.Context) (string, func(), error) {
 	dir, err := os.MkdirTemp("", "aimesh-deep-probe-")
 	if err != nil {
@@ -144,9 +123,8 @@ func isolatedProbeDir(ctx context.Context) (string, func(), error) {
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
 }
 
-// fixFor renders the EXACT human step for a classified blocker. It never suggests that the probe (or
-// anything else in this process) answer the prompt: the fix is always something the operator does in
-// their own terminal, once, so the CLI stops prompting on a fresh directory.
+// fixFor renders the human step for a classified blocker. The fix is always something the operator does
+// once in their own terminal; nothing in this process answers a prompt.
 func fixFor(sig clihint.Signal, bin string, spec model.DeepProbeSpec) string {
 	switch sig {
 	case clihint.FolderTrust:

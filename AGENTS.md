@@ -45,7 +45,7 @@ A Go monorepo of three modules joined by `go.work`:
 ## Build / test / verify (run from the repo root)
 
 ```bash
-make gate        # fmt-check + vet + build-all + test-all + race-all + boundary-check + both golden runs   ← the required gate
+make gate        # fmt-check + vet + staticcheck + build-all + test-all + race-all + boundary-check + both golden runs   ← the required gate
 make build       # build every workspace module (alias for build-all)
 make test        # test every workspace module (alias for test-all)
 make vet         # go vet across all modules

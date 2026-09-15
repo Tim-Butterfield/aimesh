@@ -1,5 +1,4 @@
-// Package prompt provides Prompter implementations (the input Utility the wizard
-// uses). Both implementations satisfy the documented review.Prompter contract.
+// Package prompt provides review.Prompter implementations for the setup wizard.
 package prompt
 
 import (

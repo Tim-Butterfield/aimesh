@@ -16,9 +16,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// TestPrintIdentityCaveats proves the CLI review summary surfaces identity caveats (the run PASSED but
-// a lane's model was weak/self-reported or not verified) — including the reported model for a weak
-// signal — and prints nothing when there are none.
+// The review summary lists identity caveats, including the reported model for a weak signal, and
+// prints nothing when there are none.
 func TestPrintIdentityCaveats(t *testing.T) {
 	var buf bytes.Buffer
 	printIdentityCaveats(&buf, []review.IdentityCaveat{
@@ -118,11 +117,8 @@ func TestSetup_YesRequiresFrom(t *testing.T) {
 	}
 }
 
-// chdirTo enters dir for the test and restores the original cwd on cleanup. Unlike
-// t.Chdir, the restore uses the absolute saved path so it succeeds on Windows even when
-// dir is a t.TempDir slated for removal: Windows cannot delete the process's current
-// directory, and testing.Chdir's fd-relative restore (oldwd opened as ".") is a no-op
-// there, which would leave cwd inside dir and fail both the RemoveAll and the restore.
+// chdirTo enters dir and restores the original cwd on cleanup using its absolute path. t.Chdir
+// restores relative to an fd, which fails on Windows when dir is a temp directory being removed.
 func chdirTo(t *testing.T, dir string) {
 	t.Helper()
 	orig, err := os.Getwd()
@@ -197,8 +193,7 @@ func TestSetup_AdapterRequiresPath(t *testing.T) {
 }
 
 func TestGitignore_NoAikitOrAnalysis(t *testing.T) {
-	// Walk to the repo root, marked by go.work: the workspace holds more than one go.mod, so go.mod
-	// does not identify the repo root.
+	// Walk up to go.work; the workspace holds several go.mod files.
 	dir, _ := os.Getwd()
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.work")); err == nil {
@@ -235,15 +230,12 @@ func TestDiagSuffix(t *testing.T) {
 	}
 }
 
-// TestCLI_IdentityMismatchSucceedsAndTellsTheUser: the CLI exits 0 on an identity mismatch and SAYS SO
-// in the human output. The user is the one who decides what an unexpected model means for their review;
-// the tool's job is to make sure they cannot miss it.
+// An identity mismatch exits 0 and is stated in the human output.
 func TestCLI_IdentityMismatchSucceedsAndTellsTheUser(t *testing.T) {
 	t.Setenv("AIMESH_HOME", t.TempDir()) // hermetic: never read the real home config
 	t.Setenv("REVIEWMESH_ARTIFACT_DIR", t.TempDir())
 	t.Setenv("REVIEWMESH_FAKE_SCENARIO", "identity_mismatch")
-	// The shipped `default` profile ships unconfigured; select the hidden fake profile to exercise
-	// the deterministic fake adapter end-to-end.
+	// The default profile is unconfigured, so use the hidden fake profile.
 	code, out, errs := run(t, "review", "--report", "--profile", "fake-smoke", ciWorkspace(t))
 	if code != 0 {
 		t.Errorf("exit = %d, want 0 — an identity mismatch is a caveat, not a failure; stderr=%q", code, errs)
@@ -253,17 +245,15 @@ func TestCLI_IdentityMismatchSucceedsAndTellsTheUser(t *testing.T) {
 	}
 }
 
-// TestReview_FakeSmokeProfileIsEnvGated pins the hidden-internal posture of the fake harness: the
-// shipped-but-hidden `fake-smoke` profile is NOT user-selectable — without AIMESH_INTERNAL_FAKE=1 it
-// fails resolution with the same clean unknown-profile config error as any unrecognized name (no hint
-// that it exists); with the gate it resolves and runs end-to-end.
+// fake-smoke is hidden: without AIMESH_INTERNAL_FAKE=1 it fails as an unknown profile, and with it the
+// run completes.
 func TestReview_FakeSmokeProfileIsEnvGated(t *testing.T) {
 	t.Setenv("AIMESH_HOME", t.TempDir()) // hermetic: never read the real home config
 	t.Setenv("REVIEWMESH_ARTIFACT_DIR", t.TempDir())
 	t.Setenv("REVIEWMESH_FAKE_SCENARIO", "empty")
 	ws := ciWorkspace(t)
 
-	// WITHOUT the gate (Run called directly — the run() helper unlocks it): unknown profile.
+	// Without the gate (Run called directly): unknown profile.
 	t.Setenv(fake.EnvVar, "") // explicitly NOT set: a user never configures the internal gate
 	var o, e bytes.Buffer
 	if code := Run([]string{"review", "--report", "--profile", "fake-smoke", ws}, &o, &e); code != int(fault.Config) {
@@ -273,7 +263,7 @@ func TestReview_FakeSmokeProfileIsEnvGated(t *testing.T) {
 		t.Errorf("ungated fake-smoke must fail with the plain unknown-profile error, got: %q", e.String())
 	}
 
-	// WITH the gate: the hidden profile resolves and the deterministic run completes.
+	// With the gate the profile resolves and the run completes.
 	code, _, errs := run(t, "review", "--report", "--profile", "fake-smoke", ws)
 	if code != 0 {
 		t.Errorf("gated fake-smoke exit = %d, want 0 (stderr=%s)", code, errs)
@@ -304,7 +294,7 @@ func TestCI_ForcesReportEvenWithApply(t *testing.T) {
 	t.Setenv("REVIEWMESH_ARTIFACT_DIR", t.TempDir())
 	t.Setenv("REVIEWMESH_FAKE_SCENARIO", "valid")
 	ws := ciWorkspace(t)
-	// --ci must override --apply to report (no writes), regardless of config/flags
+	// --ci forces report even with --apply.
 	code, _, _ := run(t, "review", "--ci", "--apply", "--profile", "fake-smoke", ws)
 	if code != int(fault.Findings) {
 		t.Errorf("ci exit = %d, want %d", code, fault.Findings)
@@ -345,17 +335,15 @@ func TestParseSets(t *testing.T) {
 
 func run(t *testing.T, args ...string) (code int, out, errs string) {
 	t.Helper()
-	// Hermetic tests are the internal harness the hidden fake adapter exists for: unlock it
-	// (fake + the hidden fake-smoke profile are env-gated and fail closed for users).
+	// Unlock the env-gated fake adapter and fake-smoke profile for hermetic tests.
 	t.Setenv(fake.EnvVar, "1")
 	var o, e bytes.Buffer
 	code = Run(args, &o, &e)
 	return code, o.String(), e.String()
 }
 
-// TestList_JSON proves `list --json` emits a stable, parseable projection of adapters + profiles, that
-// adapters carry the DECLARED identityEvidenceCapability (never "verified"), and that profiles carry
-// their lanes.
+// list --json emits adapters and profiles; adapters carry their declared identityEvidenceCapability
+// and profiles carry their seats.
 func TestList_JSON(t *testing.T) {
 	code, out, errs := run(t, "list", "--json")
 	if code != int(fault.OK) {
@@ -399,7 +387,7 @@ func TestList_JSON(t *testing.T) {
 	}
 }
 
-// TestList_Human smoke-tests the human summary carries the Adapters + Profiles sections.
+// The human summary has Adapters and Profiles sections.
 func TestList_Human(t *testing.T) {
 	code, out, errs := run(t, "list")
 	if code != int(fault.OK) {
@@ -412,8 +400,7 @@ func TestList_Human(t *testing.T) {
 	}
 }
 
-// TestInit_Folder_CreatesState smoke-tests `reviewmesh folder init` through the CLI dispatch: in a
-// non-repo temp dir it creates .aimesh/temp and reports success.
+// folder init creates .aimesh/temp in a non-repo directory.
 func TestInit_Folder_CreatesState(t *testing.T) {
 	dir := t.TempDir()
 	prev, err := os.Getwd()
@@ -437,25 +424,15 @@ func TestInit_Folder_CreatesState(t *testing.T) {
 	}
 }
 
-// TestHelp_ExitsZero_AndABadInvocationExitsUsage is the CROSS-APP PARITY pin, and the twin of
-// exploremesh's test of the same name. Asking for help is not a usage error: `reviewmesh --help` must
-// print to STDOUT and exit 0, exactly as `exploremesh --help` does. The two binaries drifted apart on
-// precisely this — exploremesh exited 2 for a whole release, because help and "you invoked me wrong"
-// shared one function that returned the usage code — so a script or a CI step that gated on `--help`
-// succeeding failed against one binary and passed against the other. ALL THREE spellings are pinned
-// here, because a pin on `--help` alone leaves `-h` and `help` free to rot away from it.
-//
-// The other half of the same table matters just as much: a bad invocation must STILL exit 2, its text
-// must still go to stderr, and it must still name the command it did not recognize. A "fix" that made
-// everything exit 0 would be the worse regression.
+// Help is not a usage error: --help, -h and help print to stdout and exit 0, as in exploremesh. A bad
+// invocation still exits 2, writes to stderr, and names the unrecognized command.
 func TestHelp_ExitsZero_AndABadInvocationExitsUsage(t *testing.T) {
 	for _, spelling := range []string{"-h", "--help", "help"} {
 		code, out, errs := run(t, spelling)
 		if code != int(fault.OK) {
 			t.Errorf("%q exit %d, want 0 — asking for help is not a usage error", spelling, code)
 		}
-		// The RUNNABLE command, not the domain name: help that names a binary the user does not
-		// have is help they cannot act on.
+		// Help names the runnable command, not the domain.
 		if !strings.Contains(out, "aimesh review") {
 			t.Errorf("%q must print the help text on STDOUT (a pipeable answer), got %q", spelling, out)
 		}
@@ -518,8 +495,7 @@ func TestReviewConflictingModes_Exit2(t *testing.T) {
 }
 
 func TestReview_IncludeHostReview_RejectedForApplyPatch(t *testing.T) {
-	// Explicit apply/patch must be rejected — including when combined with --ci (which
-	// would otherwise force report and silently accept a contradictory request).
+	// Explicit apply or patch is rejected, including with --ci.
 	cases := [][]string{
 		{"review", "--apply", "--include-host-review", "x"},
 		{"review", "--patch", "--include-host-review", "x"},
@@ -549,8 +525,7 @@ func TestReview_IncludeHostReview_AcceptedForReport(t *testing.T) {
 	}
 }
 
-// splitArgsFixture builds a flag set shaped like `review run`'s — enough of it to cover the
-// value-taking flags the old hand-maintained map had fallen behind on.
+// splitArgsFixture builds a flag set shaped like the review run command's value-taking flags.
 func splitArgsFixture(t *testing.T) *flag.FlagSet {
 	t.Helper()
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
@@ -570,27 +545,20 @@ func splitArgsFixture(t *testing.T) *flag.FlagSet {
 
 func TestSplitArgs_BothFlagForms(t *testing.T) {
 	fs := splitArgsFixture(t)
-	// flags after the positional
+	// Flags after the positional.
 	f, p := splitArgs(fs, []string{"path", "--report"})
 	if len(p) != 1 || p[0] != "path" || len(f) != 1 || f[0] != "--report" {
 		t.Errorf("flags-after-positional: flags=%v positionals=%v", f, p)
 	}
-	// value-taking flag keeps its value together, positional after
+	// A value-taking flag keeps its value; positional after.
 	f2, p2 := splitArgs(fs, []string{"--mode", "patch", "path"})
 	if len(p2) != 1 || p2[0] != "path" || len(f2) != 2 || f2[0] != "--mode" || f2[1] != "patch" {
 		t.Errorf("value-flag split: flags=%v positionals=%v", f2, p2)
 	}
 }
 
-// TestSplitArgs_EveryValueFlagKeepsItsValue: each of these value-taking flags must keep its value.
-//
-// A value misclassified as a POSITIONAL loses the workspace path, and the parser then blames the
-// flag ("flag needs an argument") instead. `--path` and
-// `--changed-since` are two of the flags the help text pushes hardest, so this was reachable by
-// following the documentation.
-//
-// The answer now comes from the flag set itself, which is why this test enumerates flags rather
-// than a list: anything registered non-bool is covered by construction.
+// Each value-taking flag keeps its value. A value misread as a positional loses the workspace path.
+// The flag set decides, so every non-bool flag is covered.
 func TestSplitArgs_EveryValueFlagKeepsItsValue(t *testing.T) {
 	fs := splitArgsFixture(t)
 	for _, tc := range []struct{ flag, value string }{
@@ -613,15 +581,14 @@ func TestSplitArgs_EveryValueFlagKeepsItsValue(t *testing.T) {
 	}
 }
 
-// TestSplitArgs_ABoolFlagDoesNotEatThePath is the other half: a bool must NOT consume the next
-// token, or `--report .` would lose the workspace instead.
+// A bool flag must not consume the next token.
 func TestSplitArgs_ABoolFlagDoesNotEatThePath(t *testing.T) {
 	fs := splitArgsFixture(t)
 	f, p := splitArgs(fs, []string{"--report", "."})
 	if len(p) != 1 || p[0] != "." {
 		t.Errorf("a bool flag swallowed the positional: flags=%v positionals=%v", f, p)
 	}
-	// `--flag=value` carries its own value and must not consume the next token either.
+	// --flag=value carries its own value and must not consume the next token.
 	f2, p2 := splitArgs(fs, []string{"--mode=patch", "."})
 	if len(p2) != 1 || p2[0] != "." {
 		t.Errorf("--flag=value swallowed the positional: flags=%v positionals=%v", f2, p2)
@@ -639,6 +606,3 @@ func TestGatingCode(t *testing.T) {
 		t.Error("findings with gating should exit 1")
 	}
 }
-
-// (acp is implemented in Batch 3 and covered by internal/surface/acp tests;
-// the CLI `acp` command reads os.Stdin so it is not invoked from a unit test here.)

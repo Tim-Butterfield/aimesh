@@ -9,10 +9,9 @@ import (
 	"time"
 )
 
-// audit owns the per-run directory both apps record through: reviewmesh's run artifacts and
-// exploremesh's `--dump-run` capture (which the golden-run gate compares). Its guarantees are
-// modest but load-bearing: a deterministic run ID, parent-dir creation, APPEND-only event logging
-// (never truncating a prior event), and an in-process progress sink that is independent of disk.
+// audit owns the per-run directory runs record through. It guarantees a deterministic run ID,
+// parent-directory creation, append-only event logging and an in-process progress sink independent of
+// disk.
 
 func TestNewRun_GeneratedIDIsTimestampedAndDirsExist(t *testing.T) {
 	base := t.TempDir()

@@ -16,16 +16,12 @@ import (
 	corefake "github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// list surfaces the CONFIGURED adapters + the resolved roster + the configured PROFILES + the available
-// modes so a caller can verify (before spending) that the models it wants are configured — the read-only
-// analogue of reviewmesh's `list`. It REUSES the manager's pure projections (AdapterViews +
-// RosterView + Profiles) and the mode registry (mode.Names); it re-derives nothing.
-// `identityEvidenceCapability` is the adapter's DECLARED evidence tier
-// (envelope/cli_status/trace/self_report/…), NOT a live "verified" — proving a model's identity still
-// needs a real call.
+// This file implements `aimesh explore list`, which reports the configured adapters, the resolved roster,
+// the profiles and the modes, so a caller can check its configuration before a run. It projects the
+// manager's views and the mode registry. `identityEvidenceCapability` is an adapter's declared evidence
+// tier, not proof: confirming a model's identity takes a real call.
 
-// listAdapter is the focused adapter projection `list` emits (a subset of the manager's AdapterViewDTO,
-// with the declared evidence tier renamed to the honest `identityEvidenceCapability`).
+// listAdapter is one adapter as `list` reports it, a subset of manager.AdapterViewDTO.
 type listAdapter struct {
 	Name                       string `json:"name"`
 	DisplayName                string `json:"displayName"`
@@ -43,21 +39,18 @@ type listSlot struct {
 	Effort  string `json:"effort,omitempty"`
 }
 
-// listRoster is the resolved roster (ordered explorers + the single collator + any explicit canonicalizers).
+// listRoster is the resolved roster: explorers in order, the collator and any explicit canonicalizers.
 type listRoster struct {
 	Explorers []listSlot `json:"explorers"`
 	Collator  listSlot   `json:"collator"`
-	// Canonicalizers is EITHER empty (the host derives them at run time) or exactly two. CanonicalizerSource
-	// says which of those two it is IN WORDS, so a reader never has to infer a governance fact from an empty
-	// array — which is exactly the inference that let a derived-and-arbitrary choice go unnoticed.
+	// Canonicalizers is empty, meaning the host derives them, or exactly two. CanonicalizerSource states
+	// which, so a reader need not infer it from an empty list.
 	Canonicalizers      []listSlot `json:"canonicalizers"`
 	CanonicalizerSource string     `json:"canonicalizerSource"`
 }
 
-// listProfile is one configured profile: its name, whether a no-flag run binds to it, its
-// per-profile default mode ("" = the app default map), its ORDERED explorers (the authored slice
-// order IS the --count preference order — deliberately NOT the Plan's canonical attribution order), its
-// collator and its explicit canonicalizers.
+// listProfile is one profile: its name, whether it is the default, its default mode ("" means map), its
+// explorers in preference order (the order --count selects from), its collator and its canonicalizers.
 type listProfile struct {
 	Name        string     `json:"name"`
 	IsDefault   bool       `json:"isDefault"`
@@ -69,9 +62,8 @@ type listProfile struct {
 	CanonicalizerSource string     `json:"canonicalizerSource"`
 }
 
-// canonicalizerSource labels HOW a roster's canonicalizers will be chosen, matching the provenance a run
-// records: "explicit" when the config names them, "derived" when the host will pick them (slot a from the
-// collator, slot b from the panel in preference order).
+// canonicalizerSource returns "explicit" when a roster names n > 0 canonicalizers, and "derived" when the
+// host will choose them (slot a from the collator, slot b from the panel in preference order).
 func canonicalizerSource(n int) string {
 	if n > 0 {
 		return "explicit"
@@ -79,16 +71,14 @@ func canonicalizerSource(n int) string {
 	return "derived"
 }
 
-// listProfiles is the profile-set section: the name of the default profile + every configured profile
-// (sorted by name — the map order is not load-bearing; the default is NAMED, not positional).
+// listProfiles is the default profile's name and every profile, sorted by name.
 type listProfiles struct {
 	DefaultProfile string        `json:"defaultProfile"`
 	Profiles       []listProfile `json:"profiles"`
 }
 
-// listView is exploremesh's machine-readable `list --json` projection: the configured adapters, the
-// resolved roster, the configured profiles, and the available exploration modes. `roster` is the DEFAULT
-// profile's roster — it predates profiles and is kept for existing consumers (additive-only projection).
+// listView is the `list --json` output: the adapters, the default profile's roster, the profiles and the
+// modes.
 type listView struct {
 	Adapters []listAdapter `json:"adapters"`
 	Roster   listRoster    `json:"roster"`
@@ -96,10 +86,8 @@ type listView struct {
 	Modes    []string      `json:"modes"`
 }
 
-// runList reports the configured adapters + resolved roster + profiles + available modes. It resolves the
-// STARTING roster through the SAME resolver a no-flag `explore`/`doctor`/`acp`/`ui` run uses (resolveSource
-// → profile.Resolve: the discovered profiles.yaml's default profile, else a migrated legacy roster.yaml,
-// else the built-in unconfigured default), so `list` reports the config a bare `explore` would actually bind to.
+// runList reports the adapters, roster, profiles and modes. It resolves the roster through resolveSource,
+// as a run without flags does, so it reports the configuration such a run would use.
 func runList(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -138,7 +126,7 @@ func runList(args []string, stdout, stderr io.Writer) int {
 	return int(fault.OK)
 }
 
-// buildListView maps the manager's read projections into the focused `list` view (no re-derivation).
+// buildListView maps the manager's views into the `list` view.
 func buildListView(mgr *manager.Manager) listView {
 	view := listView{Adapters: []listAdapter{}, Modes: mode.Names()}
 	for _, av := range mgr.AdapterViews() {
@@ -148,11 +136,8 @@ func buildListView(mgr *manager.Manager) listView {
 			IdentityEvidenceCapability: av.ModelIdentity, SpecOnly: av.SpecOnly,
 		})
 	}
-	// The built-in `fake` adapter is a HIDDEN internal test harness — absent from AdapterViews and
-	// from this inventory unless the internal gate (corefake.Enabled — set by tests/golden runs,
-	// never by users) is on, so `list` never advertises a name users cannot configure. When enabled
-	// (tests), it is inserted in sorted position; reviewmesh's `list` gates it the same way, so the
-	// two inventories stay symmetric.
+	// The `fake` test adapter is listed, in sorted position, only when the internal test gate is on, so
+	// `list` never shows users a name they cannot configure.
 	if corefake.Enabled() {
 		fakeRow := listAdapter{Name: registry.FakeAdapter, DisplayName: "Fake", Configured: true}
 		at := len(view.Adapters)
@@ -176,9 +161,8 @@ func buildListView(mgr *manager.Manager) listView {
 	}
 	view.Roster.CanonicalizerSource = canonicalizerSource(len(rv.Canonicalizers))
 
-	// The full profile set. The manager binds the SAME set a run resolves for this cwd (a
-	// persisted profiles.yaml, else the caller's already-resolved starting roster as the `default`
-	// profile), so `list` reports the profiles `explore --profile` can actually select.
+	// The manager holds the profile set a run resolves in this directory, so these are the profiles
+	// `explore --profile` can select.
 	set := mgr.Profiles()
 	view.Profiles = listProfiles{DefaultProfile: set.DefaultProfile, Profiles: []listProfile{}}
 	for _, name := range set.Names() {
@@ -203,8 +187,7 @@ func buildListView(mgr *manager.Manager) listView {
 	return view
 }
 
-// printList renders the human summary: adapters (with configured?/kind/declared identity tier), then the
-// resolved roster as `adapter:model:effort` triples, then the configured profiles, then the modes.
+// printList writes the text report: adapters, the roster, the profiles and the modes.
 func printList(w io.Writer, view listView) {
 	fmt.Fprintln(w, "Adapters:")
 	for _, a := range view.Adapters {
@@ -242,9 +225,8 @@ func printList(w io.Writer, view listView) {
 	fmt.Fprintf(w, "\nModes: %s\n", strings.Join(view.Modes, ", "))
 }
 
-// printProfiles renders the configured profiles: the default profile's name, then each profile with its
-// default mode and its ORDERED explorers (preference order — what --count selects the top-N from) + its
-// collator, as display-only `adapter:model[:effort]` triples.
+// printProfiles writes each profile with its default mode, its explorers in preference order, its collator
+// and its canonicalizers.
 func printProfiles(w io.Writer, p listProfiles) {
 	fmt.Fprintf(w, "\nProfiles (default: %s):\n", p.DefaultProfile)
 	for _, pr := range p.Profiles {
@@ -256,7 +238,7 @@ func printProfiles(w io.Writer, p listProfiles) {
 			line += "; mode: " + pr.DefaultMode
 		}
 		fmt.Fprintln(w, line)
-		// Preference order — reordering changes WHICH explorers a --count subset selects.
+		// Preference order decides which explorers a --count subset selects.
 		fmt.Fprintln(w, "    explorers (preference order):")
 		for _, e := range pr.Explorers {
 			fmt.Fprintf(w, "      %s\n", slotDisplay(e))
@@ -266,9 +248,7 @@ func printProfiles(w io.Writer, p listProfiles) {
 	}
 }
 
-// printCanonicalizers renders the canonicalizer slots, or — when there are none — the DERIVATION RULE in
-// words. Printing the rule rather than nothing is the point: "which two identities decide whether a merge
-// holds" is a governance fact, and silence about it is what let an arbitrary alphabetical choice stand.
+// printCanonicalizers writes the canonicalizer slots, or the rule that derives them when there are none.
 func printCanonicalizers(w io.Writer, indent string, slots []listSlot) {
 	if len(slots) == 0 {
 		fmt.Fprintf(w, "%scanonicalizers:\n%s  derived (a: the collator; b: the first explorer by preference order that differs from it)\n", indent, indent)
@@ -280,10 +260,9 @@ func printCanonicalizers(w io.Writer, indent string, slots []listSlot) {
 	}
 }
 
-// slotDisplay renders a roster slot as the DISPLAY-ONLY `adapter:model[:effort]` colon form (never
-// parsed back — a model tag can itself contain a colon, so the colon form is one-way).
+// slotDisplay renders a slot as `adapter:model[:effort]` for display only; a model name may contain a
+// colon, so the form is never parsed.
 func slotDisplay(s listSlot) string {
-	// An UNCONFIGURED slot (the shipped empty default) renders as an honest label, not a bare ":".
 	if s.Adapter == "" && s.Model == "" {
 		return "(not configured)"
 	}

@@ -11,22 +11,15 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/localstate"
 )
 
-// The profiles file lives in explore's component directory under the shared state root:
-// `.aimesh/explore/profiles.yaml`, resolved project-scope-before-user and root-anchored, with
-// AIMESH_HOME overriding the user base.
-//
-// THERE IS NO LEGACY roster.yaml DISCOVERY. Earlier builds fell back to a single `roster.yaml` and
-// migrated it in memory to a `default` profile. Nothing was ever published that wrote one, so the
-// fallback could only ever find a file this project's own development had left behind — a migration
-// path for a population of zero, and one more location a reader had to check to answer "which config
-// is this run using?". An explicit `--roster <path>` is unaffected: that is a per-invocation input the
-// caller resolves, not a discovered location.
+// The profiles file is `.aimesh/explore/profiles.yaml`, found at project scope before user scope. The
+// project path is anchored at the repository root, and AIMESH_HOME overrides the user base. An explicit
+// `--roster <path>` is resolved by the caller and is not discovered here.
 
 // FileName is the profiles file's name inside the component directory.
 const FileName = "profiles.yaml"
 
-// UserProfilesPath is the user-scope profiles path: <AIMESH_HOME|~>/.aimesh/explore/profiles.yaml. It is
-// a write TARGET — the file need not exist yet (Save creates it + the directory).
+// UserProfilesPath returns the user-scope profiles path, <AIMESH_HOME|~>/.aimesh/explore/profiles.yaml.
+// The file need not exist.
 func UserProfilesPath() (string, error) {
 	dir, err := roster.UserComponentDir()
 	if err != nil {
@@ -35,9 +28,8 @@ func UserProfilesPath() (string, error) {
 	return filepath.Join(dir, FileName), nil
 }
 
-// ProjectProfilesPath is the project-scope profiles path, ROOT-ANCHORED so a run from a subdirectory
-// sees the repo-wide file. ok is false when cwd is not inside a repo. The path is returned whether or
-// not the file exists (it is also the write target).
+// ProjectProfilesPath returns the project-scope profiles path, anchored at the repository root. It
+// returns false when cwd is not inside a repository. The file need not exist.
 func ProjectProfilesPath(cwd string) (string, bool) {
 	dir, ok := roster.ProjectComponentDir(cwd)
 	if !ok {
@@ -46,8 +38,8 @@ func ProjectProfilesPath(cwd string) (string, bool) {
 	return filepath.Join(dir, FileName), true
 }
 
-// DefaultProfilesPath resolves the profiles path the workbench (and a no-flag run) writes to and binds
-// to: project scope when cwd is inside a repo, else user scope (§F10). A write TARGET.
+// DefaultProfilesPath returns the profiles path to write for cwd: project scope inside a repository,
+// otherwise user scope.
 func DefaultProfilesPath(cwd string) (string, error) {
 	if p, ok := ProjectProfilesPath(cwd); ok {
 		return p, nil
@@ -55,9 +47,7 @@ func DefaultProfilesPath(cwd string) (string, error) {
 	return UserProfilesPath()
 }
 
-// Discover returns the EXISTING profiles.yaml to load for a run when no explicit file/profile flag is
-// given (project scope preferred over user), and whether one was found. "" + false = nothing persisted;
-// callers fall back to the built-in DefaultSet.
+// Discover returns the existing profiles file for cwd, preferring project scope, and whether one exists.
 func Discover(cwd string) (string, bool) {
 	if p, ok := ProjectProfilesPath(cwd); ok && fileExists(p) {
 		return p, true
@@ -68,19 +58,12 @@ func Discover(cwd string) (string, bool) {
 	return "", false
 }
 
-// DiscoverProfiles is Discover under a second name, kept because callers distinguish "the
-// workbench's own saved config" from a caller-resolved seed roster at their call sites.
+// DiscoverProfiles is an alias for Discover.
 func DiscoverProfiles(cwd string) (string, bool) { return Discover(cwd) }
 
-// CheckMisplaced refuses a profiles.yaml sitting at the ROOT of a `.aimesh/` state directory rather
-// than inside explore's component directory.
-//
-// The root is a plausible-looking wrong place: it is where `adapters.yaml` lives, so writing
-// `profiles.yaml` beside it is the obvious guess. Discovery does not look there, so the file would sit
-// on disk being silently ignored while the run bound to some other profile set — or to the shipped
-// UNCONFIGURED default, whose error message says nothing about the file the user just wrote. Refusing
-// by name, and naming both valid locations, is the only outcome that cannot be mistaken for the
-// config having been applied.
+// CheckMisplaced returns an error if a profiles.yaml sits at the root of a `.aimesh/` directory, beside
+// adapters.yaml, instead of in the explore component directory. Discovery never reads that location, so
+// the file would otherwise be silently ignored.
 func CheckMisplaced(cwd string) error {
 	var bad []string
 	if root, ok := localstate.FindRoot(cwd); ok {
@@ -108,10 +91,8 @@ func CheckMisplaced(cwd string) error {
 		strings.Join(bad, " and "), where))
 }
 
-// Resolve returns the profiles Set a no-flag run binds to for cwd: the discovered profiles.yaml
-// (loaded), else the built-in DefaultSet (the shipped UNCONFIGURED empty default). An explicit
-// --profile/--roster is handled by the caller. A misplaced profiles.yaml is an error rather than a
-// silent miss (CheckMisplaced).
+// Resolve returns the profile set for a run in cwd with no explicit profile flags: the discovered file,
+// or DefaultSet if there is none. A misplaced file is an error (see CheckMisplaced).
 func Resolve(cwd string) (Set, error) {
 	if err := CheckMisplaced(cwd); err != nil {
 		return Set{}, err

@@ -1,6 +1,7 @@
 package roster
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -223,30 +224,52 @@ func TestExplorer_Identity(t *testing.T) {
 	}
 }
 
-func TestSaveLoad_RoundTrip(t *testing.T) {
+// writeRoster writes a roster file with the given content and returns its path.
+func writeRoster(t *testing.T, content string) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "roster.yaml")
-	orig := twoValid()
-	if err := Save(path, orig); err != nil {
-		t.Fatalf("save: %v", err)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	back, err := Load(path)
+	return path
+}
+
+// Load decodes the camelCase keys a roster file uses.
+func TestLoad_DecodesARosterFile(t *testing.T) {
+	path := writeRoster(t, `explorers:
+  - adapter: claude-code
+    model: opus
+    effort: high
+  - adapter: codex-cli
+    model: gpt
+collator:
+  adapter: claude-code
+  model: sonnet
+`)
+	r, err := Load(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(back.Explorers) != 2 || back.Collator != orig.Collator {
-		t.Errorf("round-trip lost data: %+v", back)
+	want0 := Explorer{Adapter: "claude-code", Model: "opus", Effort: "high"}
+	if len(r.Explorers) != 2 || r.Explorers[0] != want0 {
+		t.Errorf("explorers = %+v, want 2 starting with %+v", r.Explorers, want0)
 	}
-	if back.Explorers[0] != orig.Explorers[0] {
-		t.Errorf("explorer round-trip mismatch: %+v vs %+v", back.Explorers[0], orig.Explorers[0])
+	if r.Collator != (Collator{Adapter: "claude-code", Model: "sonnet"}) {
+		t.Errorf("collator = %+v", r.Collator)
 	}
 }
 
-func TestSave_RefusesInvalid(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "roster.yaml")
-	bad := twoValid()
-	bad.Explorers = bad.Explorers[:1] // < 2
-	if err := Save(path, bad); err == nil {
-		t.Fatal("Save must refuse to persist an invalid roster")
+// Load validates what it decodes, so a roster with one explorer is refused.
+func TestLoad_RefusesAnInvalidRoster(t *testing.T) {
+	path := writeRoster(t, `explorers:
+  - adapter: claude-code
+    model: opus
+collator:
+  adapter: claude-code
+  model: sonnet
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load must refuse a roster with fewer than two explorers")
 	}
 }
 

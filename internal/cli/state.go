@@ -13,15 +13,6 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/localstate"
 )
 
-// `init` and `doctor` are SHARED, not per-domain, and each is ONE command with flags rather than a
-// family of subcommands.
-//
-// Subcommands denote different operations and flags denote modifiers of one (`git init --bare`, not
-// `git bare init`): repo and folder initialization are one operation with a different mode, and
-// `repo`/`folder` at the top level alongside `review`/`explore` would imply they were peer domains,
-// which they are not. The assertions stay available as flags because they are "for scripts and CI
-// where doing the right thing silently is the wrong answer".
-
 // initRecord is the --json shape for `aimesh init`.
 type initRecord struct {
 	Home    string   `json:"home"`
@@ -29,6 +20,8 @@ type initRecord struct {
 	Actions []string `json:"actions"`
 }
 
+// runInit creates the .aimesh state directory. It chooses repository or folder mode from the current
+// directory; --require-repo and --require-folder turn that choice into an assertion for scripts.
 func runInit(args []string, out, errw io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(errw)
@@ -93,17 +86,9 @@ type doctorRecord struct {
 	AdaptersOK bool   `json:"adaptersPresent"`
 }
 
-// runDoctor reports SHARED readiness: is there a root, does the .aimesh state directory exist, is
-// the shared adapters file present. It is read-only — it creates nothing, because a probe that
-// initializes what it was asked to inspect cannot be run to find out whether initialization is
-// needed.
-//
-// It REPORTS rather than blocking: with no root anywhere it prints ready=false and exits 0, since a
-// read-only probe that errors tells a caller nothing about what to do next. --require-root turns
-// that into an assertion for CI, where the absence of a root should fail the run.
-//
-// Adapter-level depth — probing binaries, guided repair, per-profile lane resolution — lives in the
-// domain doctors (`aimesh review doctor`, `aimesh explore doctor`), which own the flags for it.
+// runDoctor reports shared readiness: the state root, the .aimesh directory and the shared adapters
+// file. It creates nothing and exits 0 when not ready; --require-root makes a missing root fail.
+// Adapter readiness is reported by the domain doctors.
 func runDoctor(args []string, out, errw io.Writer) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(errw)
@@ -151,8 +136,7 @@ func runDoctor(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(out, "\nadapter readiness is per-domain: `aimesh review doctor`, `aimesh explore doctor`")
 	}
 
-	// The assertion is evaluated AFTER the report: a caller that asked for a gate still gets the
-	// diagnosis explaining what the gate tripped on.
+	// The assertion runs after the report, so a failing check still prints its diagnosis.
 	if *requireRoot && rec.RootSource == "cwd_no_marker" {
 		fmt.Fprintf(errw, "aimesh doctor: --require-root: no state root found at or above %s\n", cwd)
 		return int(fault.Config)

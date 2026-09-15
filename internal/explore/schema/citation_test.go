@@ -168,7 +168,7 @@ func TestApplyCitations_RetainedReferencesAreBounded(t *testing.T) {
 	primary := []Envelope{envAt(0, 1)}
 	long := strings.Repeat("x", maxUnverifiedRefBytes*2)
 	srcs := []string{long, "a\nb\nc"}
-	for i := 0; i < maxUnverifiedRefs+5; i++ {
+	for i := range maxUnverifiedRefs + 5 {
 		srcs = append(srcs, "ref"+strconv.Itoa(i))
 	}
 	out := CollatorOutput{SynthesisSummary: "s", Findings: []Finding{{Statement: "f", Sources: srcs}}}

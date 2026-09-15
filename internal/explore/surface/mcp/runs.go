@@ -5,18 +5,13 @@ import (
 	"time"
 )
 
-// This file is the JOB REGISTRY.
+// This file holds the run registry. Runs outlive the calls that start them, so a client that times out or
+// disconnects can still poll explore_run_status and fetch explore_run_result by run id.
 //
-// The registry exists because MCP calls are job-shaped: common client request timeouts are around 60
-// seconds, and a multi-minute exploration would otherwise be killed MID-SPEND with no way to reach the
-// subprocesses it started. Holding the run here means a client that times out, disconnects or crashes can
-// still poll `explore_run_status` and fetch `explore_run_result` — and, just as importantly, that the run has an identity
-// (its run id) which the on-disk record is keyed by.
-//
-// It is not a spend governor. See the note on the retention constants for why there are no admission
-// bounds and where the concurrency decision lives.
+// The registry does not limit how many runs start or run at once; callers bound their own runs with
+// `maxParallel`. It bounds only how many finished runs it retains, and for how long.
 
-// Run states, as they appear on the wire.
+// Run states.
 const (
 	StateRunning   = "running"
 	StateComplete  = "complete"
@@ -24,22 +19,8 @@ const (
 	StateCancelled = "cancelled"
 )
 
-// There is deliberately NO ADMISSION GOVERNOR — neither a lifetime run cap nor an in-flight one.
-//
-// A lifetime cap would not be a spend ceiling: stopping and starting the server clears any counter, so
-// its guarantee would last exactly as long as the process did.
-//
-// An in-flight cap would bound how many provider CLI subprocesses this machine hosts at once — a fact
-// about the operator's hardware (memory, process budget, whether the model is local and loads weights)
-// and their provider rate limits, which a launch-time constant chosen by exploremesh can only guess.
-// That number is stated PER INVOCATION as `maxParallel`, by the caller who knows it, and it bounds the
-// seats of their own run rather than admission to the server.
-//
-// So the registry bounds only RETENTION, which is about this process's memory and nothing else.
+// Retention limits for finished runs.
 const (
-	// retainFinished bounds how many FINISHED runs stay fetchable; finishedTTL bounds how long. Both are
-	// needed: a long-lived server must not grow without bound, and a short-lived one must not evict a
-	// result before the client that started it can read it.
 	retainFinished = 50
 	finishedTTL    = time.Hour
 )
@@ -61,14 +42,11 @@ type record struct {
 	structured map[string]any
 	text       string
 	isError    bool
-	// pick is the panel this run ASKED for, captured at admission. It is held on the record rather than
-	// only on the starting call so that a `explore_run_status`/`explore_run_result` issued while the run is still in
-	// flight can still answer "which panel is this?" — the requested-vs-executed echo is required on
-	// every branch of the output schema, including `running`.
+	// pick is the requested panel, kept so status and result calls can echo it while the run is in flight.
 	pick panelPick
 }
 
-// snapshot returns the record's terminal payload (nil while it is still running).
+// snapshot returns the record's state and terminal payload; the payload is nil while running.
 func (r *record) snapshot() (state string, structured map[string]any, text string, isError bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -83,17 +61,14 @@ func (r *record) finish(state string, structured map[string]any, text string, is
 	close(r.done)
 }
 
-// timestamps returns Start and End UNDER THE LOCK. End is written by finish() from the run's own
-// goroutine while a poller may be reading it from another, so it is not a field a reader may take
-// directly — and the tasks projection reads it on every `tasks/get`.
+// timestamps returns Start and End under the lock, since finish writes End concurrently.
 func (r *record) timestamps() (start, end time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.Start, r.End
 }
 
-// attachPick records the requested panel at admission; pickSnapshot reads it back. Both take the mutex
-// because a concurrent explore_run_status/explore_run_result reads it from another goroutine.
+// attachPick records the requested panel.
 func (r *record) attachPick(p panelPick) {
 	r.mu.Lock()
 	r.pick = p
@@ -106,9 +81,7 @@ func (r *record) pickSnapshot() panelPick {
 	return r.pick
 }
 
-// registry holds this process's runs. It is bounded in two independent ways — concurrency and
-// retention — because they fail differently: concurrency bounds the spend RATE, and retention bounds
-// memory. `started` is reported telemetry, not a ceiling.
+// registry holds this process's runs. active and started are reported counts, not limits.
 type registry struct {
 	mu      sync.Mutex
 	byID    map[string]*record
@@ -116,8 +89,7 @@ type registry struct {
 	order   []string
 	active  int
 	started int
-	// onEvict is called with the run id of every record the registry drops, so the resources a run
-	// published cannot outlive the run itself.
+	// onEvict is called with the id of each dropped run, so its published resources are removed too.
 	onEvict func(runID string)
 }
 
@@ -125,9 +97,7 @@ func newRegistry() *registry {
 	return &registry{byID: map[string]*record{}, byKey: map[string]string{}}
 }
 
-// existing returns the run already registered under an idempotency key. A duplicate key is NEVER a second
-// run: a client retrying after a dropped connection must get its original run back, not a second panel
-// billed to the same person for the same question.
+// existing returns the run registered under an idempotency key, or nil.
 func (rg *registry) existing(key string) *record {
 	if key == "" {
 		return nil
@@ -140,9 +110,7 @@ func (rg *registry) existing(key string) *record {
 	return nil
 }
 
-// admit registers a new run. It does not refuse: there is no admission governor (see the note on
-// retention above), so the error return is kept only because callers treat admission as fallible and
-// a future bound would land here.
+// admit registers a new run. It currently always succeeds.
 func (rg *registry) admit(id, tool, modeName, key string, cancel func()) (*record, error) {
 	rg.mu.Lock()
 	defer rg.mu.Unlock()
@@ -168,9 +136,8 @@ func (rg *registry) release(id string) {
 	rg.evictLocked()
 }
 
-// evictLocked drops finished runs past the TTL, then past the retention count (oldest first). A RUNNING
-// run is never evicted — losing the handle would leave a live subprocess tree with nothing able to cancel
-// it.
+// evictLocked drops finished runs older than finishedTTL, then the oldest finished runs beyond
+// retainFinished. Running runs are never evicted, so they stay cancellable.
 func (rg *registry) evictLocked() {
 	now := time.Now()
 	keep := rg.order[:0]
@@ -227,8 +194,7 @@ func (rg *registry) get(id string) *record {
 	return rg.byID[id]
 }
 
-// cancelAll cancels every in-flight run — used when the server's transport goes away, so a disconnect
-// never leaves a panel of model CLIs running with nobody to receive their output.
+// cancelAll cancels every running run. The server calls it when its transport closes.
 func (rg *registry) cancelAll() {
 	rg.mu.Lock()
 	recs := make([]*record, 0, len(rg.byID))
@@ -243,7 +209,7 @@ func (rg *registry) cancelAll() {
 	}
 }
 
-// counts reports the in-flight and lifetime run counts (for the limits block `explore_list` reports).
+// counts returns the number of running runs and of runs started, as reported by explore_list.
 func (rg *registry) counts() (active, started int) {
 	rg.mu.Lock()
 	defer rg.mu.Unlock()

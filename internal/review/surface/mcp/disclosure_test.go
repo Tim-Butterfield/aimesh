@@ -8,9 +8,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// Who performs writes, and whether the diff is available, must appear in `review_doctor` and
-// `review_list`, not only as a stderr line at launch: a host launches its servers from a config file and
-// MAY discard stderr entirely.
+// review_doctor and review_list disclose who performs writes and whether the diff is available; a
+// host may discard the server's stderr.
 
 func TestDoctor_DisclosesWhoWrites(t *testing.T) {
 	ws := workspaceFixture(t)
@@ -36,12 +35,12 @@ func TestDoctor_DisclosesWhoWrites(t *testing.T) {
 			if got, _ := res.structured["rootCeiling"].(float64); int(got) != 1 {
 				t.Fatalf("rootCeiling = %v, want 1", res.structured["rootCeiling"])
 			}
-			// CATEGORICAL, WITH NO PATHS.
+			// Categorical values only, with no paths.
 			blob, _ := json.Marshal(res.structured)
 			if strings.Contains(string(blob), ws) {
 				t.Fatalf("doctor leaked a ceiling path: %s", blob)
 			}
-			// The human rendering carries it too: some clients show a model only that channel.
+			// The text rendering carries it too, since some clients show a model only that channel.
 			if !strings.Contains(res.text, "Writes: "+tc.writes) {
 				t.Fatalf("the doctor text must carry the disclosure too, got %q", res.text)
 			}

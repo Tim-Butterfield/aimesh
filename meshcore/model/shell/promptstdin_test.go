@@ -11,26 +11,14 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// TestPromptOnStdin_CarriesAWorkspaceSizedPrompt is the regression test for a ceiling that was
-// never the model's and never memory's: argv.
-//
-// `execve` bounds the whole argument vector, so a prompt passed as an argument is capped by the
-// OPERATING SYSTEM — measured darwin/arm64 (ARG_MAX 1 MiB): 512 KiB execs, 1 MiB fails with
-// "argument list too long", and Linux caps a single argument lower still (MAX_ARG_STRLEN,
-// typically 128 KiB). The failure lands at exec time with EMPTY stderr, because the provider
-// never starts, so there is nothing for clihint to classify either.
-//
-// This mattered the moment the collector's coverage caps came off: a real workspace produces a
-// multi-megabyte prompt, and every provider recipe passed it as argv. The fake adapter never
-// execs, so no existing test could have caught it.
-//
-// /bin/cat is the stand-in CLI: it echoes stdin, so a byte-exact round trip proves the whole
-// prompt reached the process.
+// A workspace-sized prompt reaches the process on stdin. As an argument it would hit the OS argv
+// limit (ARG_MAX is 1 MiB on darwin/arm64; Linux limits one argument to MAX_ARG_STRLEN, typically
+// 128 KiB), failing at exec time with empty stderr. /bin/cat stands in for the CLI and echoes stdin.
 func TestPromptOnStdin_CarriesAWorkspaceSizedPrompt(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses /bin/cat as a stand-in CLI")
 	}
-	const size = 6 << 20 // the measured payload of a real review of this repo, and 6x ARG_MAX
+	const size = 6 << 20 // six times darwin's ARG_MAX
 	prompt := strings.Repeat("x", size)
 
 	a := New(Recipe{
@@ -46,15 +34,14 @@ func TestPromptOnStdin_CarriesAWorkspaceSizedPrompt(t *testing.T) {
 	if res.ExitCode != 0 {
 		t.Fatalf("exit=%d stderr=%s", res.ExitCode, res.Stderr)
 	}
-	// cappedBuffer bounds what we CAPTURE, which is a separate concern from what we SEND; assert
-	// on what arrived rather than on the full length.
+	// cappedBuffer bounds what is captured, not what is sent, so assert on what arrived rather than
+	// on the full length.
 	if got := len(res.Stdout); got == 0 || !strings.HasPrefix(string(res.Stdout), "xxxx") {
 		t.Fatalf("the prompt did not reach the process: %d bytes back", got)
 	}
 }
 
-// TestPromptOnArgv_HitsTheOSCeiling pins the reason the field exists. If this ever stops failing,
-// the platform changed — not the argument that a prompt does not belong in argv.
+// A 6 MiB argv element fails to exec, which is why PromptOnStdin exists.
 func TestPromptOnArgv_HitsTheOSCeiling(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses /bin/cat as a stand-in CLI")
@@ -73,23 +60,14 @@ func TestPromptOnArgv_HitsTheOSCeiling(t *testing.T) {
 	if !strings.Contains(err.Error(), "argument list too long") {
 		t.Errorf("unexpected failure: %v", err)
 	}
-	// The shape that makes this hard to diagnose in the field, pinned so it is not a surprise:
-	// the CLI never ran, so there is no stderr for clihint to classify.
+	// The CLI never ran, so there is no stderr for clihint to classify.
 	if len(res.Stderr) != 0 {
 		t.Errorf("expected empty stderr from a failed exec, got %q", res.Stderr)
 	}
 }
 
-// TestPromptOnArgv_RefusesAnOptionLikePrompt pins the guard that argv-passing recipes need and that
-// no prompt builder can be trusted to maintain from another package.
-//
-// A prompt beginning with `-` reaches an argv recipe's flag parser as an OPTION. Measured
-// 2026-08-30, a `-----` ballot header cost a live shortlist run 3 of 5 seats (devin-cli exited 2 on
-// its usage, cursor-cli exited 1) while the stdin recipes answered normally — a partial panel, a
-// failed quorum, and a withheld ranking, with nothing in any single lane to say why.
-//
-// The guard converts that into one refusal before spend. It is deliberately NOT a normalization:
-// silently rewriting a caller's prompt would hide the same defect one layer down.
+// An argv recipe refuses a prompt that begins with `-`, which the CLI's flag parser would read as an
+// option. The refusal happens before spend, and the prompt is never rewritten.
 func TestPromptOnArgv_RefusesAnOptionLikePrompt(t *testing.T) {
 	argv := Recipe{
 		Name: "argv-probe", Detect: "cat", Evidence: core.EvidenceNone,
@@ -113,8 +91,7 @@ func TestPromptOnArgv_RefusesAnOptionLikePrompt(t *testing.T) {
 		}
 	}
 
-	// A stdin recipe is UNAFFECTED: the constraint belongs to argv, not to prompts. Same prompt,
-	// same guard, no refusal — /bin/cat echoes it back.
+	// A stdin recipe is unaffected: the same prompt is accepted and /bin/cat echoes it back.
 	if runtime.GOOS != "windows" {
 		stdin := argv
 		stdin.Name, stdin.PromptOnStdin = "stdin-probe", true

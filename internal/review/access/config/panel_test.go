@@ -56,9 +56,8 @@ profiles:
 	}
 }
 
-// TestMerge_PanelSpellingReplacesLegacyAcrossLayers: an override layer that declares a panel for a
-// profile the base spelled with `lanes.reviewer` MIGRATES it — the effective config carries exactly
-// one spelling, so the same-layer conflict rule can never be tripped by merging.
+// TestMerge_PanelSpellingReplacesLegacyAcrossLayers: a layer declaring `reviewers` replaces a lower
+// layer's `lanes.reviewer`, so the merged profile carries one spelling.
 func TestMerge_PanelSpellingReplacesLegacyAcrossLayers(t *testing.T) {
 	base := Config{Profiles: map[string]Profile{"p": {Lanes: map[string]Lane{
 		"reviewer":          {Execution: "adapter", Adapter: "fake", Model: "fake-model"},
@@ -70,7 +69,7 @@ func TestMerge_PanelSpellingReplacesLegacyAcrossLayers(t *testing.T) {
 	}}}}
 	got := merge(base, over).Profiles["p"]
 	if _, still := got.Lanes["reviewer"]; still {
-		t.Error("the legacy one-seat spelling must be dropped when a layer supplies a panel")
+		t.Error("the one-seat spelling must be dropped when a layer supplies a panel")
 	}
 	if len(got.ReviewerSeats()) != 2 {
 		t.Errorf("effective panel = %d seats, want 2", len(got.ReviewerSeats()))
@@ -78,7 +77,7 @@ func TestMerge_PanelSpellingReplacesLegacyAcrossLayers(t *testing.T) {
 	if _, kept := got.Lanes["author_remediator"]; !kept {
 		t.Error("a panel override must not disturb the single-slot lanes")
 	}
-	// …and the reverse: a layer that re-declares the legacy lane drops an inherited panel.
+	// The reverse: a layer that declares lanes.reviewer drops an inherited panel.
 	back := merge(merge(base, over), Config{Profiles: map[string]Profile{"p": {Lanes: map[string]Lane{
 		"reviewer": {Execution: "adapter", Adapter: "c", Model: "m"},
 	}}}}).Profiles["p"]
@@ -99,9 +98,8 @@ func panelTestConfig() Config {
 	return c
 }
 
-// TestResolvePanel_OrderedSeatsAndIDs: the resolved panel preserves the authored ORDER and mints
-// stable seat ids, with seat 1 keeping the bare role name (so a panel of one is indistinguishable
-// from the historical single reviewer in every record).
+// TestResolvePanel_OrderedSeatsAndIDs: the resolved panel keeps the authored order and assigns seat
+// ids, with seat 1 named "reviewer".
 func TestResolvePanel_OrderedSeatsAndIDs(t *testing.T) {
 	c := panelTestConfig()
 	c.Profiles["p"] = Profile{Reviewers: []Lane{
@@ -156,11 +154,7 @@ func TestResolvePanel_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestResolvePanel_ReportsEveryUnresolvableSeat: one refusal names ALL of them.
-//
-// Resolution is pure configuration lookup — no process, no spend — so every blocker is knowable in
-// one pass. Reporting only the first would make an N-seat panel with N bad seats cost N round trips:
-// fix, re-run, meet the next one.
+// TestResolvePanel_ReportsEveryUnresolvableSeat: one refusal names every unresolvable seat.
 func TestResolvePanel_ReportsEveryUnresolvableSeat(t *testing.T) {
 	c := panelTestConfig()
 	c.Profiles["p"] = Profile{Reviewers: []Lane{
@@ -183,16 +177,15 @@ func TestResolvePanel_ReportsEveryUnresolvableSeat(t *testing.T) {
 			t.Errorf("one refusal must name every blocker; %q missing from:\n%s", want, msg)
 		}
 	}
-	// The reason code stays the FIRST failure's, so anything keying on `--json` reasonCode reads the
-	// same value it did when this returned one error at a time.
+	// The reason code is the first failure's.
 	if got := fault.ReasonOf(err); got != "lane_adapter_unconfigured" {
 		t.Errorf("reasonCode = %q, want the first failure's (lane_adapter_unconfigured)", got)
 	}
 }
 
-// A panel whose seats all resolve must still be refused for a duplicate identity — the check moved
-// after resolution, and moving it must not have dropped it.
-func TestResolvePanel_DuplicateIsStillCaughtAfterTheMove(t *testing.T) {
+// A panel whose seats all resolve is still refused for a duplicate identity, which is checked after
+// resolution.
+func TestResolvePanel_DuplicateIsCaughtAfterResolution(t *testing.T) {
 	c := panelTestConfig()
 	c.Profiles["p"] = Profile{Reviewers: []Lane{
 		{Execution: "adapter", Adapter: "a", Model: "a-model"},
@@ -208,8 +201,8 @@ func TestResolvePanel_DuplicateIsStillCaughtAfterTheMove(t *testing.T) {
 	}
 }
 
-// TestResolvePanel_AdHocReplacesProfilePanel: an invocation-composed panel REPLACES the profile's
-// (never merges), and each of its seats is resolved by the same rule a profile seat is.
+// TestResolvePanel_AdHocReplacesProfilePanel: an invocation-composed panel replaces the profile's
+// rather than merging, and its seats resolve by the same rule.
 func TestResolvePanel_AdHocReplacesProfilePanel(t *testing.T) {
 	c := panelTestConfig()
 	c.Profiles["p"] = Profile{Reviewers: []Lane{{Execution: "adapter", Adapter: "a", Model: "a-model"}}}
@@ -228,10 +221,8 @@ func TestResolvePanel_AdHocReplacesProfilePanel(t *testing.T) {
 	}
 }
 
-// TestResolve_PanelProfileStillExposesTheReviewerLane: a profile spelled with `reviewers` still
-// resolves a `lanes[reviewer]` compatibility alias (seat 1), so every role-shaped consumer keeps
-// working — and the alias carries NO seat id, so the artifacts written from the role map are
-// unchanged from a pre-panel build.
+// TestResolve_PanelProfileStillExposesTheReviewerLane: a profile spelled with `reviewers` resolves a
+// Lanes[reviewer] alias for seat 1, and the alias carries no seat id.
 func TestResolve_PanelProfileStillExposesTheReviewerLane(t *testing.T) {
 	c := panelTestConfig()
 	c.Profiles["p"] = Profile{

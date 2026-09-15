@@ -7,20 +7,14 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 )
 
-// The ACP partial-refusal contract.
-//
-// A partially-refused apply answers with the official ACP StopReason `refusal`. Not `end_turn`: that
-// is the word for a turn that ended normally, and a host keying on stopReason alone would read it as
-// clean. Not a `-32000` halt: a halt is an ERROR response, and telling a caller the turn failed over a
-// write that committed would contradict the receipt.
-//
-// The turns below are FROM-RUN writes, because that is what an ACP apply turn is: it applies the
-// decision set the `fromRun` run recorded rather than re-adjudicating.
+// A partially refused apply answers with stopReason refusal: end_turn would read as clean, and an
+// error response would contradict a committed write. These turns are fromRun writes, as every ACP
+// apply turn is.
 
 // refusedRemediation is a completed apply that wrote seven findings and refused one.
 func refusedRemediation() run.RemediateOutcome {
 	applied := make([]run.AppliedFinding, 0, 7)
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		applied = append(applied, run.AppliedFinding{
 			FindingID: "F-00" + string(rune('1'+i)), File: "a.go",
 			State: string(review.StateApplied),
@@ -36,13 +30,12 @@ func refusedRemediation() run.RemediateOutcome {
 	}
 }
 
-// applyTurn is the two-turn shape: a handle from an earlier report turn, and an apply turn keyed on
-// it. The handle is resolved by the fake, so these tests stay about the RESPONSE contract.
+// applyTurn is an apply turn keyed on a handle from an earlier report turn. The fake resolves the
+// handle, so these tests cover only the response.
 const applyTurn = `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":` +
 	`{"sessionId":"s-0001","workspace":` + wsPlaceholder + `,"fromRun":"/artifacts/prior-report-run","mode":"apply"}}`
 
-// TestPrompt_PartialRefusal_StopReasonRefusal is the coarse signal: a host that reads nothing but
-// `stopReason` must not conclude the turn was clean.
+// A host that reads only stopReason must not conclude the turn was clean.
 func TestPrompt_PartialRefusal_StopReasonRefusal(t *testing.T) {
 	r := serveCaps(t, &fakeRemediator{out: refusedRemediation()},
 		review.SurfaceCaps{FileRead: true, FileWrite: true}, true,
@@ -57,10 +50,7 @@ func TestPrompt_PartialRefusal_StopReasonRefusal(t *testing.T) {
 	}
 }
 
-// TestPrompt_PartialRefusal_MetaCarriesTheNumbers is the other half, and it is what keeps
-// `refusal` from being MIS-read. `refusal` over-signals on purpose; the risk it introduces is a
-// host concluding that NOTHING was applied, and the answer to that risk is `applied: 7` sitting
-// beside it. A stopReason with no numbers would trade one wrong reading for another.
+// refusal must not read as nothing applied, so the response carries applied: 7 beside it.
 func TestPrompt_PartialRefusal_MetaCarriesTheNumbers(t *testing.T) {
 	r := serveCaps(t, &fakeRemediator{out: refusedRemediation()},
 		review.SurfaceCaps{FileRead: true, FileWrite: true}, true,
@@ -85,13 +75,12 @@ func TestPrompt_PartialRefusal_MetaCarriesTheNumbers(t *testing.T) {
 	if row["file"] != ".env" || row["reason"] != review.ApplyRefusalProtectedPath {
 		t.Errorf("refusal = %v, want .env/protected_path", row)
 	}
-	// Keyed on the HOST-COMPUTED fingerprint, never the model-authored finding id.
+	// Keyed on the host-computed fingerprint, never the model-authored finding id.
 	if row["fingerprint"] != "sha1:deadbeef" {
 		t.Errorf("refusal fingerprint = %v, want the host-computed value", row["fingerprint"])
 	}
-	// The two handles are BOTH present and are different runs: `runDir` is this write's own record
-	// (its journal and receipt), `sourceRunDir` the run whose decisions it applied. A response that
-	// carried one for both would make the receipt unfindable.
+	// runDir is this write's own record and sourceRunDir the run whose decisions it applied; both must
+	// be present and differ.
 	if rm["runDir"] == rm["sourceRunDir"] {
 		t.Errorf("runDir and sourceRunDir must name different runs, both were %v", rm["runDir"])
 	}
@@ -100,9 +89,7 @@ func TestPrompt_PartialRefusal_MetaCarriesTheNumbers(t *testing.T) {
 	}
 }
 
-// TestPrompt_CleanApply_StillEndTurn pins the blast radius: an apply that refused nothing is
-// unchanged. `refusal` must mean something, which requires that the ordinary turn keeps saying
-// `end_turn`.
+// An apply that refused nothing still ends with end_turn.
 func TestPrompt_CleanApply_StillEndTurn(t *testing.T) {
 	clean := refusedRemediation()
 	clean.Refusals = nil

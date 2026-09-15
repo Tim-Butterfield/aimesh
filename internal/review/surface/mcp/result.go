@@ -12,22 +12,15 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file builds what a tool call HANDS BACK: the `structuredContent` (which must validate
-// against the declared outputSchema) and the short human rendering that rides `content`.
+// This file builds tool results: the structuredContent, which must validate against the declared
+// outputSchema, and the short text rendering in content. Both are populated for every result,
+// including failures, because some clients show the model only one of them.
 //
-// Both channels are populated for every result, including failures. Some clients show the model
-// only the text; some pass only the structured payload to a validator. A fact that lived in one
-// channel would be invisible to half of them — the same failure mode as reporting a count without
-// its denominator.
+// Two rules are enforced here:
 //
-// Two reviewmesh-specific rules are enforced here rather than trusted to a caller:
-//
-//   - NO HOST PATHS. The projection's `runDir` is dropped: a run id is opaque on this surface, and
-//     the audit trail is reachable from the machine that owns it, not from a third party's
-//     inference log.
-//   - NOTHING IS RE-DERIVED. Agreement counts, apply refusals, severities and dispositions are
-//     carried through verbatim from the adjudication the run already performed. A second derivation
-//     here would be a second answer.
+//   - No host paths: the projection's runDir is dropped.
+//   - Nothing is re-derived: agreement counts, refusals, severities and dispositions are copied from
+//     the run's adjudication.
 
 // seatSpecMap renders one requested seat.
 func seatSpecMap(s review.SeatSpec) map[string]any {
@@ -38,16 +31,15 @@ func seatSpecMap(s review.SeatSpec) map[string]any {
 	return m
 }
 
-// panelPick is what a call ASKED for. It is kept beside the executed roster because the echo is
-// only meaningful as a pair.
+// panelPick is the panel a call requested, kept to pair with the executed roster.
 type panelPick struct {
 	source    string // "adhoc": every panel is composed by the call
 	reviewers []review.SeatSpec
 	roles     map[review.Role]review.SeatSpec // cross_check / verifier / author_remediator
 }
 
-// echo renders the requested-vs-executed roster. It is REQUIRED in the output schema: a seat that
-// halted is visible only by comparing the two halves.
+// echo renders the requested and executed roster. The output schema requires it, since a halted seat
+// is visible only by comparing the two.
 func (p panelPick) echo(executed []runview.PanelSeat) map[string]any {
 	req := map[string]any{"source": p.source}
 	if len(p.reviewers) > 0 {
@@ -80,19 +72,15 @@ func (p panelPick) echo(executed []runview.PanelSeat) map[string]any {
 	return map[string]any{"requested": req, "executed": exec}
 }
 
-// findingMaps projects the run view's findings WITH their per-seat provenance. Every governance
-// field is carried through as the host computed it.
+// findingMaps projects the run view's findings with their per-seat provenance, as the host computed
+// it.
 func findingMaps(view runview.View) ([]map[string]any, int, int) {
 	out := make([]map[string]any, 0, len(view.Findings))
 	accepted, quarantined := 0, 0
 	for _, f := range view.Findings {
 		row := map[string]any{
-			// `fingerprint` is THE CHANNEL THAT MAKES SELECTIVE APPLY EXPRESSIBLE ON THIS SURFACE.
-			// A caller cannot select on host-computed values it was never told, and `review_report`
-			// is the only moment we can tell it — `review_remediate {fromRun}` takes the selector,
-			// it does not hand one out. It is deliberately NOT `id`: an id is model-authored and is
-			// renumbered by the run, so keying a write set on one would let a model relabel
-			// findings until "apply only this" selected something else.
+			// The fingerprint is how a caller selects findings for review_remediate, and review_report is the only
+			// place it is disclosed. It is not the model-authored id, which a model could relabel.
 			"fingerprint": f.Fingerprint,
 			"id":          f.ID, "severity": f.Severity, "kind": f.Kind,
 			"summary": f.Summary, "disposition": f.Disposition,
@@ -130,11 +118,7 @@ func findingMaps(view runview.View) ([]map[string]any, int, int) {
 		if len(f.DissentingSeats) > 0 {
 			row["dissentingSeats"] = f.DissentingSeats
 		}
-		// WHAT THE COUNT WAS WORTH, and WHAT THE SEATS DID WITH IT. The output schema has declared
-		// both since the composition pass landed; this is where they reach the wire. A calling model
-		// reading `agreementCount: 3` without them is reading the most quotable number in the result
-		// stripped of the two facts that qualify it — how independent those seats were, and how many
-		// of the seats that ran stayed silent.
+		// Qualify the agreement count with how independent the seats were and how many stayed silent.
 		if f.DistinctModels > 0 {
 			row["distinctModels"] = f.DistinctModels
 		}
@@ -153,10 +137,8 @@ func findingMaps(view runview.View) ([]map[string]any, int, int) {
 	return out, accepted, quarantined
 }
 
-// verificationResultMaps projects one verification pass. It is an explicit projection rather than a
-// struct echo so the wire shape matches the declared schema without the schema having to track a Go
-// type, and so the optional fields are genuinely absent rather than present-and-zero — `timedOut:
-// false` on every row would train a reader past the one row where it is true.
+// verificationResultMaps projects one verification pass explicitly, so the wire shape matches the
+// schema and optional fields are absent rather than zero.
 func verificationResultMaps(rs []review.VerificationResult) []map[string]any {
 	out := make([]map[string]any, 0, len(rs))
 	for _, r := range rs {
@@ -169,8 +151,7 @@ func verificationResultMaps(rs []review.VerificationResult) []map[string]any {
 		if r.Unstartable != "" {
 			m["unstartable"] = r.Unstartable
 		}
-		// The OUTPUT tail is kept on the wire. A caller told a command failed and not shown what it
-		// printed has been handed a fact it cannot act on; it is bounded at the source, not here.
+		// Include the output tail so a caller can act on a failure; it is bounded at the source.
 		if r.Output != "" {
 			m["output"] = r.Output
 		}
@@ -241,8 +222,8 @@ func authorityMaps(view runview.View) []map[string]any {
 	return out
 }
 
-// completeResult builds the terminal payload of a finished review. `runId` is the SERVER's opaque
-// id; the run directory is deliberately absent.
+// completeResult builds the terminal payload of a finished review. runId is the server's opaque id;
+// the run directory is omitted.
 func completeResult(rec *record, pick panelPick, view runview.View, inline bool, remediable bool) (map[string]any, string, int) {
 	findings, accepted, quarantined := findingMaps(view)
 	counts := map[string]any{
@@ -278,14 +259,8 @@ func completeResult(rec *record, pick panelPick, view runview.View, inline bool,
 	if view.RequestedMode != "" {
 		structured["requestedMode"] = view.RequestedMode
 	}
-	// The run-level disclosure that this run's reviewer prompts carried context from EARLIER runs.
-	// Absent unless the operator enabled it; present whenever they did, including when the ledger
-	// turned out to be empty — a client must be able to tell "not blind to earlier runs" from
-	// "blind", and a per-finding annotation it might see none of cannot tell it that.	// The citation-grounding tally. It is present on every run that had a tree to check, and it
-	// carries its own `note` — a caller that reports "12 of 14 findings grounded" without it would be
-	// stating a stronger claim than the run made, and the note is how the artifact prevents that
-	// rather than merely discouraging it. `root` is omitted for the same reason `ledger` is above:
-	// this surface does not put host paths on the wire.
+	// The citation-grounding tally, with its note on what grounding does not establish. root is omitted:
+	// no host paths on the wire.
 	if g := view.Grounding; g != nil {
 		structured["grounding"] = map[string]any{
 			"checked":    g.Checked,
@@ -296,22 +271,16 @@ func completeResult(rec *record, pick panelPick, view runview.View, inline bool,
 			"note":       g.Note,
 		}
 	}
-	// The bounded-execution record. `root` is omitted for the same reason `ledger` is: this surface
-	// does not put host paths on the wire. The OUTPUT is kept — a caller told a command failed and not
-	// shown the tail has been given a fact it cannot act on — but bounded at the source.
-	// THE REDUCED DENOMINATOR, present only when a capacity failure cost this run a seat. A calling
-	// model reading `agreementCount` against the panel it requested — rather than against the panel
-	// that answered — would overstate every count in the result.
+	// Present only when a capacity failure cost the run a seat, so agreement counts are read against the
+	// panel that answered.
 	if p := view.PartialPanel; p != nil {
 		structured["partialPanel"] = p
 	}
-	// THE NARROWED SET. A caller that reads a clean result without knowing only four files were
-	// shown has been told the tree is clean when nobody looked at most of it.
+	// Present when the review was narrowed, so a clean result is not read as covering the whole tree.
 	if s := view.Scope; s != nil {
 		structured["scope"] = s
 	}
-	// WHAT THE PANEL WAS. It rides every result with a blind panel, because an agreement count is the
-	// most quotable number here and it is silently weaker whenever two seats share a model.
+	// Panel composition rides every blind-panel result, since shared models weaken agreement counts.
 	if c := view.Composition; c != nil {
 		structured["composition"] = map[string]any{
 			"seats":          c.Seats,
@@ -320,10 +289,7 @@ func completeResult(rec *record, pick panelPick, view runview.View, inline bool,
 			"note":           c.Note,
 		}
 	}
-	// WHAT THE PANEL AGREED ON. It rides with the composition for the same reason: a calling model
-	// quoting agreement counts needs the denominator AND the split. The `note` is not decoration —
-	// without it "3 contested" reads as three doubtful findings, and a silent seat is not a seat that
-	// disagreed.
+	// Dissent rides with composition. Its note explains that a silent seat did not disagree.
 	if d := view.Dissent; d != nil {
 		structured["dissent"] = map[string]any{
 			"panelled":  d.Panelled,
@@ -333,13 +299,8 @@ func completeResult(rec *record, pick panelPick, view runview.View, inline bool,
 			"note":      d.Note,
 		}
 	}
-	// THE DRY RUN'S DISCLOSURE. Without it a `dryRun` call returns status `planned` and an empty
-	// finding set, which is indistinguishable from a review that found nothing — and the input
-	// schema promises this object, so its absence made the declaration false. It is the whole
-	// product of a call that deliberately convenes nobody.
-	//
-	// The payload's paths are workspace-RELATIVE, like every `file` on a finding, so nothing here
-	// puts a host path on the wire.
+	// A dry run's shape; without it a planned status and empty findings would look like a review that
+	// found nothing. Paths are workspace-relative.
 	if sh := view.Shape; sh != nil {
 		structured["shape"] = sh
 	}
@@ -355,9 +316,8 @@ func completeResult(rec *record, pick panelPick, view runview.View, inline bool,
 	return structured, renderComplete(structured, view, accepted, quarantined), accepted
 }
 
-// haltResult builds the terminal payload for a run that HALTED. It rides `isError: true` on a
-// successful JSON-RPC response — a JSON-RPC error's `data` is routinely flattened or dropped by
-// clients, and losing the taxonomy loses exactly the field the model needs in order to react.
+// haltResult builds the terminal payload for a halted run. It is an isError result on a successful
+// JSON-RPC response, since clients often drop a JSON-RPC error's data.
 func haltResult(rec *record, pick panelPick, view runview.View, err error, cancelled bool) (map[string]any, string) {
 	state := StateHalted
 	if cancelled {
@@ -389,10 +349,9 @@ func haltResult(rec *record, pick panelPick, view runview.View, err error, cance
 	return structured, text
 }
 
-// refusalResult builds the payload for a call refused BEFORE any spend — an admission limit, a
-// trusted-root violation, a stale decision set, a missing write confirmation. It is the same
-// taxonomy shape as a halt, so a caller branches on `reasonCode` without caring whether the refusal
-// came before or after the money.
+// refusalResult builds the payload for a call refused before any spend, such as a path outside the
+// call's scope, a stale decision set or a missing write confirmation. It has the same taxonomy shape
+// as a halt.
 func refusalResult(runID string, err error) (map[string]any, string) {
 	return map[string]any{
 		"runId":      runID,
@@ -403,7 +362,7 @@ func refusalResult(runID string, err error) (map[string]any, string) {
 	}, capText(err.Error())
 }
 
-// runningResult is what a call returns when the run outlived its inline wait budget.
+// runningResult returns the payload for a run that outlived its inline wait.
 func runningResult(rec *record, pick panelPick, waited int) (map[string]any, string) {
 	structured := map[string]any{
 		"runId": rec.ID, "state": StateRunning, "tool": rec.Tool,
@@ -417,25 +376,22 @@ func runningResult(rec *record, pick panelPick, waited int) (map[string]any, str
 	return structured, text
 }
 
-// remediateResult builds the receipt payload. The receipt is the SAME object persisted to the run
-// record, so the wire answer and the durable answer cannot disagree.
+// remediateResult builds the receipt payload. The receipt is the same object persisted to the run
+// record.
 func remediateResult(rec *record, out run.RemediateOutcome, err error, patch *proto.Resource) (map[string]any, string, bool) {
 	receipt := receiptMap(out.Receipt, patch)
 	structured := map[string]any{
 		"runId": rec.ID, "tool": rec.Tool, "mode": string(out.Mode), "receipt": receipt,
-		// The write-outcome discriminator and its counts ride EVERY remediation result, halted
-		// ones included. A consumer that ignores `outcome` is less informed but never wrong,
-		// because the coarse signal it would need in order to be wrong — `isError` — is set
-		// independently, below, from `refused`.
+		// Every remediation result, halted ones included, carries the outcome and counts. isError is set
+		// independently from refused.
 		"outcome": out.Outcome(),
 		"counts":  map[string]any{"applied": out.Applied(), "refused": out.Refused()},
 	}
 	if n := out.Refused(); n > 0 {
 		structured["refusals"] = refusalMaps(out.Refusals)
 	}
-	// THE SELECTION, on every path including a halt. A caller whose `select` was refused for naming
-	// nothing needs to see WHICH of its selectors named nothing, and that is exactly the run that
-	// carries an error — so this is placed before the error branch below, not after it.
+	// The selection rides every path, including a halt, so a caller can see which selectors matched
+	// nothing.
 	if out.Selection.Selective() {
 		structured["selection"] = selectionMap(out.Selection)
 	}
@@ -463,13 +419,8 @@ func remediateResult(rec *record, out run.RemediateOutcome, err error, patch *pr
 		return structured, renderReceipt(out, err, patch), true
 	}
 	structured["state"] = StateComplete
-	// A PARTIAL REFUSAL is a completed write that must not read as clean. `state` deliberately
-	// stays "complete" — three run-status vocabularies already exist in this tree and adding a
-	// fifth value to one of them would make every consumer's exhaustive switch wrong, and
-	// "halted" would be a lie (the commit succeeded). The not-clean signal goes where a consumer
-	// reads it without parsing anything: `isError`. It is over-signalling by design — a caller
-	// that looks and finds `applied: 7` has lost nothing, whereas a caller that believes eight
-	// findings were written when seven were has lost the thing the partial-refusal contract exists to protect.
+	// A partial refusal is a completed write that must not read as clean. state stays "complete" and
+	// isError signals it; a caller that checks finds the applied count.
 	if out.Refused() > 0 {
 		structured["reasonCode"] = run.ReasonApplyRefusedProtectedPath
 		return structured, renderReceipt(out, nil, patch), true
@@ -477,9 +428,8 @@ func remediateResult(rec *record, out run.RemediateOutcome, err error, patch *pr
 	return structured, renderReceipt(out, nil, patch), false
 }
 
-// refusalMaps projects the protected-path refusals. The key is the HOST-COMPUTED fingerprint and
-// never the model-authored finding id — a model that could relabel findings could otherwise steer
-// which one a caller's follow-up selection names.
+// refusalMaps projects protected-path refusals, keyed by host-computed fingerprint rather than the
+// model-authored finding id.
 func refusalMaps(rs []review.ApplyRefusal) []map[string]any {
 	out := make([]map[string]any, 0, len(rs))
 	for _, r := range rs {
@@ -490,9 +440,7 @@ func refusalMaps(rs []review.ApplyRefusal) []map[string]any {
 	return out
 }
 
-// selectionMap projects a narrowing selection. All three lists are ALWAYS present, empty included:
-// "no selector was unmatched" is a checkable statement and an absent key is not — the same rule
-// `withheld` and `refusals` follow.
+// selectionMap projects a selection. All three lists are always present, empty included.
 func selectionMap(s *review.ApplySelection) map[string]any {
 	return map[string]any{
 		"requested": append([]string{}, s.Requested...),
@@ -509,9 +457,8 @@ func receiptMap(r run.Receipt, patch *proto.Resource) map[string]any {
 		"applied":            appliedMaps(r.Applied),
 		"notApplied":         appliedMaps(r.NotApplied),
 		"files":              append([]string{}, r.Files...),
-		// commitAttempted and committed are DIFFERENT facts. "Nothing was tried" and "something
-		// was tried and rolled back" are the two ways `committed: false` happens, and only one of
-		// them leaves a run worth inspecting.
+		// commitAttempted and committed differ: committed false can mean nothing was tried or a rollback
+		// happened.
 		"commitAttempted": r.CommitAttempted,
 		"committed":       r.Committed,
 	}
@@ -524,10 +471,8 @@ func receiptMap(r run.Receipt, patch *proto.Resource) map[string]any {
 	if r.ReasonCode != "" {
 		m["reasonCode"] = r.ReasonCode
 	}
-	// A LINK plus a HASH, never the content: a syntactically valid truncated patch is worse than a
-	// reference, because it reads as complete. `patchResource` is what makes the link RESOLVABLE —
-	// without it the name is run-record-relative to a root this surface deliberately withholds, and
-	// the caller is holding a reference to something it can never fetch.
+	// A link and a hash, never the content, since a truncated patch would read as complete. patchResource
+	// makes the link fetchable.
 	if r.PatchArtifact != "" {
 		m["patchArtifact"], m["patchSha256"] = r.PatchArtifact, r.PatchSHA256
 		if patch != nil && patch.URI != "" {
@@ -541,8 +486,7 @@ func hunkMaps(hs []run.IntendedHunk) []map[string]any {
 	out := make([]map[string]any, 0, len(hs))
 	for _, h := range hs {
 		row := map[string]any{"findingId": h.FindingID, "file": h.File, "bytes": h.Bytes, "origin": h.Origin}
-		// The replacement's DIGEST, never its text: a byte count identifies nothing (every
-		// replacement of that length shares it), and the text itself belongs in the patch artifact.
+		// The replacement's digest, never its text.
 		if h.ReplacementSHA256 != "" {
 			row["replacementSha256"] = h.ReplacementSHA256
 		}
@@ -572,10 +516,8 @@ func appliedMaps(as []run.AppliedFinding) []map[string]any {
 	return out
 }
 
-// haltClassOf resolves the taxonomy class for a failure. The run's own halt class wins when it has
-// one, then the fault's; otherwise the fault CODE is mapped to a stable class name, so `haltClass`
-// is never empty on a payload whose schema requires it — a client branching on the taxonomy must
-// not have to handle an absent class.
+// haltClassOf resolves the taxonomy class for a failure: the run's halt class, then the fault's, then
+// a stable name for the fault code. It never returns "".
 func haltClassOf(err error, view runview.View) string {
 	if view.HaltRecord != nil && view.HaltRecord.HaltClass != "" {
 		return view.HaltRecord.HaltClass
@@ -602,8 +544,7 @@ func haltClassOf(err error, view runview.View) string {
 	}
 }
 
-// reasonOf returns the stable machine reason code, never an empty string: a payload whose schema
-// requires `reasonCode` must carry one even for a failure that arrived without a typed reason.
+// reasonOf returns the machine reason code for err, never "".
 func reasonOf(err error) string {
 	if r := fault.ReasonOf(err); r != "" {
 		return r
@@ -616,7 +557,7 @@ func reasonOf(err error) string {
 // maxFailureText bounds a message that reaches a third-party inference log.
 const maxFailureText = 2000
 
-// maxExcerpt bounds a journal anchor echoed back to the caller (it is workspace content).
+// maxExcerpt bounds a journal anchor echoed to the caller, since it is workspace content.
 const maxExcerpt = 160
 
 func capText(s string) string {
@@ -633,8 +574,7 @@ func capExcerpt(s string) string {
 	return s[:maxExcerpt] + "…"
 }
 
-// renderComplete leads with the governance facts a reader must not miss, because the text channel
-// is all some clients ever show the model.
+// renderComplete leads with the governance facts, since some clients show the model only text.
 func renderComplete(structured map[string]any, view runview.View, accepted, quarantined int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Review complete (mode %v, status %v, run %v). It wrote NOTHING to the workspace.\n",
@@ -677,17 +617,13 @@ func renderComplete(structured map[string]any, view runview.View, accepted, quar
 func renderReceipt(out run.RemediateOutcome, err error, patch *proto.Resource) string {
 	r := out.Receipt
 	var b strings.Builder
-	// AN UNMATCHED SELECTOR GOES FIRST TOO, and for the same reason: a caller that narrowed the
-	// write set with a fingerprint naming nothing got a SMALLER write than it asked for, and the
-	// difference between "that finding was applied" and "that selector matched nothing" is exactly
-	// what it cannot afford to guess.
+	// An unmatched selector is listed first too: the write was smaller than requested.
 	if out.Selection.Selective() && len(out.Selection.Unmatched) > 0 {
 		fmt.Fprintf(&b, "SELECTOR MATCHED NOTHING: %d of %d fingerprint(s) in `select` name no finding in run %s's accepted set (%s). They wrote nothing and nothing was fetched for them. Check them against that run's accepted findings — the selector is the `fingerprint` field, never a finding's `id`.\n",
 			len(out.Selection.Unmatched), len(out.Selection.Requested), out.SourceRunID,
 			strings.Join(out.Selection.Unmatched, ", "))
 	}
-	// THE REFUSAL GOES FIRST, before the applied summary. The text channel is all some clients
-	// ever show the model, and a refusal buried under seven successes is a refusal nobody reads.
+	// The refusal is listed before the applied summary.
 	if n := out.Refused(); n > 0 {
 		files := make([]string, 0, n)
 		for _, ref := range out.Refusals {
@@ -719,9 +655,7 @@ func renderReceipt(out run.RemediateOutcome, err error, patch *proto.Resource) s
 	}
 	if r.PatchArtifact != "" {
 		if patch != nil && patch.URI != "" {
-			// The text channel says how to COLLECT it, because some clients show the model nothing
-			// else — and a governed write whose product the caller cannot fetch is a workflow that
-			// completed and delivered nothing.
+			// Explain how to collect the patch, since some clients show the model only text.
 			fmt.Fprintf(&b, "Complete patch: fetch it with resources/read on %s, then verify it against %s. It is linked, never inlined — a truncated patch that still parses reads as complete.\n",
 				patch.URI, r.PatchSHA256)
 		} else {

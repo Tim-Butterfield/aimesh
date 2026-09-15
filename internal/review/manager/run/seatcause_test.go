@@ -12,7 +12,7 @@ import (
 )
 
 // failingSeat exits non-zero with a chosen stderr, so a panel can be given two seats that fail for
-// two DIFFERENT, independently fixable reasons — the situation measured on 2026-08-11.
+// different, independently fixable reasons.
 type failingSeat struct {
 	name   string
 	stderr string
@@ -25,16 +25,15 @@ func (f failingSeat) Invoke(context.Context, model.Call) (model.Result, error) {
 	return model.Result{ExitCode: 1, Stderr: []byte(f.stderr)}, nil
 }
 
-// TestPanelHalt_EverySeatRecordsItsOwnCause: a panel whose seats fail for different reasons records
-// BOTH, each with its own signal. The run-level Failure carries only the first-by-index seat; if the
-// other seat's cause existed only inside the run directory, an operator would fix one blocker, pay for
-// the whole panel again, and meet the next one.
+// TestPanelHalt_EverySeatRecordsItsOwnCause checks that a panel whose seats fail for different reasons
+// records each seat's own signal. The run-level Failure carries only the first seat by index, so
+// without per-seat causes an operator would fix one blocker only to meet the next on the rerun.
 func TestPanelHalt_EverySeatRecordsItsOwnCause(t *testing.T) {
 	m := panelManager(t,
 		seatFake{name: "seat-a", title: "a", file: "a.go"},
 		seatFake{name: "seat-b", title: "b", file: "b.go"},
 	)
-	// Replace both seats with distinct real-world failures (the two actually observed).
+	// Replace both seats with distinct real-world failures.
 	m.Adapters["seat-a"] = failingSeat{
 		name:   "seat-a",
 		stderr: `ERROR: {"error":{"message":"The 'gpt-5-codex' model is not supported on your account."}}`,
@@ -77,7 +76,7 @@ func TestPanelHalt_EverySeatRecordsItsOwnCause(t *testing.T) {
 			t.Errorf("%s records no detail, so its cause is unreadable without the run directory", tc.seat)
 		}
 	}
-	// The run-level failure contract is unchanged: it is still the FIRST seat by index.
+	// The run-level failure is the first seat by index.
 	if out.Failure == nil || out.Failure.Signal != "model_invalid" {
 		t.Errorf("run-level Failure = %+v, want the first-by-index seat's (model_invalid)", out.Failure)
 	}

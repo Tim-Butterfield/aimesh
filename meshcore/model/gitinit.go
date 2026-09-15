@@ -9,20 +9,13 @@ import (
 	"time"
 )
 
-// GitInitIsolatedDir turns an ISOLATED, throwaway directory into a git repository so provider CLIs
-// that gate on a trusted / git directory (Codex's `--skip-git-repo-check`, and several CLIs' folder-
-// trust prompts) accept it.
+// GitInitIsolatedDir turns an isolated, throwaway directory into a git repository so provider CLIs
+// that require a trusted or git directory accept it.
 //
-// It runs in a CLEAN environment — every inherited GIT_*, HOME and XDG_CONFIG_HOME is dropped — so no
-// inherited git control variable (GIT_DIR / GIT_WORK_TREE / GIT_CONFIG_COUNT / templates / hooks) can
-// redirect the commands at a NON-isolated repository or inject configuration. It is HERMETIC (it reads
-// no user git config and copies no user templates or hooks) and BEST-EFFORT with a short timeout: any
-// failure — git absent, a poisoned wrapper — is ignored, and the caller's folder-trust diagnostic
-// covers a residual rejection.
-//
-// It is deliberately in meshcore rather than in one app: the reviewmesh web UI's ACP validation and
-// meshcore's own deep adapter probe both need EXACTLY this preparation, and two copies of a hermetic
-// environment scrub is two chances to get one of them wrong.
+// Git runs in a clean environment (every inherited GIT_*, HOME and XDG_CONFIG_HOME dropped, an empty
+// global config and no templates), so no inherited variable can redirect it at another repository or
+// inject configuration. It is best effort with a short timeout; a failure is ignored, and the caller's
+// folder-trust diagnostic covers a remaining rejection.
 func GitInitIsolatedDir(ctx context.Context, dir string) {
 	tmpl, err := os.MkdirTemp("", "aimesh-gittmpl-")
 	if err != nil {

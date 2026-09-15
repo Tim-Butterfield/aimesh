@@ -22,8 +22,7 @@ func TestLoad_EmbeddedByDefault(t *testing.T) {
 	}
 }
 
-// The guide is load-bearing, not decoration: an agent that reads it and still gets containment or
-// identity wrong means the document failed. Pin the rules that are expensive to omit.
+// The guide must carry the rules that are expensive for an agent to get wrong.
 func TestEmbeddedGuide_CarriesTheExpensiveRules(t *testing.T) {
 	t.Setenv(EnvVar, "")
 	guide, _, _, err := Load()
@@ -42,7 +41,7 @@ func TestEmbeddedGuide_CarriesTheExpensiveRules(t *testing.T) {
 			t.Errorf("the guide omits %q", must)
 		}
 	}
-	// It must not advertise the removed workbench.
+	// It must not mention commands this binary does not have.
 	for _, gone := range []string{"aimesh review ui", "aimesh explore ui", "workbench"} {
 		if strings.Contains(guide, gone) {
 			t.Errorf("the guide still mentions %q, which no longer exists", gone)
@@ -69,8 +68,7 @@ func TestLoad_OverrideIsServedAndIdentified(t *testing.T) {
 	}
 }
 
-// An unreadable override is an ERROR. Falling back would hand the agent a document the operator did
-// not choose while reporting success.
+// An unreadable override is an error, not a fallback to the embedded guide.
 func TestLoad_UnreadableOverrideErrorsAndNamesTheRemedy(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent.md")
 	t.Setenv(EnvVar, missing)
@@ -90,9 +88,8 @@ func TestLoad_UnreadableOverrideErrorsAndNamesTheRemedy(t *testing.T) {
 	}
 }
 
-// The MCP payload must MATCH the declared OutputSchema. A schema and a struct that disagree produce
-// a result no strict client accepts, and nothing else in the build would catch it: the schema is a
-// string constant and the payload is a Go struct, so only a test relates them.
+// The MCP payload must match the declared OutputSchema. The schema is a string constant and the
+// payload a Go struct, so only a test relates them.
 func TestToolPayload_MatchesTheDeclaredSchema(t *testing.T) {
 	t.Setenv(EnvVar, "")
 	text, payload, err := ToolPayload()
@@ -133,7 +130,7 @@ func TestToolPayload_MatchesTheDeclaredSchema(t *testing.T) {
 			t.Errorf("payload carries %q, which the schema does not declare (additionalProperties is false)", k)
 		}
 	}
-	// `path` is omitempty and absent for the embedded guide — the schema must NOT require it.
+	// path is absent for the embedded guide, so the schema must not require it.
 	for _, r := range schema.Required {
 		if r == "path" {
 			t.Error("`path` cannot be required: it is absent whenever the guide is the embedded one")

@@ -10,10 +10,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// On the wire: the write rule (writes go through fromRun and the workspace that run reviewed), and the
-// per-call `roots` argument (extra directories a call reads, always inside the operator's ceiling).
+// These tests cover the write rule (writes go through fromRun and the workspace that run reviewed)
+// and the per-call roots argument.
 
-// --- writes go through fromRun, and only through fromRun ---
+// --- writes go through fromRun only ---
 
 func TestRemediate_TheFullCycleFormIsRefusedWithATeachingError(t *testing.T) {
 	ws := workspaceFixture(t)
@@ -26,7 +26,7 @@ func TestRemediate_TheFullCycleFormIsRefusedWithATeachingError(t *testing.T) {
 	if res.rpc == nil {
 		t.Fatalf("the one-call review-and-write form must be refused on MCP, got %+v", res)
 	}
-	// A refusal that only says "no" makes a model guess. This one has to hand back the exact path.
+	// The refusal names the exact two-step path.
 	for _, want := range []string{"review_report", "fromRun", "workspace", "allowWrite"} {
 		if !strings.Contains(res.rpc.Message, want) {
 			t.Fatalf("the teaching error must name %q; got %q", want, res.rpc.Message)
@@ -131,7 +131,7 @@ func TestRootsArgument_CannotReachOutsideTheCeiling(t *testing.T) {
 	rv := &fakeReviewer{}
 	c := serve(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
 
-	// THE SECURITY PROPERTY. Naming a directory outside the operator's --root ceiling does not grant it.
+	// A directory outside the operator's --root ceiling is not granted by naming it.
 	res := c.tool(t, "review_report", map[string]any{"workspace": ws, "roots": []any{outside}})
 	if !res.isError {
 		t.Fatalf("`roots` reached a directory outside the operator's ceiling: %+v", res.structured)

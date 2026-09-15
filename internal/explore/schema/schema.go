@@ -1,7 +1,6 @@
-// Package schema is exploremesh's domain schema: the machine-validatable response
-// schema + the `expanded ⊇ minimum` guard, the raw-task / explorer-task-payload artifacts, the
-// explorer outer envelope + model-identity policy, the formulation run-state, and the fixed
-// collator-output schema. It depends on meshcore only (never reviewmesh).
+// Package schema defines the exploration domain's data: response schemas and the guard that an expanded
+// schema keeps the minimum fields, the raw task and explorer payload, the explorer envelope and
+// model-identity policy, the formulation record, and each mode's output types.
 package schema
 
 import (
@@ -9,15 +8,15 @@ import (
 	"strings"
 )
 
-// FieldType is the JSON-Schema-subset type of a schema field. The set is deliberately small: a
-// response schema describes flat, machine-checkable fields, not arbitrary nested JSON Schema.
+// FieldType is the type of a schema field. Response schemas describe flat fields, not nested JSON Schema.
 type FieldType string
 
+// The field types.
 const (
 	TypeString  FieldType = "string"
 	TypeNumber  FieldType = "number"
 	TypeBoolean FieldType = "boolean"
-	TypeObject  FieldType = "object" // a free-form JSON object (map); sub-fields are not enforced in v1
+	TypeObject  FieldType = "object" // a free-form JSON object whose sub-fields are not checked
 )
 
 func (t FieldType) valid() bool {
@@ -36,9 +35,8 @@ type Field struct {
 	Repeated bool      `json:"repeated,omitempty"`
 }
 
-// Schema is an ordered list of fields — a JSON-Schema subset that both the minimum baseline and
-// the collator's expanded schema use, so the guard (ExpandedSatisfiesMinimum) can compare them
-// structurally rather than by prose.
+// Schema is an ordered list of fields, used by both the minimum schema and expanded schemas so
+// ExpandedSatisfiesMinimum can compare them structurally.
 type Schema struct {
 	Fields []Field `json:"fields"`
 }
@@ -75,10 +73,8 @@ func (s Schema) Validate() error {
 	return nil
 }
 
-// reservedFields are exploremesh's minimum-schema baseline field names — their MEANING is fixed by
-// exploremesh, so the collator may not repurpose one (the guard enforces identical type/required/
-// repeated). `uncertainties[]` is first-class so "what we still don't know" feeds the disagreement
-// register rather than being buried in prose.
+// reservedFields are the minimum schema's fields. Their meaning is fixed, so an expanded schema must keep
+// each with the same type, required flag and repetition.
 var reservedFields = []Field{
 	{Name: "claims", Type: TypeString, Required: true, Repeated: true},
 	{Name: "evidence", Type: TypeString, Required: true, Repeated: false},
@@ -88,19 +84,16 @@ var reservedFields = []Field{
 	{Name: "uncertainties", Type: TypeString, Required: true, Repeated: true},
 }
 
-// MinimumSchema returns exploremesh's reserved v1 baseline schema. The collator EXTENDS this (adds
-// fields); it may never re-type, rename, drop, or relax a baseline field.
+// MinimumSchema returns a copy of the minimum response schema. An expanded schema may add fields but not
+// change these.
 func MinimumSchema() Schema {
 	fields := make([]Field, len(reservedFields))
 	copy(fields, reservedFields)
 	return Schema{Fields: fields}
 }
 
-// RenderSchema renders a Schema as an explicit per-field instruction block for an explorer prompt.
-// The schema is otherwise validated-but-UNSEEN by the model (it lives in ExplorerTaskPayload, not the
-// prompt text), so a formulation-free prompt that merely says "match the provided schema" gives the
-// model nothing to match — it improvises field names and fails validation. Rendering the exact field
-// names + types into the prompt is what makes real models emit the reserved fields.
+// RenderSchema renders s as one instruction line per field for an explorer prompt. The model sees only
+// the prompt text, so the exact field names and types must appear there.
 func RenderSchema(s Schema) string {
 	var b strings.Builder
 	for _, f := range s.Fields {
@@ -117,20 +110,8 @@ func RenderSchema(s Schema) string {
 	return b.String()
 }
 
-// IsReserved reports whether name is a reserved baseline field.
-func IsReserved(name string) bool {
-	for _, f := range reservedFields {
-		if f.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
-// ExpandedSatisfiesMinimum is the `expanded ⊇ minimum` guard. It is NOT name-only: every baseline
-// field must be present with IDENTICAL type, required, and repeated. The collator may only ADD new
-// fields — never re-type, rename, drop, or relax a baseline field. A violation is returned as an
-// error (never a silent pass). It also validates the expanded schema is internally well-formed.
+// ExpandedSatisfiesMinimum checks that expanded is well-formed and keeps every minimum field with the
+// same type, required flag and repetition. Adding fields is allowed.
 func ExpandedSatisfiesMinimum(expanded Schema) error {
 	if err := expanded.Validate(); err != nil {
 		return err

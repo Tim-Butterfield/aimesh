@@ -146,7 +146,11 @@ func TestCollectSnippets_SkipsReadDeniedSecrets(t *testing.T) {
 	writeFile(t, filepath.Join(root, "deploy", ".env.staging"), "SECRET=def\n")
 	writeFile(t, filepath.Join(root, "id_ed25519"), "PRIVATE\n")
 
-	for _, s := range CollectSnippets(root) {
+	snips, _, err := CollectSnippetsWithCaveats(root)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	for _, s := range snips {
 		if strings.Contains(s.Content, "SECRET=") || strings.Contains(s.Content, "PRIVATE") {
 			t.Errorf("secret content reached a snippet via %q", s.Path)
 		}

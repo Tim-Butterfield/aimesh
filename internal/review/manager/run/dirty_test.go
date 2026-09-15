@@ -36,9 +36,8 @@ func gitRepo(t *testing.T, dir string) {
 	}
 }
 
-// TestProbeWorkspaceDirtiness_AnswersOnlyWhenItCan covers the three states, and the third is the one
-// that decides the whole design: a tree with no VCS returns UNKNOWN, not clean. Treating "no answer"
-// as "clean" would silently drop the protection for exactly the trees that have no other one.
+// TestProbeWorkspaceDirtiness_AnswersOnlyWhenItCan covers the three states. A tree with no VCS returns
+// unknown, not clean, because it has no other protection.
 func TestProbeWorkspaceDirtiness_AnswersOnlyWhenItCan(t *testing.T) {
 	t.Run("no VCS is unknown, never clean", func(t *testing.T) {
 		d := ProbeWorkspaceDirtiness(context.Background(), t.TempDir())
@@ -80,10 +79,8 @@ func TestProbeWorkspaceDirtiness_AnswersOnlyWhenItCan(t *testing.T) {
 		}
 	})
 
-	// UNTRACKED FILES ARE NOT DIRTY. Nothing this tool writes touches them and `git checkout -- .`
-	// does not remove them, so they cannot be entangled. Counting them would refuse an apply in
-	// every repository with a stray build artifact — which is most of them — and a precondition that
-	// fires constantly is one an operator learns to override by reflex.
+	// Untracked files are not dirty: this tool's writes do not touch them and `git checkout -- .` does
+	// not remove them, so they cannot be entangled with a run's edits.
 	t.Run("an untracked file is not dirty", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644); err != nil {
@@ -99,15 +96,9 @@ func TestProbeWorkspaceDirtiness_AnswersOnlyWhenItCan(t *testing.T) {
 	})
 }
 
-// TestApply_ADirtyTreeIsRecordedNotRefused.
-//
-// Working on a tree with uncommitted changes is the NORMAL state of the work, not an anomaly, and a
-// gate that fires on the normal case is a flag every single invocation has to carry — which is
-// friction that stops people using the tool at all.
-//
-// Our edits and the user's do end up in the same tree, so the BLUNT undo (`git checkout -- .`) takes
-// both. The precise undo is produced on this very path: `changes.patch` is a complete reverse-appliable delta of exactly
-// what this run wrote. So the fact is worth RECORDING and not worth refusing over.
+// TestApply_ADirtyTreeIsRecordedNotRefused checks that uncommitted changes are recorded, not refused. A
+// dirty tree is the normal state of work, and `changes.patch` is a reverse-appliable record of exactly
+// what the run wrote, so the run's edits can still be undone without discarding the user's.
 func TestApply_ADirtyTreeIsRecordedNotRefused(t *testing.T) {
 	m, ws := remediateFixture(t, true)
 	gitRepo(t, ws)
@@ -137,7 +128,7 @@ func TestApply_ADirtyTreeIsRecordedNotRefused(t *testing.T) {
 	if b, _ := os.ReadFile(bystander); string(b) != "package a // mine\n" {
 		t.Errorf("the user's uncommitted file was modified: %q", string(b))
 	}
-	// The dirtiness is still RECORDED, so a run read later says the tree was not clean.
+	// The dirtiness is recorded, so a run read later says the tree was not clean.
 	if !slices.Contains(events, "workspace_dirty") {
 		t.Errorf("a dirty tree must still be recorded as an event, even though it is not refused: %v", events)
 	}

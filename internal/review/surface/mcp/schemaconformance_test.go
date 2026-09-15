@@ -13,23 +13,10 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file keeps every emitted `structuredContent` in step with the schema its own tool declares.
-//
-// Every tool here DECLARES an `outputSchema`, and the review one is a strict `oneOf` on `state`
-// precisely so that the governance-bearing fields can be `required` on the branch where a result
-// exists. Declaration and payload drift silently unless something checks them together, in shapes
-// such as: a CANCELLED call returning the *running* shape with `state` overwritten (which satisfies no
-// branch); `run_result` on a still-RUNNING review omitting the panel echo; `run_result` for a
-// REMEDIATION returning the receipt payload while declaring the report schema.
-//
-// This file walks
-// every result builder in the package, at every state each can produce, and validates the payload
-// against the literal schema the tool declares. A new state, a new field, or a branch someone
-// loosens to make a payload fit now has to survive this table.
-//
-// It is deliberately paired with a wire-level test (mcp_test.go) that re-reads the schema from
-// `tools/list` rather than from these variables: this file proves the payloads match the constants,
-// that one proves the constants are what a client is actually handed.
+// These tests validate every result builder's payload, at every state it can produce, against the
+// literal outputSchema its tool declares. The review schema is a strict oneOf on state so governance
+// fields can be required where a result exists. mcp_test.go complements this by re-reading the
+// schemas from tools/list.
 
 func conformanceOutcome() review.RunOutcome {
 	return review.RunOutcome{
@@ -99,10 +86,8 @@ func conformanceReceipt(status string, committed bool) run.RemediateOutcome {
 	}
 }
 
-// conformancePartialRefusal is a COMMITTED write that refused one finding for a protected path —
-// the partial-refusal shape. It rides `isError: true` on a `state: "complete"` payload, which
-// is the combination most likely to be broken by a future edit that assumes the two move
-// together.
+// conformancePartialRefusal returns a committed write that refused one finding for a protected path:
+// isError true on a state "complete" payload.
 func conformancePartialRefusal() run.RemediateOutcome {
 	out := conformanceReceipt("complete", true)
 	out.Refusals = []review.ApplyRefusal{{
@@ -116,7 +101,7 @@ func conformancePartialRefusal() run.RemediateOutcome {
 	return out
 }
 
-// TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema is the table described above.
+// Every emitted payload validates against its tool's declared outputSchema.
 func TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema(t *testing.T) {
 	schemas := map[string]*jsonschema.Schema{}
 	for tool, literal := range map[string]string{
@@ -136,8 +121,7 @@ func TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema(t *testing.T) {
 	cancelErr := fault.Wrap(fault.Policy, "remediation cancelled before apply", fault.New(fault.Policy, "cancelled")).
 		WithHalt("F").WithReason("remediate_cancelled")
 
-	// A review record that finished, so payloadFor returns the stored payload rather than the
-	// running shape — the path `run_result` takes for a completed run.
+	// A finished review record, so payloadFor returns the stored payload, as run_result does.
 	reportRec := conformanceRecord(toolReport, string(review.ModeReport))
 	remediateRec := conformanceRecord(toolRemediate, string(review.ModeApply))
 
@@ -145,8 +129,7 @@ func TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema(t *testing.T) {
 	inlinePayload, _, _ := completeResult(reportRec, conformancePick(), conformanceView(nil), true, false)
 	haltPayload, _ := haltResult(reportRec, conformancePick(), conformanceView(halt), halt, false)
 	haltCancelledPayload, _ := haltResult(reportRec, conformancePick(), conformanceView(halt), halt, true)
-	// A refusal carrying NO run id — the branch with no panel to echo. This one is still reachable:
-	// an authority document that cannot be resolved is refused before the run exists.
+	// A refusal with no run id, as for an authority document refused before the run exists.
 	refusal, _ := refusalResult("", fault.New(fault.Policy, "authority document cannot be resolved").
 		WithHalt("policy").WithReason("authority_unreadable"))
 	unknown, _ := refusalResult("run-nope", fault.New(fault.Usage, "unknown or expired runId").
@@ -167,7 +150,7 @@ func TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema(t *testing.T) {
 	if !refusedIsErr {
 		t.Fatal("a partial refusal must ride isError; the payload below would then be declaring a clean success")
 	}
-	// run_status's projection of the same run — the poller's view, which has its own schema.
+	// run_status's projection of the same run, which has its own schema.
 	refusedStatus := map[string]any{
 		"runId": remediateRec.ID, "state": StateComplete, "tool": toolRemediate,
 		"mode": remediateRec.Mode, "elapsedSeconds": 1.5,
@@ -176,13 +159,12 @@ func TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema(t *testing.T) {
 	receiptPatch, _, _ := remediateResult(remediateRec, conformanceReceipt("complete", false), nil, nil)
 	receiptHalted, _, _ := remediateResult(remediateRec, conformanceReceipt("halted", false), halt, nil)
 	receiptCancelled, _, _ := remediateResult(remediateRec, conformanceReceipt("cancelled", false), cancelErr, nil)
-	// The patch receipt WITH its resource link — the shape a patch-mode remediation now actually
-	// returns. It carries `receipt.patchResource`, so the declaration has to allow it.
+	// The patch receipt with its resource link, so the schema must allow receipt.patchResource.
 	receiptLinked, _, _ := remediateResult(remediateRec, conformanceReceipt("complete", false), nil,
 		&proto.Resource{URI: proto.ResourceURI(remediateRec.ID, patchArtifactName), Name: remediateRec.ID + "/" + patchArtifactName, MimeType: "text/x-diff"})
 
-	// The payload `payloadFor` synthesizes for a run that has not finished. This is defect (2): it
-	// must not omit the panel echo that the running branch requires.
+	// The payload payloadFor builds for an unfinished run must include the panel echo the running branch
+	// requires.
 	srv := &Server{}
 	reportRec.attachPick(conformancePick())
 	runningFromRegistry := structuredOf(t, srv.payloadFor(reportRec))
@@ -224,9 +206,8 @@ func TestEmittedPayloadsSatisfyTheirDeclaredOutputSchema(t *testing.T) {
 	}
 }
 
-// TestTheDriftTheSchemaNowCatches constructs the three drifted payloads described at the top of this
-// file and asserts the declared schema rejects each one. Without it the table above proves only that
-// the current payloads pass — which a schema loose enough to accept anything would also achieve.
+// The declared schemas reject three malformed payloads, so the table above is not passing because the
+// schemas accept anything.
 func TestTheDriftTheSchemaNowCatches(t *testing.T) {
 	report, err := jsonschema.Compile([]byte(reportResultSchema))
 	if err != nil {
@@ -234,23 +215,20 @@ func TestTheDriftTheSchemaNowCatches(t *testing.T) {
 	}
 	rec := conformanceRecord(toolReport, string(review.ModeReport))
 
-	// (1) A cancelled call MIS-BUILT as the RUNNING shape with `state` overwritten.
-	// No branch accepts it — `running` says the state must be "running", and the halt branch wants
-	// the taxonomy this payload never carried.
+	// (1) A cancelled call built as the running shape with state overwritten matches no branch.
 	oldCancelled, _ := runningResult(rec, conformancePick(), 25)
 	oldCancelled["state"] = StateCancelled
 	if err := report.Validate(mustRoundTrip(t, oldCancelled)); err == nil {
 		t.Fatal("the old cancelled payload (running shape, state overwritten) validates — the schema has no teeth")
 	}
 
-	// (2) `run_result` on a still-running review, without the panel echo.
+	// (2) run_result on a running review without the panel echo.
 	noPanel := map[string]any{"runId": rec.ID, "state": StateRunning, "tool": rec.Tool, "mode": rec.Mode}
 	if err := report.Validate(mustRoundTrip(t, noPanel)); err == nil {
 		t.Fatal("a running payload with no panel echo validates — the governance field is not actually required")
 	}
 
-	// (3) A remediation receipt judged against the REPORT schema, which is what `run_result`
-	// declared before it got its own union.
+	// (3) A remediation receipt judged against the report schema.
 	receipt, _, _ := remediateResult(conformanceRecord(toolRemediate, string(review.ModeApply)),
 		conformanceReceipt("complete", true), nil, nil)
 	if err := report.Validate(mustRoundTrip(t, receipt)); err == nil {
@@ -281,9 +259,8 @@ func structuredOf(t *testing.T, res *proto.CallToolResult) map[string]any {
 	return m
 }
 
-// authorityMaxItemsFromSchema reads the bound out of the DECLARED input schema of review_report —
-// the JSON a client is handed — rather than out of the Go constant, so the assertion covers the
-// wiring and not just the identifier.
+// authorityMaxItemsFromSchema reads maxItems from review_report's declared input schema, so the test
+// covers the emitted JSON rather than the Go constant.
 func authorityMaxItemsFromSchema(t *testing.T) int {
 	t.Helper()
 	var doc struct {
@@ -304,11 +281,7 @@ func authorityMaxItemsFromSchema(t *testing.T) int {
 	return *doc.OneOf[0].Properties.Authority.MaxItems
 }
 
-// TestAuthoritySchemaBoundMatchesEngineCap holds the `authority` declaration to the engine's actual
-// cap. The schema advertised `maxItems: 16` while authority.MaxDocs was 8: fail-closed (the engine
-// refused), but the declaration over-promised, so a caller who trusted it met a refusal the schema
-// had said would not come. The constant is now derived; this asserts the derivation reaches the
-// emitted JSON rather than only the Go identifier.
+// The authority maxItems in the emitted schema equals authority.MaxDocs.
 func TestAuthoritySchemaBoundMatchesEngineCap(t *testing.T) {
 	if MaxAuthorityDocs != authority.MaxDocs {
 		t.Fatalf("MaxAuthorityDocs = %d, but the engine enforces %d", MaxAuthorityDocs, authority.MaxDocs)

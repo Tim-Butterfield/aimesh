@@ -8,30 +8,24 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// RemediationResult is the JSON a model-driven remediation call returns: the anchored edit(s)
-// that FIX one accepted finding in its target file. The host author_remediator produces it in
-// apply/patch modes; the Manager applies the edits to the isolated remediation copy.
+// RemediationResult is the JSON a remediation call returns: the anchored edits that fix one accepted
+// finding in its target file, produced by the author_remediator in patch and apply modes.
 type RemediationResult struct {
 	SchemaVersion int           `json:"schemaVersion"`
 	Role          string        `json:"role"`
 	Phase         string        `json:"phase"`
 	Edits         []review.Edit `json:"edits"`
-	NoEdit        bool          `json:"noEdit,omitempty"` // the model safely DECLINED to edit
-	Reason        string        `json:"reason,omitempty"` // why it declined / what it changed
+	NoEdit        bool          `json:"noEdit,omitempty"` // the model declined to edit
+	Reason        string        `json:"reason,omitempty"` // why it declined, or what it changed
 }
 
-// ParseRemediationResult unmarshals and validates a remediation response. Unknown top-level
-// fields are TOLERATED (see ParseReviewerResult — the same "judge content, don't choke on noise"
-// posture). Guardrails that DO hold:
-//   - schemaVersion==1 and role=="author_remediator".
-//   - every edit targets EXACTLY `wantFile` (the finding's own file) — remediation may never
-//     touch another path; the caller has already gated wantFile to a shown, non-excluded file.
-//   - every edit carries a non-empty anchor (an exact pre-image to replace) whose replacement
-//     differs — no blind prepends, no no-ops. Targeted-edit-only keeps a fix from injecting
-//     arbitrary text; the deterministic marker (empty anchor) remains the fallback path.
+// ParseRemediationResult unmarshals and validates a remediation response. Unknown top-level fields
+// are ignored. It requires schemaVersion 1 and role author_remediator, and every edit must target
+// exactly wantFile with a non-empty anchor and a different replacement, so a fix cannot touch another
+// file or inject unanchored text.
 //
-// A result with NoEdit=true, or with an empty edits array, is VALID: the model is allowed to
-// decline when it cannot produce a safe fix, and the caller falls back to the review marker.
+// NoEdit, or an empty edits list, is valid: the model may decline, and the caller falls back to the
+// review marker.
 func ParseRemediationResult(b []byte, wantFile string) (RemediationResult, error) {
 	var r RemediationResult
 	if err := json.Unmarshal(b, &r); err != nil {

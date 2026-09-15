@@ -16,19 +16,13 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// This file drives the REAL `reviewmesh mcp` binary over real stdio with the official SDK client, and
-// asserts the STDOUT PURITY invariant end to end: while a run is in flight — progress and log
-// notifications interleaving with responses — every line on the process's stdout parses as JSON-RPC 2.0.
+// These tests drive the real reviewmesh mcp binary over stdio with the official SDK client and check
+// stdout purity: while a run is in flight, with progress and log notifications interleaving, every
+// stdout line parses as JSON-RPC 2.0.
 //
-// A stdio protocol server that spawns model CLIs gets exactly one chance at this: a single stray
-// `fmt.Println` anywhere in the process, or a child that inherits the descriptor, corrupts a frame and
-// takes the session down in a way that is very hard to diagnose from the client side. The binary
-// therefore repoints `os.Stdout` at stderr before serving (the protocol stream is the writer captured
-// beforehand), and meshcore's adapters capture child stdio explicitly. This test is the assertion that
-// the arrangement holds for the shipped command, not just for the server type.
-//
-// It is the twin of exploremesh/internal/surface/mcp/subprocess_test.go. reviewmesh needs it MORE, not
-// less: this binary announces a write tool at launch, on the same stderr the purity guard redirects to.
+// One stray print, or a child inheriting the descriptor, would corrupt a frame. The binary points
+// os.Stdout at stderr before serving, and adapters capture child stdio explicitly; this checks that
+// holds for the shipped command. exploremesh has the same test.
 
 var (
 	buildOnce sync.Once
@@ -36,7 +30,7 @@ var (
 	buildErr  error
 )
 
-// binary builds the reviewmesh binary once for this package.
+// binary builds the reviewmesh binary once for the package.
 func binary(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
@@ -67,9 +61,8 @@ type buildFailure struct {
 
 func (b *buildFailure) Error() string { return b.err.Error() + "\n" + b.out }
 
-// hermeticEnv isolates the child from the developer's machine and unlocks the internal fake adapter, so
-// a child launched with `--adapter fake` runs a deterministic, fully in-process panel. No real CLI is
-// ever spawned, and no artifact lands anywhere but a temp directory.
+// hermeticEnv isolates the child and enables the internal fake adapter, so `--adapter fake` runs a
+// deterministic in-process panel with no real CLI and artifacts only in a temp directory.
 func hermeticEnv(t *testing.T) []string {
 	t.Helper()
 	return append(os.Environ(),
@@ -80,7 +73,7 @@ func hermeticEnv(t *testing.T) []string {
 	)
 }
 
-// subprocessWorkspace is the reviewed tree — a real directory, because this server takes paths.
+// subprocessWorkspace returns the reviewed tree, a real directory.
 func subprocessWorkspace(t *testing.T) string {
 	t.Helper()
 	ws := t.TempDir()
@@ -90,8 +83,8 @@ func subprocessWorkspace(t *testing.T) string {
 	return ws
 }
 
-// teeReadCloser feeds the SDK client while copying every byte of the protocol stream into a buffer, so
-// the purity assertion sees exactly what the server wrote.
+// teeReadCloser feeds the SDK client while copying the protocol stream into a buffer for the purity
+// check.
 type teeReadCloser struct {
 	r io.Reader
 	c io.Closer
@@ -103,16 +96,13 @@ func (t teeReadCloser) Close() error               { return t.c.Close() }
 func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 	bin := binary(t)
 	ws := subprocessWorkspace(t)
-	// `--allow-writes` is passed deliberately: it is the launch that PRINTS TO STDERR before serving
-	// (the write-capability notice), which is exactly the kind of print that would corrupt the protocol
-	// stream if the redirect were wrong. The child runs in a THROWAWAY cwd so nothing about this repo can
-	// reach it.
+	// --allow-writes makes the launch print a notice to stderr before serving, the kind of print that
+	// would corrupt the stream if the redirect failed. The child runs in a throwaway cwd.
 	cmd := exec.Command(bin, "review", "mcp", "--adapter", "fake", "--root", ws, "--allow-writes", "--wait-seconds", "60")
 	cmd.Dir = t.TempDir()
 	cmd.Env = hermeticEnv(t)
-	// `stderr` must be the concurrency-safe buffer: os/exec copies the child's stderr on its own
-	// goroutine, and this test reads the accumulated text (in failure messages, and in the banner
-	// assertion) while the child is still running. A plain strings.Builder here is a real data race.
+	// os/exec copies stderr on its own goroutine while the test reads it, so the buffer must be
+	// concurrency-safe.
 	var stderr lockedBuffer
 	cmd.Stderr = &stderr
 	stdin, err := cmd.StdinPipe()
@@ -192,13 +182,13 @@ func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 	if out["state"] != "complete" {
 		t.Fatalf("state = %v, want complete (payload %v)", out["state"], out)
 	}
-	// A real run through the real binary still carries the whole governed payload.
+	// A real run through the binary carries the full governed payload.
 	for _, key := range []string{"counts", "identityCaveats", "authority", "withheld", "panel", "workspaceSource"} {
 		if _, ok := out[key]; !ok {
 			t.Errorf("the shipped binary dropped %q from the governed payload: %v", key, out)
 		}
 	}
-	// And a REPORT wrote nothing: the reviewed file is byte-for-byte what the fixture created.
+	// A report writes nothing: the reviewed file is unchanged.
 	after, rerr := os.ReadFile(filepath.Join(ws, "sample.go"))
 	if rerr != nil {
 		t.Fatal(rerr)
@@ -207,7 +197,7 @@ func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 		t.Errorf("review_report modified the workspace:\n%s", after)
 	}
 
-	// The purity assertion, over everything the process wrote to stdout.
+	// The purity check, over everything written to stdout.
 	lines := strings.Split(strings.TrimSpace(captured.String()), "\n")
 	if len(lines) < 3 {
 		t.Fatalf("captured %d stdout line(s); expected the handshake plus notifications:\n%s", len(lines), captured.String())
@@ -230,8 +220,7 @@ func TestSubprocess_StdoutStaysPureJSONRPCThroughARealRun(t *testing.T) {
 	if !gotProgress || !gotLog {
 		t.Errorf("the purity assertion is only meaningful with notifications interleaved (progress=%v log=%v)", gotProgress, gotLog)
 	}
-	// The write-capability notice really did go to stderr — proving the stream the purity assertion
-	// just walked is not simply an empty-stderr accident.
+	// The write notice did go to stderr, so the clean stdout is not an accident of a silent launch.
 	if !strings.Contains(stderr.String(), "--allow-writes") {
 		t.Errorf("expected the launch banner on stderr, got:\n%s", stderr.String())
 	}

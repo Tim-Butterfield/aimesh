@@ -105,7 +105,7 @@ func TestStyle_WrapsWithoutBreakingWords(t *testing.T) {
 	out := styled(t, "tool verb", func(fs *flag.FlagSet) {
 		fs.String("x", "", long)
 	})
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if len(line) > wrapAt {
 			t.Errorf("line exceeds the wrap width (%d): %q", len(line), line)
 		}
@@ -128,7 +128,7 @@ func TestStyle_NoFlagsPrintsNoEmptyHeading(t *testing.T) {
 
 func firstLineContaining(t *testing.T, out, want string) string {
 	t.Helper()
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		if strings.Contains(line, want) {
 			return strings.TrimSpace(line)
 		}

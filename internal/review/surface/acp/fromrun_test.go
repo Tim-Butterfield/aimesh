@@ -1,13 +1,11 @@
 package acp
 
-// FROM-RUN EXECUTION, proven end to end: a real run.Manager behind real JSON-RPC frames, a real
-// workspace, and a real live write.
+// These tests run fromRun writes end to end: a real run.Manager behind JSON-RPC frames, a real
+// workspace and a live write.
 //
-// THE PROPERTY UNDER TEST: **the applied set is the inspected set**. Turn 1 reports and hands back a
-// run handle plus a fingerprint per accepted finding; turn 2 applies THAT run's decisions. The
-// difference from a re-adjudicating apply is only visible when the two would disagree, so these tests
-// make them disagree on purpose: after turn 1, the reviewer is switched to one that raises nothing,
-// and a control report turn proves it. A turn 2 that re-reviewed would then find nothing to write.
+// The property under test is that the applied set is the inspected set. After the report turn the
+// reviewer is silenced, and a control report turn shows it now raises nothing, so an apply turn that
+// re-reviewed would have nothing to write.
 
 import (
 	"context"
@@ -25,18 +23,17 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// hostAdapter is the adapter the author_remediator seat names in the real-manager harnesses. It is a
-// built-in recipe so the server's launch set can hold it (harnessAdapters launches it at a test-owned
-// executable); the Manager maps it to an in-process lane, so no real CLI is ever invoked.
+// hostAdapter is the adapter the author_remediator seat names. It is a built-in recipe so the
+// launch set can hold it; the manager maps it to an in-process seat, so no CLI runs.
 const hostAdapter = "claude-code"
 
-// hostPanelMeta is the `_meta` a report turn in the real-manager harnesses carries: the fake reviewer,
-// and the in-process host as the adjudicator.
+// hostPanelMeta is the _meta a report turn carries: the fake reviewer and the in-process host as
+// adjudicator.
 const hostPanelMeta = `"_meta":{"reviewmesh":{"panel":{"reviewers":[{"adapter":"fake","model":"fake-model"}],` +
 	`"author_remediator":{"adapter":"` + hostAdapter + `","model":"host-model"}}}}`
 
-// launchConfig is the configuration a launch-configured agent builds: the built-in defaults, no
-// profiles, and apply reachable on the agent surfaces because the agent gates writes itself.
+// launchConfig returns the configuration a launch-configured agent builds: built-in defaults, no
+// profiles, and apply reachable on agent surfaces.
 func launchConfig() config.Config {
 	cfg := config.Default()
 	cfg.Adapters[hostAdapter] = config.Adapter{ModelIdentity: "invocation_tag"}
@@ -46,8 +43,8 @@ func launchConfig() config.Config {
 	return cfg
 }
 
-// switchingReviewer is the reviewer lane, with a switch. It answers as the deterministic fake until
-// `silence()` is called, after which it approves with NO findings.
+// switchingReviewer answers as the deterministic fake until silence is called, then approves with
+// no findings.
 type switchingReviewer struct {
 	valid  model.Adapter
 	empty  model.Adapter
@@ -58,8 +55,7 @@ func (s *switchingReviewer) Name() string              { return "fake" }
 func (s *switchingReviewer) Available() (bool, string) { return true, "ok" }
 func (s *switchingReviewer) silence()                  { s.silent.Store(true) }
 
-// Evidence is the optional identity capability the manager type-asserts on every lane's adapter;
-// declaring it keeps this fixture's identity records honest.
+// Evidence implements the optional identity capability the manager checks on every adapter.
 func (s *switchingReviewer) Evidence() review.IdentityEvidence {
 	return review.EvidenceInvocationTag
 }
@@ -71,9 +67,8 @@ func (s *switchingReviewer) Invoke(ctx context.Context, c model.Call) (model.Res
 	return s.valid.Invoke(ctx, c)
 }
 
-// applyHost is the author_remediator lane: it adjudicates the reviewer's finding as apply-worthy and
-// returns a real anchored edit. Unlike gateHost (writepath_test.go) it never blocks — these tests are
-// about WHICH set gets written, not about what can land mid-window.
+// applyHost is the author_remediator seat: it accepts the reviewer's finding and returns an anchored
+// edit. Unlike gateHost it never blocks.
 type applyHost struct{}
 
 func (applyHost) Name() string              { return hostAdapter }
@@ -94,8 +89,8 @@ func (applyHost) Invoke(_ context.Context, c model.Call) (model.Result, error) {
 	}
 }
 
-// fromRunHarness is an agent launched with --allow-writes over a write-capable host, with a reviewer
-// that can be silenced and a remediation lane that does not block.
+// fromRunHarness returns an agent launched with --allow-writes over a write-capable host, with a
+// reviewer that can be silenced and a non-blocking remediation seat.
 func fromRunHarness(t *testing.T) (*Server, *switchingReviewer, string, string) {
 	t.Helper()
 	t.Setenv(fake.EnvVar, "1")
@@ -121,8 +116,8 @@ func fromRunHarness(t *testing.T) (*Server, *switchingReviewer, string, string) 
 	return srv, rv, ws, file
 }
 
-// reportTurn runs one report turn at the given request id and returns its runDir plus the
-// host-computed fingerprints of its accepted findings.
+// reportTurn runs one report turn with request id and returns its runDir and the fingerprints of
+// its accepted findings.
 func (s *acpSession) reportTurn(id int, ws string) (string, []string) {
 	s.t.Helper()
 	s.send(`{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":` +
@@ -146,7 +141,7 @@ func (s *acpSession) reportTurn(id int, ws string) (string, []string) {
 	return runDir, fps
 }
 
-// applyTurnMeta sends one apply turn and returns its `_meta.reviewmesh`.
+// applyTurnMeta sends one apply turn and returns its _meta.reviewmesh.
 func (s *acpSession) applyTurnMeta(id int, ws, fromRun string, selection []string) map[string]any {
 	s.t.Helper()
 	sel := ""
@@ -169,10 +164,8 @@ func (s *acpSession) applyTurnMeta(id int, ws, fromRun string, selection []strin
 	return rm
 }
 
-// TestACPFromRun_TheAppliedSetIsTheInspectedSet: turn 1 reports and the host reads one accepted
-// fingerprint. The panel is then silenced, and a CONTROL report turn proves a fresh adjudication now
-// raises nothing. Turn 2 applies turn 1's run, selecting that same fingerprint — and it writes,
-// because the set it applies is the set that was inspected.
+// Turn 1 reports one accepted fingerprint. After the panel is silenced and a control report raises
+// nothing, turn 2 applies turn 1's run selecting that fingerprint, and it writes.
 func TestACPFromRun_TheAppliedSetIsTheInspectedSet(t *testing.T) {
 	srv, rv, ws, file := fromRunHarness(t)
 	s := startACPSession(t, srv)
@@ -182,14 +175,12 @@ func TestACPFromRun_TheAppliedSetIsTheInspectedSet(t *testing.T) {
 	if sourceRun == "" || len(fps) != 1 {
 		t.Fatalf("the report turn must hand back a runDir and exactly one accepted fingerprint; got %q %v", sourceRun, fps)
 	}
-	// The decision set is DURABLE — a file in the run directory, not an entry in a registry that dies
-	// with the process.
+	// The decision set is a file in the run directory, so it survives the process.
 	if _, err := os.Stat(filepath.Join(sourceRun, filepath.FromSlash(run.DecisionSetArtifact))); err != nil {
 		t.Fatalf("a completed report run must record its decision set on disk: %v", err)
 	}
 
-	// THE CONTROL: a fresh adjudication would now produce nothing, so the assertion below cannot pass
-	// by a re-review happening to agree.
+	// The control: a fresh adjudication now produces nothing.
 	rv.silence()
 	if _, freshFPs := s.reportTurn(3, ws); len(freshFPs) != 0 {
 		t.Fatalf("the control turn must raise nothing once the panel is silenced; got %v", freshFPs)
@@ -208,14 +199,14 @@ func TestACPFromRun_TheAppliedSetIsTheInspectedSet(t *testing.T) {
 	if rm["writes"] != "aimesh" || rm["diffAvailable"] != true {
 		t.Errorf("a from-run turn must disclose writes=aimesh and diffAvailable=true, got %v", rm)
 	}
-	// The selection matched against the STORED set.
+	// The selection matched against the stored set.
 	sel, _ := rm["selection"].(map[string]any)
 	matched, _ := sel["matched"].([]any)
 	unmatched, _ := sel["unmatched"].([]any)
 	if len(matched) != 1 || len(unmatched) != 0 {
 		t.Errorf("selection = %v, want the selector matched against the stored set", sel)
 	}
-	// The receipt is the REMEDIATION run's — a second run directory, not the source run's.
+	// The receipt belongs to the remediation run, not the source run.
 	runDir, _ := rm["runDir"].(string)
 	if runDir == "" || runDir == sourceRun {
 		t.Fatalf("the write must have its own run directory; runDir=%q sourceRun=%q", runDir, sourceRun)
@@ -229,17 +220,16 @@ func TestACPFromRun_TheAppliedSetIsTheInspectedSet(t *testing.T) {
 	}
 }
 
-// TestACPFromRun_AHandleThisAgentDidNotProduceIsRefused. The handle arrives from a peer, so it is
-// verified against the declared workspace's run-record locations rather than trusted as a path — and
-// every way of failing answers alike, so a peer gains no existence oracle over paths outside them.
+// The handle is verified against the declared workspace's run-record locations, and every failure
+// answers alike, revealing nothing about paths outside them.
 func TestACPFromRun_AHandleThisAgentDidNotProduceIsRefused(t *testing.T) {
 	srv, _, ws, file := fromRunHarness(t)
 	before, _ := os.ReadFile(file)
 	s := startACPSession(t, srv)
 	s.newSession(ws)
 
-	// A real, existing, readable directory this agent did not produce; a plausible-looking fabrication;
-	// a traversal; and a relative handle.
+	// A real directory this agent did not produce, a plausible fabrication, a traversal, and a relative
+	// handle.
 	elsewhere := t.TempDir()
 	for i, handle := range []string{elsewhere, "/runs/prior-report-run", filepath.Join(elsewhere, ".."), "runs/prior-report-run"} {
 		id := 10 + i
@@ -264,8 +254,8 @@ func TestACPFromRun_AHandleThisAgentDidNotProduceIsRefused(t *testing.T) {
 	}
 }
 
-// TestACPFromRun_AStaleTreeHaltsRatherThanWrites. The pins the SOURCE run captured are re-verified
-// before the write window opens, so a tree that has moved on halts — and the human's edit survives.
+// The source run's pins are re-verified before writing, so a changed tree halts and the human's
+// edit survives.
 func TestACPFromRun_AStaleTreeHaltsRatherThanWrites(t *testing.T) {
 	srv, _, ws, file := fromRunHarness(t)
 	s := startACPSession(t, srv)
@@ -294,7 +284,7 @@ func TestACPFromRun_AStaleTreeHaltsRatherThanWrites(t *testing.T) {
 	if after, _ := os.ReadFile(file); string(after) != human {
 		t.Fatalf("the human's edit was overwritten:\nwant: %q\ngot:  %q", human, after)
 	}
-	// The refusal is RECORDED: a receipt exists on every path, and it says nothing was committed.
+	// The refusal is recorded: a receipt exists and says nothing was committed.
 	runDir, _ := data["runDir"].(string)
 	if runDir == "" {
 		t.Fatalf("a halted from-run write must carry its own runDir, got %v", data)
@@ -305,9 +295,8 @@ func TestACPFromRun_AStaleTreeHaltsRatherThanWrites(t *testing.T) {
 	}
 }
 
-// TestACPFromRun_RunFormingArgumentsAreRefusedNotIgnored. `panel` and `authority` each name a
-// governance input to an adjudication that has already happened, so a fromRun turn refuses them by
-// name rather than ignoring them. MCP applies the same rule to `review_remediate`.
+// Run-forming arguments on a fromRun turn are refused by name. MCP applies the same rule to
+// review_remediate.
 func TestACPFromRun_RunFormingArgumentsAreRefusedNotIgnored(t *testing.T) {
 	srv, _, ws, _ := fromRunHarness(t)
 	s := startACPSession(t, srv)
@@ -335,8 +324,7 @@ func TestACPFromRun_RunFormingArgumentsAreRefusedNotIgnored(t *testing.T) {
 	}
 }
 
-// TestACPFromRun_ANamedWorkspaceMustBeTheOneTheSourceRunJudged. A `fromRun` write is applied to the
-// tree its decisions were made against; a turn naming a different one is refused, not redirected.
+// A fromRun write naming a different workspace than the source run reviewed is refused.
 func TestACPFromRun_ANamedWorkspaceMustBeTheOneTheSourceRunJudged(t *testing.T) {
 	srv, _, ws, _ := fromRunHarness(t)
 	s := startACPSession(t, srv)
@@ -363,8 +351,8 @@ func TestACPFromRun_ANamedWorkspaceMustBeTheOneTheSourceRunJudged(t *testing.T) 
 	}
 }
 
-// TestACPFromRun_ASessionCwdMustBeTheOneTheSourceRunJudged. A turn that names no workspace declares
-// its session cwd, and that is checked against the source run's workspace the same way.
+// A turn naming no workspace declares its session cwd, which is checked against the source run's
+// workspace the same way.
 func TestACPFromRun_ASessionCwdMustBeTheOneTheSourceRunJudged(t *testing.T) {
 	srv, _, ws, _ := fromRunHarness(t)
 	s := startACPSession(t, srv)
@@ -390,10 +378,9 @@ func TestACPFromRun_ASessionCwdMustBeTheOneTheSourceRunJudged(t *testing.T) {
 	}
 }
 
-// TestACPSession_ATurnAnsweredIsATurnFinished. The two-turn write contract has a host send turn 2 the
-// moment turn 1's response arrives, so the response must not arrive while the session still counts
-// the turn as in flight. The ordering is guaranteed by ServeFramed's session/prompt goroutine, which
-// releases the session slot before writing the response; this test samples that ordering.
+// A host sends turn 2 as soon as turn 1's response arrives, so the session must no longer count
+// turn 1 as in flight. ServeFramed releases the slot before writing the response; this test samples
+// that ordering.
 func TestACPSession_ATurnAnsweredIsATurnFinished(t *testing.T) {
 	srv := &Server{
 		Manager:  &fakeRemediator{},
@@ -413,9 +400,8 @@ func TestACPSession_ATurnAnsweredIsATurnFinished(t *testing.T) {
 	}
 }
 
-// TestACPFromRun_DecisionSetIsNotRecordedForAWriteRun. A patch/apply run has already applied its own
-// accepted set; recording it as a from-run source would offer a second application of decisions
-// nobody re-read. Report runs, and only report runs, are remediable.
+// A patch or apply run has already applied its own accepted set, so only report runs record a
+// decision set that fromRun can apply.
 func TestACPFromRun_DecisionSetIsNotRecordedForAWriteRun(t *testing.T) {
 	srv, _, ws, _ := fromRunHarness(t)
 	s := startACPSession(t, srv)

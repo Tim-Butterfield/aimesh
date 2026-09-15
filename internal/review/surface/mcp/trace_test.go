@@ -3,6 +3,7 @@ package mcp_test
 import (
 	"encoding/json"
 	"io"
+	"maps"
 	"testing"
 
 	"github.com/Tim-Butterfield/aimesh/internal/review"
@@ -10,20 +11,12 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// The SURFACE WIRING for the OpenTelemetry `_meta` trace context: what this server hands the manager
-// is what the client put in `_meta`, verbatim, and nothing when the client put nothing there.
+// The server passes the client's _meta trace context to the manager verbatim, and nothing when the
+// client sent none. The run package tests that the value reaches run-state.json; this covers the
+// surface, whose failure a writer test cannot see.
 //
-// This is a separate assertion from the manager-side one (`internal/manager/review/trace_test.go`,
-// which proves the value reaches `run-state.json`). The two halves fail differently: a surface that
-// never lifts the value off the env leaves a correct writer with nothing to write, and no test of
-// the writer can see that. exploremesh's `TestSubprocess_ModernTraceContextReachesTheRunRecord`
-// covers both halves at once over the real binary; reviewmesh's manager is faked here, so the two
-// halves are pinned separately.
-//
-// It also pins the era boundary, which is the property most likely to be broken by accident: the
-// three keys are a `2026-07-28` `_meta` convention, the legacy env never fills them, and a legacy
-// request must therefore reach the manager with no trace at all rather than with an empty block that
-// a reader would take for a real (and empty) correlation identity.
+// A legacy request must reach the manager with no trace, since the keys are a 2026-07-28 convention,
+// rather than an empty block.
 func TestReviewReport_CarriesTheCallersTraceContextToTheManager(t *testing.T) {
 	const (
 		parent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
@@ -63,9 +56,8 @@ func TestReviewReport_CarriesTheCallersTraceContextToTheManager(t *testing.T) {
 	})
 
 	t.Run("a legacy request carries none even when it sends the keys", func(t *testing.T) {
-		// The legacy era's env is filled from session state and never parses these keys. A legacy
-		// client that sends them anyway is not refused — the keys are simply not part of that
-		// revision's `_meta` contract — and nothing reaches the run record.
+		// The legacy env never parses these keys; a legacy client that sends them is not refused, and nothing
+		// reaches the run record.
 		ws := workspaceFixture(t)
 		rv := &tracingReviewer{}
 		s := newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{ws} })
@@ -84,7 +76,7 @@ func TestReviewReport_CarriesTheCallersTraceContextToTheManager(t *testing.T) {
 	})
 }
 
-// tracingReviewer is the canned reviewer with the last request it was handed retained.
+// tracingReviewer is the canned reviewer, retaining the last request it received.
 type tracingReviewer struct {
 	fakeReviewer
 }
@@ -97,8 +89,8 @@ func (r *tracingReviewer) lastRequest() reviewRequestSnapshot {
 
 type reviewRequestSnapshot struct{ Trace *review.Trace }
 
-// modernTraceServer wires a server whose manager records what it is handed, plus a raw client that
-// can speak the modern era in-process.
+// modernTraceServer returns a server whose manager records requests, and a raw client that speaks the
+// modern era in-process.
 func modernTraceServer(t *testing.T) (*tracingReviewer, string, *modernRawClient) {
 	t.Helper()
 	ws := workspaceFixture(t)
@@ -119,17 +111,15 @@ func modernTraceServer(t *testing.T) (*tracingReviewer, string, *modernRawClient
 
 type modernRawClient struct{ f proto.Framer }
 
-// modernCall sends one modern `tools/call` with the required `_meta` protocol fields plus whatever
-// extra keys the caller names, and returns the first response frame carrying the request's id.
+// modernCall sends one modern tools/call with the required _meta fields plus extraMeta, and returns the
+// first response frame with id.
 func (c *modernRawClient) modernCall(t *testing.T, id int, tool string, args, extraMeta map[string]any) *rawResponse {
 	t.Helper()
 	meta := map[string]any{
 		proto.MetaKeyProtocolVersion:    proto.ProtocolVersion20260728,
 		proto.MetaKeyClientCapabilities: map[string]any{},
 	}
-	for k, v := range extraMeta {
-		meta[k] = v
-	}
+	maps.Copy(meta, extraMeta)
 	b, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id, "method": "tools/call",
 		"params": map[string]any{"name": tool, "arguments": withPanel(tool, args), "_meta": meta},

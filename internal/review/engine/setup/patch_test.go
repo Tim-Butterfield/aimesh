@@ -32,58 +32,6 @@ func TestPlanAdapterPathPatch_SingleMinimalOp(t *testing.T) {
 	}
 }
 
-func TestPlanProfileCopy_FullSubtreeSetOp(t *testing.T) {
-	e := New()
-	content := map[string]any{"description": "d", "lanes": map[string]any{"reviewer": map[string]any{"adapter": "fake"}}}
-	p, err := e.PlanProfileCopy("mycopy", content)
-	if err != nil {
-		t.Fatalf("plan: %v", err)
-	}
-	if len(p.Ops) != 1 {
-		t.Fatalf("want one op, got %d", len(p.Ops))
-	}
-	op := p.Ops[0]
-	if len(op.Path) != 2 || op.Path[0] != "profiles" || op.Path[1] != "mycopy" || op.Delete {
-		t.Errorf("op = %+v, want set profiles.mycopy", op)
-	}
-	// applying replaces the whole target subtree (copy-to-existing semantics)
-	root := map[string]any{"profiles": map[string]any{"mycopy": map[string]any{"stale": true}}}
-	if err := p.Apply(root); err != nil {
-		t.Fatal(err)
-	}
-	got := root["profiles"].(map[string]any)["mycopy"].(map[string]any)
-	if _, stale := got["stale"]; stale {
-		t.Error("copy-to-existing must replace the whole target subtree, not merge stale keys")
-	}
-}
-
-func TestPlanProfileCopy_RejectsEmpty(t *testing.T) {
-	e := New()
-	if _, err := e.PlanProfileCopy("", map[string]any{}); err == nil {
-		t.Error("empty target must be rejected")
-	}
-	if _, err := e.PlanProfileCopy("t", nil); err == nil {
-		t.Error("nil content must be rejected")
-	}
-}
-
-func TestPlanAdapterRemoval_DeleteOp(t *testing.T) {
-	e := New()
-	p, err := e.PlanAdapterRemoval("codex-cli")
-	if err != nil {
-		t.Fatalf("plan: %v", err)
-	}
-	if len(p.Ops) != 1 || !p.Ops[0].Delete {
-		t.Fatalf("want one delete op, got %+v", p.Ops)
-	}
-	if op := p.Ops[0]; len(op.Path) != 2 || op.Path[0] != "adapters" || op.Path[1] != "codex-cli" {
-		t.Errorf("path = %v, want [adapters codex-cli]", p.Ops[0].Path)
-	}
-	if _, err := e.PlanAdapterRemoval(""); err == nil {
-		t.Error("empty adapter name must be rejected")
-	}
-}
-
 func TestPlanAdapterPathPatch_RejectsEmpty(t *testing.T) {
 	e := New()
 	if _, err := e.PlanAdapterPathPatch("", "/bin/x"); err == nil {

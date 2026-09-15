@@ -28,9 +28,8 @@ func hermeticReview(t *testing.T, scenario string) {
 	t.Setenv("REVIEWMESH_FAKE_SCENARIO", scenario)
 }
 
-// TestReview_JSON_Success pins the success projection AND the stdout-purity rule: stdout is
-// exactly one JSON object — the `run:` line and the identity-caveat lines move to stderr, so
-// a caller reading stdout can parse it without filtering.
+// The success projection is exactly one JSON object on stdout; the run line and identity caveats go
+// to stderr.
 func TestReview_JSON_Success(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, out, errs := run(t, "review", "--report", "--json", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -89,9 +88,8 @@ func TestReview_JSON_Success(t *testing.T) {
 	}
 }
 
-// TestReview_JSON_Halted pins the halted projection: the object is STILL emitted (with the
-// halt record populated) and the exit code is the taxonomy code, unchanged by --json. The halt is
-// UNUSABLE OUTPUT (Class G) — output the host cannot parse is the kind of thing that stops a run.
+// A halted run still emits the projection with the halt record, and the exit code is unchanged by
+// --json. The halt here is unusable output (Class G).
 func TestReview_JSON_Halted(t *testing.T) {
 	hermeticReview(t, "malformed")
 	code, out, errs := run(t, "review", "--report", "--json", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -127,9 +125,7 @@ func TestReview_JSON_Halted(t *testing.T) {
 	}
 }
 
-// TestReview_JSON_IdentityMismatchIsNotAHalt is the contrast: the same run shape with a mismatched
-// model identity exits 0 and projects a NORMAL result carrying the caveat. A consumer reading --json
-// must be able to see the mismatch without the run having been thrown away to tell them.
+// A mismatched model identity exits 0 and projects a normal result carrying the caveat.
 func TestReview_JSON_IdentityMismatchIsNotAHalt(t *testing.T) {
 	hermeticReview(t, "identity_mismatch")
 	code, out, errs := run(t, "review", "--report", "--json", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -148,8 +144,7 @@ func TestReview_JSON_IdentityMismatchIsNotAHalt(t *testing.T) {
 	}
 }
 
-// TestReview_NoJSON_Unchanged pins that the default rendering is untouched — --json is
-// strictly opt-in, so nothing that reads the human output regresses.
+// The default rendering is unchanged; --json is opt-in.
 func TestReview_NoJSON_Unchanged(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, out, errs := run(t, "review", "--report", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -164,8 +159,7 @@ func TestReview_NoJSON_Unchanged(t *testing.T) {
 	}
 }
 
-// TestReview_JSON_RefusesSecretWorkspace pins the surface-level confinement check: pointing a
-// review at a read-denied path is refused before any run, with the machine reason code.
+// A review of a read-denied path is refused before any run, with the machine reason code.
 func TestReview_JSON_RefusesSecretWorkspace(t *testing.T) {
 	hermeticReview(t, "valid")
 	ws := t.TempDir()
@@ -182,7 +176,7 @@ func TestReview_JSON_RefusesSecretWorkspace(t *testing.T) {
 	}
 }
 
-// TestDoctor_JSON pins the doctor projection and that exit semantics are unchanged by it.
+// The doctor projection leaves exit semantics unchanged.
 func TestDoctor_JSON(t *testing.T) {
 	t.Setenv("AIMESH_HOME", t.TempDir())
 	t.Setenv("REVIEWMESH_ARTIFACT_DIR", t.TempDir())
@@ -211,7 +205,7 @@ func TestDoctor_JSON(t *testing.T) {
 			t.Errorf("check with no name: %+v", c)
 		}
 	}
-	// Exit semantics are unchanged: ok ⇒ 0, not-ok ⇒ 3.
+	// ok exits 0, not ok exits 3.
 	wantCode := int(fault.OK)
 	if !view.OK {
 		wantCode = int(fault.Config)
@@ -224,8 +218,7 @@ func TestDoctor_JSON(t *testing.T) {
 	}
 }
 
-// TestDoctor_JSON_RejectsFix pins the guard: a read-only projection and an interactive repair
-// flow cannot share one stream.
+// --json cannot be combined with an interactive repair.
 func TestDoctor_JSON_RejectsFix(t *testing.T) {
 	code, _, errs := run(t, "doctor", "--json", "--fix")
 	if code != int(fault.Usage) {

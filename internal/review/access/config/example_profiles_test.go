@@ -5,17 +5,16 @@ import (
 	"testing"
 )
 
-// TestSeed_ShippedDefaultIsUnconfigured is the release-readiness invariant: the shipped `default`
-// profile is UNCONFIGURED — its required lanes (author_remediator + reviewer) are PRESENT but wired
-// to NO adapter, so a fresh install is honestly not-ready (Doctor flags it) rather than pre-wired to
-// the fake adapter. The deterministic fake coverage lives in the shipped-but-hidden FakeProfile.
+// TestSeed_ShippedDefaultIsUnconfigured: the shipped `default` profile has its required lanes
+// (author_remediator, reviewer) present but no adapter, so doctor reports a fresh install as not
+// ready.
 func TestSeed_ShippedDefaultIsUnconfigured(t *testing.T) {
 	seed := Default().Profiles
 	def, ok := seed["default"]
 	if !ok {
 		t.Fatal("the shipped seed must contain a `default` profile")
 	}
-	// The required roles must be PRESENT (the lanes exist) but UNCONFIGURED (no adapter/model).
+	// The required lanes exist but name no adapter or model.
 	for _, role := range []string{"author_remediator", "reviewer"} {
 		lane, ok := def.Lanes[role]
 		if !ok {

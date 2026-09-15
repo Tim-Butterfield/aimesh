@@ -1,24 +1,9 @@
-// Package cli is aimesh's single command-line entry point. It owns the SHARED commands (state
-// initialization, readiness, the agent guide, version) and dispatches everything else to the two
-// domain CLIs under their own noun: `aimesh review …` and `aimesh explore …`.
+// Package cli is the aimesh command-line entry point. It owns the shared commands (init, doctor,
+// agents-md, clean, mcp and version) and forwards `aimesh review …` and `aimesh explore …` to the
+// domain CLIs, which keep their own flags, help and exit codes.
 //
-// WHY A DOMAIN NOUN RATHER THAN A FLAT MERGE. The two domain CLIs shared most of their command
-// NAMES — doctor, list, setup, acp, mcp, init, repo, folder — while `review`/`config` and
-// `explore`/`export` are unique to one. A flat merge would have to rename most of them. Grouping
-// under the domain is the ordinary shape for a multi-domain tool (docker container ls, kubectl get
-// pods, terraform state list) and it gives `aimesh review --help` a real scoped listing.
-//
-// WHY `run` IS SPELLED OUT. `aimesh review <path>` would put a free-form operand in the same slot
-// as the verb names, so a directory called `setup`, `list`, `doctor`, `mcp` or `acp` would be
-// silently taken as a subcommand — `aimesh review setup` would configure instead of reviewing
-// ./setup, and reviewing it would require knowing to type `./setup`. git carried exactly that
-// ambiguity in `git checkout <branch-or-path>` for fifteen years before splitting it into `switch`
-// and `restore`; npm requires `npm run <script>` for the same reason. One extra word on the path
-// that MCP, ACP and CI all invoke programmatically is a cheap way not to inherit that.
-//
-// This package is deliberately a THIN SHIM: it re-spells argv and calls the domain CLI's existing
-// Run. The domains keep owning their own flags, help and exit codes, so the unification cannot
-// quietly change what a command does.
+// Domain commands are grouped under a noun, and the review or exploration itself is the explicit
+// `run` verb, so a path operand is never mistaken for a subcommand.
 package cli
 
 import (
@@ -97,9 +82,8 @@ help: aimesh review --help, aimesh explore --help.
 // accepts, and the Run it forwards to.
 type domain struct {
 	noun string
-	// verbs maps the verb as typed to the command name the DOMAIN CLI already knows. Only `run`
-	// differs — it is the domain's own name there (`review`, `explore`), which is exactly the
-	// spelling this tree replaces.
+	// verbs maps each typed verb to the domain CLI's command name. Only run differs: it forwards
+	// as the domain's own name (review or explore).
 	verbs map[string]string
 	run   func(args []string, out, errw io.Writer) int
 }
@@ -140,8 +124,7 @@ func Run(args []string, out, errw io.Writer) int {
 	}
 	switch args[0] {
 	case "-h", "--help", "help":
-		// Asking for help is not a usage error: stdout, exit 0, so `aimesh --help | less` and any
-		// CI script gating on the exit code behave.
+		// Asking for help is not a usage error: it prints to stdout and exits 0.
 		fmt.Fprint(out, usage)
 		return int(fault.OK)
 	case "--version", "version":
@@ -166,9 +149,8 @@ func Run(args []string, out, errw io.Writer) int {
 	}
 }
 
-// runDomain re-spells `aimesh <noun> <verb> …` as the argv the domain CLI already understands and
-// forwards. An unknown verb is refused HERE, naming the domain, rather than passed down to produce
-// an error that talks about a command tree the user did not type.
+// runDomain rewrites `aimesh <noun> <verb> …` into the domain CLI's argv and forwards it. An unknown
+// verb is refused here, in terms of the command tree the user typed.
 func runDomain(d domain, args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintf(errw, "aimesh %s: a command is required\n\n%s", d.noun, usage)
@@ -176,10 +158,7 @@ func runDomain(d domain, args []string, out, errw io.Writer) int {
 	}
 	switch args[0] {
 	case "-h", "--help", "help":
-		// FORWARD, do not reprint the tree. `aimesh explore --help` asks for EXPLORE's help; answering
-		// with the top level gives the user the page they just came from and hides the modes, the
-		// mode-specific flags and the exit codes — which live in the domain's own curated usage and
-		// exist nowhere else. The root must not restate them either, or the two drift.
+		// Forward to the domain's own help, which documents its modes, flags and exit codes.
 		return d.run([]string{"--help"}, out, errw)
 	}
 	inner, ok := d.verbs[args[0]]
@@ -187,19 +166,14 @@ func runDomain(d domain, args []string, out, errw io.Writer) int {
 		fmt.Fprintf(errw, "aimesh %s: unknown command %q\n\n%s", d.noun, args[0], usage)
 		return int(fault.Usage)
 	}
-	// A FRESH slice: appending onto args[1:] could write into the caller's backing array.
+	// A fresh slice, because appending onto args[1:] could write into the caller's backing array.
 	forwarded := make([]string, 0, len(args))
 	forwarded = append(forwarded, inner)
 	forwarded = append(forwarded, args[1:]...)
 	return d.run(forwarded, out, errw)
 }
 
-// runVersion reports the build the binary was cut from. Both domains carry their own version
-// package; they read the same module-level build info, so either answers for the whole tool.
-//
-// The NAME is printed here rather than taken from the domain package's String(): this binary is
-// `aimesh`, and a version line naming one of its two domains misidentifies the thing the user just
-// installed and ran. The domain packages keep their own String() for their own surfaces.
+// runVersion prints the build version under the aimesh name, or the full build info with --json.
 func runVersion(args []string, out io.Writer) int {
 	info := version.Get()
 	for _, a := range args {

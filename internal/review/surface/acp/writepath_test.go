@@ -1,16 +1,11 @@
 package acp
 
-// The ACP governed write, proven END TO END: a real run.Manager behind real JSON-RPC frames, a real
-// workspace, and a real live write.
+// These tests run the ACP governed write end to end: a real run.Manager behind JSON-RPC frames, a
+// real workspace and a live write. They hold ACP to no-write-after-cancel and to verifying each
+// destination's content before commit.
 //
-// `docs/acp.md` states no-write-after-cancel as a standing ACP guarantee, and every write verifies the
-// destination's content before it commits. Both properties live in the single governed write path
-// every surface uses; these tests hold ACP to them over the wire.
-//
-// Determinism comes from the author_remediator lane: `gateHost` blocks inside the remediation model
-// call, which is the last thing that happens before the write window opens. That is a real place
-// for a run to spend minutes, and it is where a human's editor save or a host's cancel actually
-// lands.
+// gateHost blocks inside the remediation model call, the last step before the write window opens,
+// which is where an editor save or a host cancel lands in practice.
 
 import (
 	"bufio"
@@ -30,9 +25,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// gateHost is the author_remediator lane. It adjudicates the reviewer's finding as apply-worthy and
-// returns a real anchored edit — but on the remediation phase it first BLOCKS on `reached`/`release`
-// so the test can act while the run is in flight and before any write window opens.
+// gateHost is the author_remediator seat. It accepts the reviewer's finding and returns an anchored
+// edit, but in the remediation phase it first blocks on reached and release so the test can act
+// before the write window opens.
 type gateHost struct {
 	reached chan struct{}
 	release chan struct{}
@@ -58,9 +53,8 @@ func (g gateHost) Invoke(ctx context.Context, c model.Call) (model.Result, error
 	}
 }
 
-// acpApplyHarness builds an ACP server whose Manager really writes: the agent is launched with
-// --allow-writes and the host advertises write capability, so nothing between the request and the
-// live tree is stubbed.
+// acpApplyHarness builds an ACP server whose manager really writes: launched with --allow-writes over
+// a write-capable host, with nothing stubbed between request and tree.
 func acpApplyHarness(t *testing.T) (*Server, *gateHost, string, string) {
 	t.Helper()
 	t.Setenv(fake.EnvVar, "1")
@@ -89,11 +83,9 @@ func acpApplyHarness(t *testing.T) (*Server, *gateHost, string, string) {
 	return srv, g, ws, file
 }
 
-// acpSession drives a server over live pipes so the test can interleave requests with the run's
-// progress. A writer plus a continuously-drained frame channel is what makes "cancel WHILE it runs"
-// a sequence rather than a hope — and the draining is not optional: the server's frame writes are
-// synchronous, so a test that only reads when it wants a specific answer deadlocks the server on
-// the first progress notification.
+// acpSession drives a server over live pipes so a test can interleave requests with a run. Frames are
+// drained continuously because server writes are synchronous; reading only on demand would deadlock
+// on the first progress notification.
 type acpSession struct {
 	t      *testing.T
 	in     *io.PipeWriter
@@ -169,8 +161,7 @@ func (s *acpSession) newSession(ws string) {
 	}
 }
 
-// promptReport is TURN ONE. It runs the governed cycle read-only and returns the `runDir` from its
-// RESPONSE — the one channel with a delivery property, and the handle turn two must carry.
+// promptReport runs turn one read-only and returns the runDir from its response.
 func (s *acpSession) promptReport(ws string) string {
 	s.t.Helper()
 	s.send(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":` +
@@ -186,28 +177,24 @@ func (s *acpSession) promptReport(ws string) string {
 	if runDir == "" {
 		s.t.Fatalf("a report turn must hand back its runDir; got %v", rm)
 	}
-	// The turn must have offered something to apply, or turn two is vacuously safe and every
-	// assertion below proves nothing.
+	// Turn one must offer something to apply, or the assertions below prove nothing.
 	if accepted, _ := rm["accepted"].([]any); len(accepted) == 0 {
 		s.t.Fatalf("the report turn produced no accepted finding, so there is nothing for the apply turn to write; got %v", rm)
 	}
 	return runDir
 }
 
-// promptApply is TURN TWO: apply the decision set turn one recorded. It does not wait — the tests
-// interleave a cancel or a concurrent edit with the run.
+// promptApply sends turn two, applying the decision set turn one recorded, without waiting for the
+// response.
 func (s *acpSession) promptApply(ws, fromRun string) {
 	s.t.Helper()
 	s.send(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":` +
 		strconv.Quote(ws) + `,"fromRun":` + strconv.Quote(fromRun) + `,"mode":"apply","permissions":{"allowWrite":true}}}`)
 }
 
-// TestACPApply_CancelDuringTheRunNeverCommits is the standing ACP guarantee, held to the wire.
-//
-// The cancel is delivered — and ACKNOWLEDGED by the server — while the run is blocked inside its
-// remediation model call, so it is in force before the write window is reached. The run must answer
-// `stopReason: cancelled` AND leave the workspace untouched; those two facts are decided once,
-// together, under the write window's lock, and the receipt records it.
+// The cancel is delivered and acknowledged while the run blocks in its remediation call, before the
+// write window. The run must answer stopReason cancelled and leave the workspace untouched, and the
+// receipt records it.
 func TestACPApply_CancelDuringTheRunNeverCommits(t *testing.T) {
 	srv, g, ws, file := acpApplyHarness(t)
 	before, _ := os.ReadFile(file)
@@ -236,8 +223,7 @@ func TestACPApply_CancelDuringTheRunNeverCommits(t *testing.T) {
 		t.Fatalf("a cancelled run wrote to the live workspace:\nbefore: %q\nafter:  %q", before, after)
 	}
 
-	// The cancellation is RECORDED. A receipt exists on every path — including this one, which gets
-	// no findings payload to carry it — and it says nothing was committed.
+	// The cancellation is recorded: a receipt exists and says nothing was committed.
 	meta, _ := res["_meta"].(map[string]any)
 	rm, _ := meta["reviewmesh"].(map[string]any)
 	runDir, _ := rm["runDir"].(string)
@@ -250,10 +236,8 @@ func TestACPApply_CancelDuringTheRunNeverCommits(t *testing.T) {
 	}
 }
 
-// TestACPApply_ConcurrentInPlaceEditIsRefused stages the data-loss case the CLI test stages, on ACP:
-// the file is saved in place while the run is mid-remediation, so the staged bytes derive from content
-// that no longer exists. An in-place save leaves the inode unchanged, so only the content pin catches
-// it — and the write halts rather than replacing the human's edit.
+// The file is saved in place mid-remediation, leaving the inode unchanged, so only the content pin
+// catches it and the write halts rather than replacing the edit.
 func TestACPApply_ConcurrentInPlaceEditIsRefused(t *testing.T) {
 	srv, g, ws, file := acpApplyHarness(t)
 	const concurrent = "package main\n\nfunc main() { /* a human was here */ }\n"
@@ -263,7 +247,7 @@ func TestACPApply_ConcurrentInPlaceEditIsRefused(t *testing.T) {
 	s.promptApply(ws, s.promptReport(ws))
 	<-g.reached
 
-	// An editor's save: same path, opened and rewritten in place.
+	// An editor's save: the same path, rewritten in place.
 	f, err := os.OpenFile(file, os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		t.Fatalf("open for in-place edit: %v", err)
@@ -299,9 +283,7 @@ func TestACPApply_ConcurrentInPlaceEditIsRefused(t *testing.T) {
 	}
 }
 
-// TestACPApply_UncancelledRunStillWrites is the non-vacuity control for the two tests above: the
-// same harness, nothing interfering, really does write. Without it a broken harness would make both
-// refusal tests pass for the wrong reason.
+// Control for the tests above: the same harness with nothing interfering writes.
 func TestACPApply_UncancelledRunStillWrites(t *testing.T) {
 	srv, g, ws, file := acpApplyHarness(t)
 	s := startACPSession(t, srv)

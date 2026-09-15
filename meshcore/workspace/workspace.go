@@ -1,44 +1,23 @@
-// Package workspace is the WorkspaceAccess layer: it provides isolated copies of
-// the files under review (containment), applies edits to a copy, diffs a copy
-// against the live tree, commits a copy back (apply mode), and discards a copy
-// with unexpected-mutation (M5) detection.
+// Package workspace provides isolated copies of a workspace (containment). It applies edits to a
+// copy, diffs a copy against the live tree, commits a copy back, and discards a copy with
+// unexpected-mutation (M5) detection.
 //
-// # What Commit's rollback guarantees, and what it does not
+// # Commit rollback
 //
-// Commit is COMPENSATING, not transactional. It is honest about the difference because a
-// caller that believes otherwise will build an audit claim on it.
+// Commit is compensating, not transactional. For a commit that fails partway it guarantees:
+//   - every replaced destination is written back with the bytes and permission bits read just
+//     before the replacement;
+//   - every created destination, and every parent directory the commit created, is removed (a
+//     directory that has since gained another file is left alone);
+//   - no destination is replaced unless it is still the object (device and inode) that was
+//     inspected and backed up, and no destination is created unless it is still absent;
+//   - with CommitExpecting, no destination is replaced unless its content still matches the
+//     caller's pin, so an in-place save that keeps the inode is refused rather than overwritten.
 //
-// It DOES guarantee, for a commit that fails partway:
-//   - every destination it replaced is written back with the bytes and the permission bits
-//     it read immediately beforehand;
-//   - every destination it created is removed again;
-//   - every parent directory it created is removed again (best effort: a directory that
-//     has since acquired somebody else's file is left alone rather than destroyed);
-//   - no destination is replaced unless it is still, by identity (device+inode, not name),
-//     the object that was inspected and backed up — and no destination is created unless it
-//     is still absent. A concurrent change is a REFUSAL, so the commit fails instead of
-//     clobbering something it never looked at.
-//   - for CommitExpecting, additionally: no destination is replaced unless its CONTENT still
-//     digests to the pin the caller recorded when it decided what to write. Identity alone
-//     cannot see an in-place save (an editor rewriting a file keeps its inode), so a caller
-//     with a decision window — read the file, think, write it back — needs the content pin
-//     to turn "your concurrent edit was silently discarded" into a refusal.
-//
-// It does NOT guarantee:
-//   - cross-process atomicity. There is no filesystem lock. The re-verification above
-//     narrows the window between "check" and "replace" to a few syscalls, but another
-//     process that writes inside that window is neither prevented nor detected. This is the
-//     irreducible residue: closing it needs an exclusive lock (or a filesystem that offers
-//     compare-and-swap), and this package deliberately does not pretend to have one. What
-//     the pins remove is the MINUTES-wide window between a caller's decision and its write;
-//     what remains is a few syscalls.
-//   - restoration of ownership (uid/gid), timestamps, extended attributes, ACLs, or any
-//     other metadata beyond the permission bits. A rolled-back file has its original
-//     content and mode; its mtime is the rollback's.
-//   - anything at all once the ROLLBACK itself fails. That case is reported as an error
-//     naming both failures; the live tree is then in a state only a human can judge.
-//   - protection against a concurrent writer between the rollback and the caller's next
-//     read.
+// It does not guarantee cross-process atomicity (there is no filesystem lock, so a writer in the
+// few syscalls between check and replace is not detected); restoration of ownership, timestamps
+// or other metadata beyond permission bits; anything once the rollback itself fails, which is
+// reported as an error naming both failures; or protection against a writer after the rollback.
 package workspace
 
 import (
@@ -58,13 +37,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 )
 
-// WriteGuard authorizes a LIVE-tree write target. Access consults it (when set) before
-// applying an edit to a copy and before committing a copy back, passing the path in the
-// LIVE tree the write is ultimately destined for — not the temp-copy path, which is
-// outside every caller-consented root by construction.
-//
-// *scope.Resolver satisfies this. Keeping it an interface holds the containment layer
-// domain-free and lets a caller compose additional policy.
+// WriteGuard authorizes a write to a live-tree path. Access consults it, when set, before applying
+// an edit to a copy and before committing a copy back, passing the live destination rather than the
+// temp-copy path. *scope.Resolver satisfies it.
 type WriteGuard interface {
 	ResolveWrite(path string) (string, error)
 }
@@ -72,27 +47,21 @@ type WriteGuard interface {
 // Access creates and manages isolated copies under a temp base directory.
 type Access struct {
 	base string
-	// Guard, when set, is the authoritative check on every write target. It is the
-	// LAST line of the write path: a caller is expected to check earlier (so a refusal
-	// can halt with a full audit record), and this guard exists so no future code path
-	// can reach a live write without passing the same rule.
+	// Guard, when set, is checked for every write target. It is the last check on the write
+	// path: callers check earlier so a refusal can be audited, and the guard ensures no code
+	// path reaches a live write without the same rule.
 	Guard WriteGuard
-	// AllowProtectedRoots waives the protected-ANCESTOR refusal when admitting a root,
-	// matching scope.Options.AllowProtectedWrites on the Guard. The two travel together:
-	// admitting the root without the write waiver would copy a tree nothing may edit, and
-	// the write waiver without root admission would never reach a file to edit.
-	//
-	// It does NOT waive rule 1 of rootRefusal — a root that IS or sits inside a SECRET
-	// path stays refused, because that rule protects a read and a read reaches a vendor.
+	// AllowProtectedRoots waives the protected-ancestor refusal when admitting a root. Set it
+	// together with scope.Options.AllowProtectedWrites on the Guard. A root that is or sits
+	// inside a secret path stays refused.
 	AllowProtectedRoots bool
 }
 
-// New returns a WorkspaceAccess rooted at baseDir (a temp area), with every root rule in
-// force. Set AllowProtectedRoots afterwards for the operator-granted relaxation.
+// New returns an Access rooted at baseDir (a temp area) with every root rule in force.
 func New(baseDir string) *Access { return &Access{base: baseDir} }
 
-// authorizeWrite runs the configured guard against the LIVE path a workspace-relative
-// target maps to. No guard = no additional restriction (the historical behavior).
+// authorizeWrite runs the guard against the live path a workspace-relative target maps to. With
+// no guard it allows the write.
 func (a *Access) authorizeWrite(h *Handle, rel string) error {
 	if a == nil || a.Guard == nil || h == nil {
 		return nil
@@ -101,11 +70,9 @@ func (a *Access) authorizeWrite(h *Handle, rel string) error {
 	return err
 }
 
-// authorizeCommit is authorizeWrite plus the check the previous code skipped: the guard
-// returns the CANONICAL path it approved, and a commit must write to exactly that path.
-// Discarding it and writing the original string is how an intermediate symlinked
-// directory gets written through — the guard resolved `live/sub/f` to somewhere else
-// entirely and the writer never noticed. liveCanon is the canonicalized live root.
+// authorizeCommit is authorizeWrite that also requires the guard's canonical path to be the
+// destination under liveCanon, the canonical live root. Writing to the original path instead could
+// write through an intermediate symlinked directory the guard resolved elsewhere.
 func (a *Access) authorizeCommit(h *Handle, liveCanon, rel string) error {
 	if a == nil || a.Guard == nil || h == nil {
 		return nil
@@ -115,7 +82,7 @@ func (a *Access) authorizeCommit(h *Handle, liveCanon, rel string) error {
 		return err
 	}
 	if got == "" || liveCanon == "" {
-		return nil // a guard that returns no path (a custom policy) keeps the old contract
+		return nil // a guard that returns no path (a custom policy) is not compared
 	}
 	want := filepath.Join(liveCanon, rel)
 	if !samePath(got, want) {
@@ -128,10 +95,8 @@ func (a *Access) authorizeCommit(h *Handle, liveCanon, rel string) error {
 	return nil
 }
 
-// foldPaths is true only on Windows, where the filesystem itself is case-insensitive. It is a
-// VAR for the reason streamAliasing and reparseAttr are: this repository does not gate on
-// Windows, so an inline `runtime.GOOS ==` would leave the containment branch compiled
-// everywhere and executed nowhere. Substituting it exercises the branch on any platform.
+// foldPaths is true only on Windows, where the filesystem is case-insensitive. It is a variable so
+// tests can exercise the Windows branch on any platform.
 var foldPaths = runtime.GOOS == "windows"
 
 // samePath compares two canonical paths, folding case only on Windows.
@@ -143,10 +108,8 @@ func samePath(a, b string) bool {
 	return a == b
 }
 
-// Caveat records a path that was deliberately left OUT of a copy or a snippet set for a
-// containment reason. It exists so an exclusion is never SILENT: the caller can surface
-// the list in the run record, so "this file was withheld" is a stated fact rather than an
-// absence nobody can distinguish from "there was no such file".
+// Caveat records a path deliberately left out of a copy or a snippet set for a containment reason,
+// so the caller can report the omission instead of leaving it indistinguishable from a missing file.
 type Caveat struct {
 	Path   string // workspace-relative
 	Reason Reason
@@ -154,6 +117,7 @@ type Caveat struct {
 	Detail string
 }
 
+// String renders the caveat as its path, reason, rule and detail.
 func (c Caveat) String() string {
 	s := fmt.Sprintf("%s [%s]", c.Path, c.Reason)
 	if c.Rule != "" {
@@ -177,16 +141,15 @@ func caveatFor(rel string, err error) Caveat {
 type Handle struct {
 	Root string // the copy root (temp)
 	Live string // the live source root
-	// Caveats lists files that were withheld from this copy for a containment reason
-	// (currently: hardlinked regular files). It is the caller's to surface in the run
-	// record — see Caveat.
+	// Caveats lists files withheld from this copy for a containment reason (currently
+	// hardlinked regular files), for the caller to record.
 	Caveats  []Caveat
-	readOnly bool              // reviewer copies are read-only (mutation → M5)
+	readOnly bool              // a read-only copy reports mutation as M5
 	snapshot map[string]string // rel path → sha at copy time
 }
 
-// Copy makes an isolated copy of live (a dir or a single file). readOnly marks a
-// reviewer copy whose later mutation is an M5 breach.
+// Copy makes an isolated copy of live (a directory or a single file). A later mutation of a
+// readOnly copy is an M5 breach.
 func (a *Access) Copy(live string, readOnly bool, label string) (*Handle, error) {
 	info, err := os.Lstat(live)
 	if err != nil {
@@ -195,16 +158,12 @@ func (a *Access) Copy(live string, readOnly bool, label string) (*Handle, error)
 	if isReparse(info) {
 		return nil, fmt.Errorf("refusing to review a symlink/reparse-point target %q", live)
 	}
-	// The ROOT is judged by the denylist and by the protected-ancestor rule, on its
-	// ABSOLUTE path. See rootRefusal: a root self-exception, or a root chosen INSIDE a
-	// protected directory, is how a protected subtree reaches a model. This runs BEFORE
-	// the basename rule below so a protected target is refused with the typed reason an
-	// audit record can classify, rather than with the generic message.
+	// The root is judged on its absolute path (see rootRefusal) before the basename rule below,
+	// so a protected target is refused with a typed reason.
 	if ref := rootRefusal("copy", live, a.AllowProtectedRoots); ref != nil {
 		return nil, ref
 	}
-	// Refuse a target that is itself an excluded/internal path (or a file directly inside
-	// one) by NAME — this is the remaining, generic half (`tmp`, `node_modules`, `dist`).
+	// Refuse a target that is itself an excluded path, or a file directly inside one, by name.
 	if excludedTarget(live, info.IsDir()) {
 		return nil, fmt.Errorf("refusing to review excluded/internal path %q", live)
 	}
@@ -212,17 +171,13 @@ func (a *Access) Copy(live string, readOnly bool, label string) (*Handle, error)
 	if err != nil {
 		return nil, fmt.Errorf("create isolated copy: %w", err)
 	}
-	// liveRoot is always a directory; for a single-file target it is the parent,
-	// so Diff/Commit can join workspace-relative paths against it correctly.
-	// wantRoot is the identity the os.Root boundary must have: for a directory target it
-	// is the very object every check above ran against, so the checks and the opened
-	// boundary cannot come apart (see openRootBound).
+	// liveRoot is always a directory (the parent for a single-file target), so Diff and Commit
+	// can join workspace-relative paths against it. wantRoot is the identity the opened root
+	// must have (see openRootBound).
 	liveRoot, wantRoot := live, info
 	if !info.IsDir() {
 		liveRoot = filepath.Dir(live)
-		// The parent was not itself checked, and may legitimately BE a symlink (a
-		// single-file target reached through a linked directory), so its identity is
-		// captured with a following stat rather than an Lstat.
+		// The parent may be a linked directory, so its identity comes from a following stat.
 		wantRoot, err = os.Stat(liveRoot)
 		if err != nil {
 			_ = os.RemoveAll(root)
@@ -244,48 +199,24 @@ func (a *Access) Copy(live string, readOnly bool, label string) (*Handle, error)
 	return h, nil
 }
 
-// AdmitRoot judges whether a workspace ROOT would be accepted for a copy, and does NOTHING else:
-// no directory is created, nothing is read, nothing is copied. It returns the same *Refusal the
-// copy itself would return, or nil.
-//
-// It exists for a caller that must answer "could this run even start?" before committing to the
-// run — a review dry run. Without it, such a caller reports a tidy plan for a workspace that the
-// very next step refuses: measured 2026-08-11, `--dry-run` on a directory under a protected path
-// printed a full panel and a model-call range for a root that `ProvideCopy` then rejected outright.
-//
-// It calls the SAME rootRefusal the copy path calls, deliberately. The rule it enforces is subtle
-// — exclusion judged on components relative to the root, so that naming a protected directory AS
-// the root cannot strip its protection — and a second implementation of it is exactly the kind of
-// thing that would come to disagree with the first.
-func AdmitRoot(root string) *Refusal { return rootRefusal("copy", root, false) }
-
-// AdmitRootWith is AdmitRoot with the operator's protected-ancestor waiver applied. The
-// SECRET rule still refuses regardless — see rootRefusal.
+// AdmitRootWith reports whether root would be accepted for a copy, returning the *Refusal Copy would
+// return, or nil. It creates, reads and copies nothing, so a dry run refuses exactly the workspaces a
+// run refuses. allowProtected waives only the protected-ancestor rule; see rootRefusal.
 func AdmitRootWith(root string, allowProtected bool) *Refusal {
 	return rootRefusal("copy", root, allowProtected)
 }
 
-// rootRefusal judges a workspace ROOT (the path a caller consented to) by its own absolute
-// path, and returns the typed refusal or nil.
+// rootRefusal judges a workspace root by its own path and returns the typed refusal or nil. Two
+// rules apply, to every form of the root (as given, absolute and symlink-resolved):
 //
-// Two rules, in order of severity:
+//  1. The read denylist, on every component: when the root is a secret path such as `.ssh`, its
+//     whole subtree is secret.
+//  2. The protected-ancestor rule: families such as `.git` and `.vscode` are readable, so without
+//     this rule a root inside one (`/trusted/.vscode`) would make a protected file such as
+//     `mcp.json` an ordinary relative file.
 //
-//  1. The READ denylist, on every component. When the root IS a protected path (a `.env`
-//     directory, a `.ssh` directory), its children are not innocent just because their own
-//     names are — the whole subtree is the secret.
-//  2. The protected-ANCESTOR rule. The copy-exclusion families (`.git`, `.vscode`,
-//     `.claude`, `.cursor`, `.aimesh`, …) are read-ALLOWED, so rule 1 never fires for them;
-//     without this rule, naming a DESCENDANT of one as the root strips the protection
-//     entirely — root `/trusted/.vscode` makes `mcp.json` an ordinary relative file, and
-//     `.vscode/mcp.json` routinely holds API keys.
-//
-// Both rules are applied to every form of the root (as given, absolute, symlink-resolved),
-// so neither a relative spelling nor a symlink alias can walk past a component rule.
-//
-// allowProtected waives rule 2 ONLY. Rule 1 is unconditional: it is the secret family, and
-// admitting a `.ssh` root would put key material into a prompt, which no operator intent
-// can undo once the vendor has it. Rule 2 is protection against a write, and an operator
-// who names such a root is asking to edit a tree they own — see scope's package comment.
+// allowProtected waives rule 2 only. Rule 1 is unconditional, because a secret sent in a prompt
+// cannot be recalled.
 func rootRefusal(op, root string, allowProtected bool) *Refusal {
 	forms := rootForms(root)
 	for _, f := range forms {
@@ -300,10 +231,7 @@ func rootRefusal(op, root string, allowProtected bool) *Refusal {
 		if rule := protectedAncestorRule(f); rule != "" {
 			return &Refusal{
 				Op: op, Path: root, Reason: ReasonExcludedAncestor, Rule: rule,
-				// NAME THE WAY PAST IT. Every other containment refusal names its remedy flag and
-				// this one did not, so the person most likely to hit it — someone whose own dotfiles
-				// or agent config IS the tree they want reviewed, which is exactly who the flag was
-				// built for — was told the rule and left to guess that an override exists at all.
+				// The detail names the operator flag that waives this rule.
 				Detail: "the workspace root is, or sits inside, a protected path; exclusion is judged on components RELATIVE to the root, so such a root would strip the protection. If this tree is yours and reviewing it is the point (your own hooks, your own agent config), pass --allow-protected-paths",
 			}
 		}
@@ -311,11 +239,9 @@ func rootRefusal(op, root string, allowProtected bool) *Refusal {
 	return nil
 }
 
-// fillCopy populates the freshly created copy root from the live target. Both sides are
-// opened as os.Root handles ONCE and every subsequent operation is root-relative, so no
-// component of either tree is re-resolved by string after it was checked. The source root
-// is bound to wantRoot: the boundary that gets opened must be the object the containment
-// checks approved.
+// fillCopy populates the new copy root from the live target. Both sides are opened once as os.Root
+// handles and every later operation is root-relative, so no component is re-resolved by string
+// after it was checked. The source root is bound to wantRoot, the object the checks approved.
 func (a *Access) fillCopy(live, liveRoot, dst string, info, wantRoot os.FileInfo) ([]Caveat, error) {
 	srcRoot, err := openRootBound("copy", liveRoot, wantRoot)
 	if err != nil {
@@ -330,32 +256,28 @@ func (a *Access) fillCopy(live, liveRoot, dst string, info, wantRoot os.FileInfo
 	if info.IsDir() {
 		return copyTree(srcRoot, dstRoot)
 	}
-	// A single-file target is the EXPLICIT object of the operation: a containment refusal
-	// on it is a refusal of the whole call, never a caveat, because there is nothing left
-	// to review once it is withheld.
+	// A single-file target is the whole subject of the operation, so a containment refusal on
+	// it refuses the call rather than becoming a caveat.
 	return nil, copyRegular(srcRoot, dstRoot, "copy", info.Name())
 }
 
 // Abs resolves a workspace-relative path within the copy.
 func (h *Handle) Abs(rel string) string { return filepath.Join(h.Root, rel) }
 
-// ApplyEdit applies one Edit to the copy. An empty Anchor prepends Replacement;
-// otherwise it replaces the anchor text. A missing anchor is a non-fatal error
-// the caller records against the finding.
+// ApplyEdit applies one Edit to the copy. An empty Anchor prepends Replacement; otherwise the
+// anchor text is replaced. A missing anchor is returned as an error for the caller to record.
 func (a *Access) ApplyEdit(h *Handle, e core.Edit) error {
 	if !safeRel(e.File) || IsExcluded(e.File) {
 		return fmt.Errorf("apply edit: refusing excluded/escaping path %q", e.File)
 	}
-	// Protected-path / root confinement, evaluated against the LIVE destination. This is
-	// checked even in patch mode: a patch artifact naming a protected file is already the
-	// dangerous thing (it is what a human or a later apply would replay).
+	// Confinement is checked against the live destination even in patch mode: a patch naming a
+	// protected file is what a later apply would replay.
 	if err := a.authorizeWrite(h, e.File); err != nil {
 		return fmt.Errorf("apply edit: %w", err)
 	}
-	// The edit is applied through a root handle on the COPY: the file name comes from a
-	// model, and a copy is a place a contained reviewer can plant things. os.Root refuses
-	// any component that leaves the copy, and the no-follow open refuses a planted symlink
-	// at the target itself.
+	// The file name comes from a model and the copy may hold planted links, so the edit goes
+	// through a root handle on the copy (os.Root refuses components that leave it) and a
+	// no-follow open (which refuses a symlink at the target).
 	copyRoot, err := openRootDir(h.Root)
 	if err != nil {
 		return fmt.Errorf("apply edit: open copy root: %w", err)
@@ -366,11 +288,9 @@ func (a *Access) ApplyEdit(h *Handle, e core.Edit) error {
 		return fmt.Errorf("apply edit: read %q: %w", e.File, err)
 	}
 	content := string(b)
-	// Adapt the replacement's line endings to the target file's dominant convention, so a
-	// hardcoded-LF insertion (e.g. the remediation marker) into a CRLF source does not
-	// produce a mixed-ending file. Only the replacement's newlines are rewritten; the
-	// anchor is matched against the original bytes EXACTLY (never normalized), and all
-	// unchanged bytes are preserved verbatim.
+	// Match the replacement's line endings to the file's dominant convention so an LF insertion
+	// into a CRLF file does not produce mixed endings. The anchor is matched against the
+	// original bytes exactly, and unchanged bytes are preserved.
 	repl := adaptLineEnding(e.Replacement, DetectLineEnding(content))
 	var out string
 	switch {
@@ -392,17 +312,13 @@ func (a *Access) ApplyEdit(h *Handle, e core.Edit) error {
 	return nil
 }
 
-// --- grouped edits: staging inside the isolated copy ---
+// --- grouped edits ---
 //
-// ApplyEdit is one hunk. A caller that applies a GROUP of hunks as a unit (all of them or
-// none) needs a way to undo the group's earlier hunks when a later one fails — otherwise a
-// group reported "not applied" still leaves its successful hunks in the copy, and the copy
-// is what a commit ships. FileSnapshot/RestoreFiles are that undo. They operate ONLY on the
-// isolated copy: nothing here touches the live tree.
+// A caller applying a group of edits as a unit uses SnapshotFiles and RestoreFiles to undo the
+// group's earlier edits when a later one fails. Both operate only on the isolated copy.
 
-// FileSnapshot is the recorded content of specific files inside an isolated copy, taken
-// before a group of edits so the group can be rolled back as a unit. It is opaque: its
-// only use is RestoreFiles.
+// FileSnapshot is the recorded content of files inside an isolated copy, taken before a group of
+// edits so the group can be rolled back. Its only use is RestoreFiles.
 type FileSnapshot struct {
 	files []snapshotFile
 }
@@ -466,10 +382,8 @@ func (a *Access) SnapshotFiles(h *Handle, rels []string) (*FileSnapshot, error) 
 	return snap, nil
 }
 
-// RestoreFiles puts a snapshot back, undoing every edit made to those files since it was
-// taken. A failure is reported rather than swallowed: a copy that could not be restored is
-// in a state the caller never recorded an intent for, and shipping it would be worse than
-// failing.
+// RestoreFiles restores a snapshot, undoing every edit made to its files since it was taken. A
+// failure is returned, because a copy that could not be restored must not be committed.
 func (a *Access) RestoreFiles(h *Handle, snap *FileSnapshot) error {
 	if snap == nil || len(snap.files) == 0 {
 		return nil
@@ -483,8 +397,7 @@ func (a *Access) RestoreFiles(h *Handle, snap *FileSnapshot) error {
 	}
 	defer copyRoot.Close()
 	var firstErr error
-	for i := len(snap.files) - 1; i >= 0; i-- {
-		f := snap.files[i]
+	for _, f := range slices.Backward(snap.files) {
 		var rerr error
 		if f.exists {
 			rerr = writeThroughRoot(copyRoot, "restore", f.rel, f.data, f.perm)
@@ -569,60 +482,31 @@ func (a *Access) Diff(h *Handle) (string, []FileChange, error) {
 	return strings.Join(diffs, ""), changes, nil
 }
 
-// Commit copies changed files from the copy back to the live tree (apply mode).
+// Commit copies changed files from the copy back to the live tree (apply mode) and returns the
+// committed paths.
 //
-// Every changed path is authorized against the write guard BEFORE anything is written:
-// a refusal aborts the whole commit with nothing applied, rather than writing part of the
-// set and then refusing (a half-applied remediation is worse than none).
+// Every changed path is authorized before anything is written, and every replaced destination is
+// backed up and restored on any failure, so the live tree moves from nothing applied to everything
+// applied. A staged file or directory that cannot be read is an error, never a silent skip. The
+// package doc states what the rollback does and does not restore.
 //
-// Authorization being all-before-write is not enough on its own, because the WRITES are
-// still sequential and a mid-sequence failure (a destination that is a non-empty
-// directory, a full disk, a revoked permission) would leave the earlier files applied.
-// Commit therefore keeps a rollback copy of every destination it is about to replace and
-// restores all of them on ANY failure, so the live tree only ever moves from
-// "nothing applied" to "everything applied".
-//
-// A staged file that cannot be read — or a staged DIRECTORY that cannot be listed — is an
-// ERROR, never a silent skip: dropping part of the reviewed set while returning success is
-// exactly the half-applied outcome the all-or-nothing rule exists to prevent.
-//
-// What the rollback does and does not restore is stated precisely in the package doc.
-//
-// Commit performs NO content pinning. A caller whose staged bytes were derived from a
-// snapshot of the live tree — anything with a decision window between "read" and "write" —
-// must use CommitExpecting instead; see its doc for why identity alone is not enough.
+// Commit performs no content pinning; a caller that decided what to write from an earlier read of
+// the live tree must use CommitExpecting.
 func (a *Access) Commit(h *Handle) ([]string, error) { return a.CommitExpecting(h, nil) }
 
-// CommitExpecting is Commit with CONTENT PINS: pins maps a workspace-relative path to the
-// digest the caller recorded for that live destination when it decided what to write
-// (ContentPin of the bytes, or ContentAbsent when the file did not exist). Immediately
-// before each destination is replaced — after the identity re-verification, inside the same
-// few syscalls — the destination's actual content is digested and compared to the pin, and a
-// mismatch is a REFUSAL that rolls the whole commit back.
+// CommitExpecting is Commit with content pins. pins maps a workspace-relative path to the digest
+// the caller recorded for that live destination (ContentPin of its bytes, or ContentAbsent).
+// Immediately before each replacement the destination's content is digested and compared, and a
+// mismatch refuses and rolls back the whole commit. Identity checks alone miss an in-place save,
+// which keeps the inode.
 //
-// Identity and content answer different questions and both are needed. Identity
-// (verifyDestination, os.SameFile) catches a destination that was SWAPPED — replaced or
-// redirected to a different object. It cannot catch the common case: an editor that saves
-// in place keeps the device+inode, so a concurrent human edit passes the identity check
-// while the staged bytes still derive from the pre-edit content. Pinning the content is
-// what turns that silent overwrite into a refusal.
+// Independently of pins, each existing destination is re-read after the identity check and
+// compared with its backup, because the rollback restores those bytes and inode reuse (on ext4,
+// for example) can hide a delete-and-recreate from os.SameFile.
 //
-// Independently of pins, every existing destination is RE-READ after the identity check and
-// compared byte-for-byte with the backup taken moments earlier. That is the check the
-// rollback actually depends on — a rollback restores those bytes, so they must still be what
-// the destination holds — and it is the only one that survives inode reuse: ext4 hands a
-// recreated file the inode it just freed, so "delete and recreate" is invisible to
-// os.SameFile there even though it is exactly the case the identity check was written for.
-//
-// A nil pin map means "no pins recorded" and skips the content check entirely (Commit's
-// historical contract). A non-nil map is EXHAUSTIVE: a destination with no pin is refused
-// (ReasonDestinationUnpinned) rather than written unchecked, because a caller that pins some
-// of its writes and not others has no record of what the unpinned ones were replacing.
-//
-// What this does NOT buy, stated plainly: there is still no filesystem lock. The pin is
-// verified from the bytes read immediately before the write, so the unprotected window is
-// the few syscalls between that read and the create — not the minutes-long decision window
-// it replaces. A writer inside that syscall window is still neither prevented nor detected.
+// A nil map skips the content check. A non-nil map is exhaustive: a destination without a pin is
+// refused (ReasonDestinationUnpinned). There is still no filesystem lock, so a writer in the few
+// syscalls between the final read and the write is not detected.
 func (a *Access) CommitExpecting(h *Handle, pins map[string]string) ([]string, error) {
 	copyRoot, err := openRootDir(h.Root)
 	if err != nil {
@@ -634,10 +518,9 @@ func (a *Access) CommitExpecting(h *Handle, pins map[string]string) ([]string, e
 		return nil, fmt.Errorf("commit: open live root: %w", err)
 	}
 	defer liveRoot.Close()
-	// The canonical live root, so each destination can be compared against the path the
-	// write guard actually authorized. It is made ABSOLUTE first: a guard canonicalizes
-	// against the working directory, so comparing its answer to a relative live root
-	// ("." — the shape `review .` produces) would refuse every legitimate write.
+	// The canonical live root lets each destination be compared with the path the guard
+	// authorized. It is made absolute first because the guard canonicalizes against the
+	// working directory, and a relative live root such as "." would refuse every write.
 	liveAbs, err := filepath.Abs(h.Live)
 	if err != nil {
 		return nil, fmt.Errorf("commit: resolve live root %q: %w", h.Live, err)
@@ -697,8 +580,7 @@ func (a *Access) CommitExpecting(h *Handle, pins map[string]string) ([]string, e
 	var undos []undo
 	rollback := func() error {
 		var firstErr error
-		for i := len(undos) - 1; i >= 0; i-- {
-			u := undos[i]
+		for _, u := range slices.Backward(undos) {
 			var rerr error
 			if u.existed {
 				rerr = writeThroughRoot(liveRoot, "rollback", u.rel, u.data, u.perm)
@@ -747,13 +629,9 @@ func (a *Access) CommitExpecting(h *Handle, pins map[string]string) ([]string, e
 			}
 			err = verifyDestination(liveRoot, "commit", s.rel, want)
 		}
-		// The backup must still be true. Identity says the name still resolves to the same
-		// object; only the bytes say the object still holds what the rollback would restore.
-		// Re-read and compare — a mismatch means a concurrent writer, and clobbering it or
-		// later "restoring" stale bytes over it are both worse than refusing. The re-read goes
-		// through readBackup, the same path the backup took: a hardlinked destination is
-		// backed up and then replaced by name with a fresh file, so the stricter readRegular
-		// (which refuses a multi-link file) would turn that supported case into a refusal.
+		// The destination must still hold the backed-up bytes; a mismatch means a concurrent
+		// writer. The re-read uses readBackup, like the backup, because a hardlinked destination
+		// is supported here and readRegular would refuse it.
 		if err == nil && u.existed {
 			switch cur, _, rerr := readBackup(liveRoot, "commit", s.rel); {
 			case rerr != nil:
@@ -766,9 +644,7 @@ func (a *Access) CommitExpecting(h *Handle, pins map[string]string) ([]string, e
 					Detail: "the destination's content changed between the backup read and the write"}
 			}
 		}
-		// CONTENT, after identity and immediately before the replacement. u.data is what the
-		// backup read just took from this very destination, so the digest is of the bytes
-		// about to be overwritten — not of anything read minutes earlier.
+		// Content pins are checked after identity, against the bytes the backup just read.
 		if err == nil && pins != nil {
 			err = verifyPinned("commit", s.rel, u.existed, u.data, pins)
 		}
@@ -791,18 +667,15 @@ func (a *Access) CommitExpecting(h *Handle, pins map[string]string) ([]string, e
 	return committed, nil
 }
 
-// Discard removes the copy. For a read-only (reviewer) copy it first checks for
-// unexpected mutation; on a breach it returns the mutation diff and a non-nil
-// M5 halt class (the caller owns audit).
+// Discard removes the copy. For a read-only copy it first checks for unexpected mutation and, on a
+// breach, returns the mutation diff and an M5 halt class for the caller to audit.
 func (a *Access) Discard(h *Handle) (mutationDiff string, m5 *core.HaltClass, err error) {
 	if h.readOnly {
 		cur, herr := hashTree(h.Root)
 		switch {
 		case herr != nil:
-			// The copy could not be enumerated, so mutation cannot be RULED OUT — and a
-			// subtree that became unlistable is itself a change to a copy nobody was
-			// supposed to touch. Fail closed: report it as a breach rather than as a clean
-			// discard whose error a caller may drop.
+			// Mutation cannot be ruled out when the copy cannot be enumerated, so fail closed
+			// and report a breach.
 			mutationDiff = "unverifiable: " + herr.Error()
 			cls := core.HaltClass("M5")
 			m5 = &cls
@@ -820,10 +693,8 @@ func (a *Access) Discard(h *Handle) (mutationDiff string, m5 *core.HaltClass, er
 	return mutationDiff, m5, err
 }
 
-// Cleanup unconditionally removes a copy's working directory. It is a panic-safe
-// net (defer it right after Copy); the normal path still uses Discard, which also
-// removes the directory, so a later Cleanup is a harmless no-op. It performs NO
-// mutation check, so it never spuriously reports M5.
+// Cleanup removes a copy's working directory without a mutation check. Defer it after Copy as a
+// panic-safe net; after Discard it is a no-op.
 func (a *Access) Cleanup(h *Handle) {
 	if h != nil {
 		_ = os.RemoveAll(h.Root)
@@ -832,10 +703,8 @@ func (a *Access) Cleanup(h *Handle) {
 
 // --- helpers ---
 
-// copyTree walks the source ROOT HANDLE (never a path string) and mirrors it into the
-// destination root handle. Every entry is re-examined through the same handle it was
-// listed from, so a component swapped to a symlink mid-walk cannot redirect a read out
-// of the workspace: os.Root refuses it.
+// copyTree mirrors srcRoot into dstRoot. Every entry is examined through the source root handle,
+// so a component swapped to a symlink mid-walk cannot redirect a read out of the workspace.
 func copyTree(srcRoot, dstRoot *os.Root) ([]Caveat, error) {
 	var caveats []Caveat
 	err := fs.WalkDir(srcRoot.FS(), ".", func(p string, d fs.DirEntry, err error) error {
@@ -847,13 +716,9 @@ func copyTree(srcRoot, dstRoot *os.Root) ([]Caveat, error) {
 		}
 		rel := filepath.FromSlash(p)
 		if IsExcluded(rel) {
-			// RECORDED HERE, because this is where a real run drops them. The collector runs on
-			// the COPY, where an excluded path does not exist, so it has nothing left to notice
-			// and the omission would be invisible end to end. Recording it
-			// at the copy is also what keeps PreviewPayload honest: the dry run walks the LIVE
-			// tree and would otherwise report exclusions the run never mentioned.
-			//
-			// Only the exclusions a user would be SURPRISED by; see noteworthyExclusion.
+			// Exclusions are recorded here because the collector later runs on the copy, where
+			// excluded paths no longer exist; PreviewPayloadWith, which walks the live tree, reports
+			// the same set. Only noteworthy exclusions are recorded.
 			if noteworthyExclusion(rel) {
 				caveats = append(caveats, Caveat{
 					Path: filepath.ToSlash(rel), Reason: ReasonExcluded,
@@ -865,10 +730,9 @@ func copyTree(srcRoot, dstRoot *os.Root) ([]Caveat, error) {
 			}
 			return nil
 		}
-		// Read-denied paths (`.env*`, key material) are never copied at all: the isolated
-		// copy is what a model is pointed at, so excluding by construction is stronger than
-		// filtering them out of a prompt afterwards. The rule is per COMPONENT, so a file
-		// under a denied directory is denied with it.
+		// Read-denied paths (`.env*`, key material) are never copied, since the copy is what a
+		// model is shown. The rule applies per component, so a denied directory's files are
+		// denied too.
 		if scope.DeniedRead(rel) != "" {
 			if d.IsDir() {
 				return fs.SkipDir
@@ -880,8 +744,8 @@ func copyTree(srcRoot, dstRoot *os.Root) ([]Caveat, error) {
 			return nil // vanished between listing and stat: nothing to copy
 		}
 		if isReparse(fi) {
-			// never follow/copy symlinks or reparse points (junctions/mount points) —
-			// they can redirect outside the workspace
+			// Symlinks and reparse points are never followed; they can redirect outside the
+			// workspace.
 			if d.IsDir() {
 				return fs.SkipDir
 			}
@@ -891,15 +755,12 @@ func copyTree(srcRoot, dstRoot *os.Root) ([]Caveat, error) {
 			return dstRoot.MkdirAll(toRootPath(rel), 0o755)
 		}
 		if !fi.Mode().IsRegular() {
-			return nil // devices/sockets/FIFOs are not review material
+			return nil // devices, sockets and FIFOs are not copied
 		}
 		cerr := copyRegular(srcRoot, dstRoot, "copy", rel)
-		// A hardlinked file is refused as a FILE, not as a run. Its innocuous in-root name
-		// may be a second name for `~/.ssh/id_rsa`, so it must not be copied — but a
-		// `cp -al` tree, a dedup store or a legitimately hardlinked fixture is ordinary,
-		// and killing the whole review over one such file is an availability hole a writer
-		// inside a trusted tree could trigger at will. It is withheld and RECORDED, so the
-		// omission is never silent.
+		// A hardlinked file may be a second name for a secret, so it is withheld and recorded
+		// rather than copied. Hardlinked trees are common, so failing the whole copy would be
+		// an availability hole.
 		if ReasonOf(cerr) == ReasonHardlink {
 			caveats = append(caveats, caveatFor(rel, cerr))
 			return nil
@@ -912,9 +773,9 @@ func copyTree(srcRoot, dstRoot *os.Root) ([]Caveat, error) {
 	return caveats, nil
 }
 
-// copyRegular streams one regular file from srcRoot to dstRoot, both root-relative. The
-// source is validated on the OPENED descriptor (regular, not a symlink, not hardlinked),
-// so what is copied is what was checked.
+// copyRegular streams one regular file from srcRoot to dstRoot, both root-relative. The source is
+// validated on the opened descriptor (regular, not a symlink, not hardlinked), so what is copied is
+// what was checked.
 func copyRegular(srcRoot, dstRoot *os.Root, op, rel string) error {
 	in, _, err := openRegular(srcRoot, op, rel, true)
 	if err != nil {
@@ -938,17 +799,10 @@ func copyRegular(srcRoot, dstRoot *os.Root, op, rel string) error {
 	return out.Close()
 }
 
-// hashTree fingerprints every file in a tree. Enumeration errors are PROPAGATED, never
-// swallowed: a staged directory that cannot be listed hides every file beneath it, and a
-// caller that treats the resulting set as complete would commit a subset of the reviewed
-// files while reporting success (and would see no mutation in a read-only copy whose
-// mutated subtree merely became unreadable).
-//
-// The digest is SHA-256 because the snapshot is a SECURITY control, not a change detector
-// of convenience: Discard compares it to catch a model that wrote into its read-only copy
-// (M5), and a hash with a practical collision attack would let a mutation hide behind an
-// unchanged digest. The digests live only in memory on the Handle — never written, never
-// reported — so the algorithm carries no compatibility weight and can be the strong one.
+// hashTree fingerprints every file in a tree with SHA-256. Enumeration errors are returned: an
+// unlistable directory hides the files beneath it, which would let a commit drop files or a
+// read-only copy hide a mutation. The hash must resist collisions because Discard uses it to
+// detect a model writing to its read-only copy.
 func hashTree(root string) (map[string]string, error) {
 	out := map[string]string{}
 	r, err := openRootDir(root)

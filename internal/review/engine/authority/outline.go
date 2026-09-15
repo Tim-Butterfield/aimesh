@@ -1,22 +1,8 @@
 package authority
 
-// THE OUTLINE A BUDGET REFUSAL CARRIES.
-//
-// The refusal itself is right and stays exactly as it was: an oversized authority document is never
-// silently truncated, because a document a review is JUDGED AGAINST is the last thing that may be
-// quietly shortened. What was wrong was the remedy. It said "declare completeness `ranges` with
-// explicit ranges, or split the document" — and both of those require the user to compute BYTE
-// OFFSETS by hand, in a file that frequently belongs to a different repository. Measured, the person
-// who hit this did neither: they copied one section into a temp file with a provenance comment, which
-// works and silently changes what the reviewers were told is authoritative.
-//
-// So the refusal now hands over the numbers it is asking for. The offsets in the message are exactly
-// the `ranges` values that would make the next attempt succeed, which turns "go measure your file"
-// into a line to paste.
-//
-// WHAT THIS IS NOT: a markdown parser. It finds ATX headings at the shallowest level the document
-// uses and reports the byte span between them. A document with no headings gets no outline and says
-// so, rather than an invented structure — the whole value here is that the numbers are real.
+// This file addresses authority documents by section. It is not a Markdown parser: it finds ATX
+// headings at the shallowest level a document uses and reports the byte span each one covers, which
+// is the half-open range a `ranges` declaration selects.
 
 import (
 	"fmt"
@@ -24,24 +10,15 @@ import (
 	"strings"
 )
 
-// ErrNoSuchSection is returned by SectionRange when the document has no section by that name. It is
-// distinguished from "the document has no sections at all" in the message, because the two need
-// different responses: fix the name, versus stop trying to address this document by section.
+// sectionError is the error SectionRange returns when a section cannot be addressed.
 type sectionError struct{ msg string }
 
 func (e sectionError) Error() string { return e.msg }
 
-// SectionRange resolves a section NAME to the byte range that selects it, for `--authority
-// path.md#Heading`.
-//
-// The match is case-insensitive and ignores surrounding whitespace, because a heading is prose a user
-// retypes rather than an identifier they copy. An AMBIGUOUS name — two sections with the same heading
-// — is an error rather than a first-match: a document is being declared as the authority a review is
-// judged against, and silently picking one of two candidates is exactly the kind of quiet choice that
-// must not happen there.
-//
-// On failure the error NAMES the sections that do exist, so a mistyped heading is one correction
-// rather than a guessing game.
+// SectionRange resolves a section name to the byte range that selects it, for `--authority
+// path.md#Heading`. Matching is case-insensitive and ignores surrounding whitespace. A name that
+// matches more than one section is an error rather than a first match, and a name that matches none
+// lists the sections that exist.
 func SectionRange(text, section string) (start, end int, err error) {
 	want := strings.ToLower(strings.TrimSpace(section))
 	secs := outline(text)
@@ -64,7 +41,7 @@ func SectionRange(text, section string) (start, end int, err error) {
 	}
 }
 
-// sectionTitles lists a document's section names for an error message, bounded like the outline is.
+// sectionTitles lists a document's section names for an error message, at most maxOutlineSections.
 func sectionTitles(secs []Section) []string {
 	out := make([]string, 0, len(secs))
 	for i, s := range secs {
@@ -77,27 +54,20 @@ func sectionTitles(secs []Section) []string {
 	return out
 }
 
-// maxOutlineSections bounds how many sections a refusal lists. A 200-section document would bury the
-// refusal itself; the count of what was dropped is always stated (never a silent cap).
+// maxOutlineSections bounds how many section names an error lists; the number omitted is stated.
 const maxOutlineSections = 12
 
-// Section is one top-level span of a document: its heading, and the byte range that would select it.
-// Start is inclusive and End exclusive, which is the half-open convention the range selector uses, so
-// the numbers can be pasted without adjustment.
+// Section is one top-level span of a document: its heading and the half-open byte range
+// [Start, End) that selects it.
 type Section struct {
 	Title string
 	Start int
 	End   int
 }
 
-// Bytes is the section's size.
-func (s Section) Bytes() int { return s.End - s.Start }
-
-// outline finds the document's top-level sections. It returns nil when the document has no ATX
-// headings at all — there is no structure to report, and inventing one would be worse than silence.
-//
-// "Top level" is the SHALLOWEST heading level present, not literally `#`: a document whose headings
-// all start at `##` is sectioned by its `##`s, which is what its author meant by a section.
+// outline returns the document's top-level sections: those at the shallowest heading level present,
+// so a document whose headings start at `##` is sectioned by them. It returns nil when the document
+// has no ATX headings.
 func outline(text string) []Section {
 	type heading struct {
 		level int
@@ -147,9 +117,8 @@ func outline(text string) []Section {
 	return out
 }
 
-// atxHeading recognises `#`..`######` followed by a space. A `#` with no space is not a heading (it
-// is a comment in most of the formats that share this file extension), and the closing-hash form
-// (`## Title ##`) is trimmed so the reported title reads the way the document does.
+// atxHeading recognizes `#` through `######` followed by a space, returning the level and title. A
+// closing-hash form (`## Title ##`) is trimmed from the title.
 func atxHeading(line string) (int, string, bool) {
 	trimmed := strings.TrimLeft(line, " ")
 	// More than three leading spaces is an indented code block in every markdown dialect.
@@ -169,7 +138,3 @@ func atxHeading(line string) (int, string, bool) {
 	}
 	return level, title, true
 }
-
-// outlineRemedy renders the actionable half of a budget refusal: which sections the document has,
-// how big each one is, and the exact byte range that selects it.
-//

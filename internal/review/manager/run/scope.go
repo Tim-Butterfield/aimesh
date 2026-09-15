@@ -1,30 +1,15 @@
 package run
 
-// SCOPE SELECTION — reviewing part of a tree instead of all of it.
-//
-// Until this existed there was no file-level scope at all: the collector took a root and collected
-// it, so "review what I just changed" meant pointing at a smaller directory or nothing.
-//
-// THE SHAPE, and it is the point of the design rather than an implementation detail. The primitive is
-// A SET OF FILES. Everything else here is a BASELINE — a way of producing that set — and the baselines
-// available differ by what the tree can offer:
+// Scope selection narrows which files reviewers are shown. The primitive is a set of files, produced
+// by any combination of baselines:
 //
 //	explicit paths / globs      any tree
 //	changed since a timestamp   any tree          (modification time)
 //	changed since a VCS ref     a repository only (git/hg)
 //
-// That ordering is deliberate. Making a git ref the organising idea — `--diff` as the feature, with
-// everything else bolted beside it — would give half the usage a first-class answer and the other
-// half a documented gap. NOT ALL USAGE IS REPO-FOCUSED: aimesh supports `folder init` as a peer of
-// `repo init`, and a plain folder needs a real "what I just changed", not a consolation prize. So the
-// VCS baselines are ONE RESOLVER AMONG SEVERAL, and the capability a user gets is uniform even though
-// the mechanisms behind it are not.
-//
-// WHAT SCOPE DOES NOT DO. It narrows what reviewers are SHOWN. It does not narrow containment (the
-// copy is still the copy), does not widen anything, and cannot reach outside the workspace root — a
-// selector that resolves to nothing is a refusal, never a silent fallback to everything. That last
-// rule is the one that matters: a mistyped glob quietly reviewing the entire tree would be the
-// opposite of what the user asked for, at full cost.
+// Plain folders therefore get the same capability as repositories. Scope never narrows containment or
+// reaches outside the workspace root, and a selector that matches nothing is refused rather than
+// falling back to the whole tree.
 
 import (
 	"context"
@@ -43,14 +28,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// Stable MACHINE reason codes for scope selection.
+// Reason codes for scope selection.
 const (
-	// ReasonScopeEmpty — the selector resolved to no file. It is a REFUSAL: a run that fell back to
-	// the whole tree would review everything at full cost while the user believed they had narrowed
-	// it, and a run that proceeded with nothing would report "no findings" about nothing.
+	// ReasonScopeEmpty — the selector matched no file. It is refused: falling back to the whole tree
+	// would review everything at full cost.
 	ReasonScopeEmpty = "scope_selected_nothing"
-	// ReasonScopeUnavailable — a baseline was requested that this tree cannot answer (a VCS ref in a
-	// plain folder). Refused rather than silently ignored, which would review the whole tree.
+	// ReasonScopeUnavailable — a baseline this tree cannot answer, such as a VCS ref in a plain folder.
 	ReasonScopeUnavailable = "scope_baseline_unavailable"
 	// ReasonScopeInvalid — the selector itself is malformed (an unparseable duration, a path that
 	// escapes the root).
@@ -66,12 +49,11 @@ type Scope struct {
 	// everything under it; `**` is not special beyond what path.Match does, so a glob that means to
 	// cross directories should name the directory.
 	Paths []string
-	// ChangedSince selects files modified since a time: a Go duration ("2h") or an RFC3339 stamp.
-	// It works in ANY tree, which is what makes "what I just changed" answerable in a plain folder.
+	// ChangedSince selects files modified since a time: a Go duration ("2h") or an RFC3339 stamp. It
+	// works in any tree.
 	ChangedSince string
-	// VCSRef selects files changed against a version-control baseline: "diff" (working tree vs
-	// HEAD), "staged", or any ref/commit. Available in a repository ONLY, and refused elsewhere
-	// rather than ignored.
+	// VCSRef selects files changed against a version-control baseline: "diff" (working tree vs HEAD),
+	// "staged", or any ref or commit. It is refused outside a repository.
 	VCSRef string
 }
 
@@ -80,14 +62,11 @@ func (s Scope) Empty() bool {
 	return len(s.Paths) == 0 && strings.TrimSpace(s.ChangedSince) == "" && strings.TrimSpace(s.VCSRef) == ""
 }
 
-// Resolve turns the selector into the SET OF WORKSPACE-RELATIVE PATHS this run may show a reviewer.
-//
-// The baselines UNION rather than intersect. Naming two of them means "review what either selects",
-// which is the reading that matches how a person says it — "the files I touched, plus this one I am
-// worried about" — and the intersection reading has no natural phrasing at all.
+// Resolve returns the workspace-relative paths this run may show a reviewer: the union of every
+// baseline given. It returns nil for an empty scope and refuses a selector that matches nothing.
 func (s Scope) Resolve(ctx context.Context, root string) (map[string]bool, error) {
 	if s.Empty() {
-		return nil, nil // nil means "no narrowing"; an EMPTY map would mean "show nothing"
+		return nil, nil // nil means no narrowing; an empty map would mean show nothing
 	}
 	out := map[string]bool{}
 	if len(s.Paths) > 0 {
@@ -129,8 +108,8 @@ func (s Scope) Resolve(ctx context.Context, root string) (map[string]bool, error
 	return out, nil
 }
 
-// matchPaths resolves explicit paths and globs against the root. A path naming a DIRECTORY selects
-// everything beneath it, which is what someone typing a directory means.
+// matchPaths resolves explicit paths and globs against the root; a directory selects everything
+// beneath it.
 func matchPaths(root string, patterns []string) (map[string]bool, error) {
 	all, err := walkRelative(root)
 	if err != nil {
@@ -204,13 +183,8 @@ func parseSince(s string) (time.Time, error) {
 		WithHalt("A").WithReason(ReasonScopeInvalid)
 }
 
-// modifiedSince selects files whose modification time is at or after the cutoff.
-//
-// IT IS THE BASELINE THAT WORKS ANYWHERE, and that is why it exists beside the VCS one rather than
-// as a fallback nobody documents: a plain folder has no committed baseline, and mtime is the honest
-// answer to "what did I just change" there. It is coarser than a diff — a touched-but-unchanged file
-// is selected — and coarse in the SAFE direction, since the cost is reviewing a file that did not
-// need it rather than missing one that did.
+// modifiedSince selects files modified at or after the cutoff. It works without version control; a
+// touched but unchanged file is also selected, which errs toward reviewing more.
 func modifiedSince(root string, cutoff time.Time) (map[string]bool, error) {
 	all, err := walkRelative(root)
 	if err != nil {
@@ -229,12 +203,8 @@ func modifiedSince(root string, cutoff time.Time) (map[string]bool, error) {
 	return out, nil
 }
 
-// changedAgainstVCS selects files changed against a version-control baseline.
-//
-// A TREE WITH NO VCS REFUSES rather than falling back. Silently ignoring the selector would review
-// the WHOLE tree — the opposite of what was asked, at full cost — and silently selecting nothing
-// would report "no findings" about nothing. The refusal names the baselines that DO work there, so
-// the answer is a redirection rather than a dead end.
+// changedAgainstVCS selects files changed against a version-control baseline. A tree without version
+// control is refused, with a message naming the baselines that do work there.
 func changedAgainstVCS(ctx context.Context, root, ref string) (map[string]bool, error) {
 	if _, ok := localstate.FindRoot(root); !ok {
 		return nil, fault.New(fault.Usage, fmt.Sprintf(
@@ -262,7 +232,7 @@ func changedAgainstVCS(ctx context.Context, root, ref string) (map[string]bool, 
 			WithHalt("A").WithReason(ReasonScopeUnavailable)
 	}
 	out := map[string]bool{}
-	for _, line := range strings.Split(string(body), "\n") {
+	for line := range strings.SplitSeq(string(body), "\n") {
 		rel := filepath.ToSlash(strings.TrimSpace(line))
 		if rel == "" || workspace.IsExcluded(rel) {
 			continue
@@ -277,26 +247,6 @@ func changedAgainstVCS(ctx context.Context, root, ref string) (map[string]bool, 
 	return out, nil
 }
 
-// scopeSnippets narrows a collected set to the selected paths. A nil selection means no narrowing,
-// which is what every run did before scope existed — so an unscoped run is byte-identical.
-//
-// It filters what a reviewer is SHOWN and nothing else. The containment copy is unchanged, the
-// withheld caveats are unchanged, and a file left out here was never a containment refusal — which is
-// why it is not appended to the withheld list: `withheld` means "a rule kept this out", and "you did
-// not ask for it" is a different fact that the scope summary reports instead.
-func scopeSnippets(snippets []workspace.Snippet, selected map[string]bool) []workspace.Snippet {
-	if selected == nil {
-		return snippets
-	}
-	out := make([]workspace.Snippet, 0, len(snippets))
-	for _, s := range snippets {
-		if selected[filepath.ToSlash(s.Path)] {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 // ScopeSummary describes what a selector did, for the run record and every surface.
 type ScopeSummary struct {
 	// Selected is how many files the scope admitted.
@@ -309,16 +259,14 @@ type ScopeSummary struct {
 	VCSRef       string   `json:"vcsRef,omitempty"`
 	// Files is the selected set, sorted — what a reviewer was actually shown.
 	Files []string `json:"files"`
-	// Note states what scope did NOT do, since a narrowed review is silent about everything it was
-	// not shown and that silence must not read as approval.
+	// Note states that the review covers only the selected files.
 	Note string `json:"note"`
 }
 
-// ScopeNote is that fixed sentence.
+// ScopeNote is the fixed Note sentence.
 const ScopeNote = "This review was NARROWED: reviewers saw only the files listed here. It says nothing whatever about the rest of the tree — a finding's absence elsewhere means nobody looked, not that there is nothing there. Containment is unchanged: the copy still holds what it always did, and scope only decides what was shown."
 
-// summarizeScope builds the record. `selected` is nil when nothing narrowed the run, in which case
-// there is no summary — an unnarrowed review needs no disclaimer about what it did not see.
+// summarizeScope builds the record, or returns nil when nothing narrowed the run.
 func summarizeScope(s Scope, selected map[string]bool, available int) *ScopeSummary {
 	if selected == nil {
 		return nil

@@ -14,14 +14,11 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// `list` surfaces the CONFIGURED adapters + the configured profiles so a caller can verify (before
-// spending) that the models it wants are configured. It REUSES the SetupManager's pure projections
-// (AdapterViews + ProfileViews); it re-derives nothing. `identityEvidenceCapability` is the adapter's
-// DECLARED evidence tier (envelope/cli_status/trace/self_report/…), NOT a live "verified" — proving a
-// model's identity still requires a real call.
+// list reports the configured adapters, model catalog and profiles from the setup manager's
+// projections. identityEvidenceCapability is an adapter's declared evidence tier, not a live
+// verification.
 
-// listAdapter is the focused adapter projection `list` emits (a subset of AdapterView, with the declared
-// evidence tier renamed to the honest `identityEvidenceCapability`).
+// listAdapter is the adapter projection list emits.
 type listAdapter struct {
 	Name                       string `json:"name"`
 	DisplayName                string `json:"displayName"`
@@ -32,26 +29,22 @@ type listAdapter struct {
 	SpecOnly                   bool   `json:"specOnly,omitempty"`
 }
 
-// listLane is one profile lane as a role → adapter:model assignment.
+// listLane is one profile seat as a role, adapter and model.
 type listLane struct {
 	Role    string `json:"role"`
 	Adapter string `json:"adapter"`
 	Model   string `json:"model"`
 }
 
-// listProfile is one profile (name, default flag, lanes).
+// listProfile is one profile: its name, whether it is the default, and its seats.
 type listProfile struct {
 	Name      string     `json:"name"`
 	IsDefault bool       `json:"isDefault"`
 	Lanes     []listLane `json:"lanes"`
 }
 
-// listCatalogEntry is one `modelCatalog` key: what a caller may write, and what it resolves to.
-//
-// It is here because the catalog is the EXACT vocabulary `--reviewer model=…` requires, and it was
-// the one part of that vocabulary `list` never showed — leaving reading the config file by hand as
-// the only way to find a valid value. Effort is embedded in the key by convention, so the resolved
-// effort is reported beside each binding rather than left to be inferred from the string.
+// listCatalogEntry is one modelCatalog key, the vocabulary --reviewer model=… accepts, with each
+// adapter binding and its resolved effort.
 type listCatalogEntry struct {
 	Key            string            `json:"key"`
 	Provider       string            `json:"provider,omitempty"`
@@ -60,23 +53,22 @@ type listCatalogEntry struct {
 	AdapterDefault bool              `json:"adapterDefault,omitempty"`
 }
 
-// listCatalogBind is one adapter a catalog key is reachable through, with the model argument actually
-// passed to it — frequently NOT the key itself.
+// listCatalogBind is one adapter a catalog key is reachable through, with the model argument passed to
+// it, which often differs from the key.
 type listCatalogBind struct {
 	Adapter  string `json:"adapter"`
 	ModelArg string `json:"modelArg,omitempty"`
 	Effort   string `json:"effort,omitempty"`
 }
 
-// listView is reviewmesh's machine-readable `list --json` projection: the configured adapters, the
-// model catalog, and the configured profiles.
+// listView is the list --json projection: adapters, model catalog and profiles.
 type listView struct {
 	Adapters []listAdapter      `json:"adapters"`
 	Catalog  []listCatalogEntry `json:"modelCatalog"`
 	Profiles []listProfile      `json:"profiles"`
 }
 
-// runList reports the configured adapters + profiles (--json for a machine-readable projection).
+// runList reports the configured adapters and profiles; --json emits the projection.
 func runList(args []string, out, errw io.Writer) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(errw)
@@ -90,7 +82,7 @@ func runList(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review list:", err)
 		return int(fault.CodeOf(err))
 	}
-	// io.Discard: the projections are pure reads — the SetupManager's progress writer is unused here.
+	// The projections are pure reads, so the progress writer is unused.
 	view := buildListView(a.SetupManager(io.Discard))
 	if *asJSON {
 		enc := json.NewEncoder(out)
@@ -105,7 +97,7 @@ func runList(args []string, out, errw io.Writer) int {
 	return int(fault.OK)
 }
 
-// buildListView maps the SetupManager's read projections into the focused `list` view (no re-derivation).
+// buildListView maps the setup manager's read projections into the list view.
 func buildListView(mgr *setup.Manager) listView {
 	view := listView{Adapters: []listAdapter{}, Catalog: []listCatalogEntry{}, Profiles: []listProfile{}}
 	for _, av := range mgr.AdapterViews() {
@@ -115,11 +107,8 @@ func buildListView(mgr *setup.Manager) listView {
 			IdentityEvidenceCapability: av.ModelIdentity, SpecOnly: av.SpecOnly,
 		})
 	}
-	// The built-in `fake` adapter is a HIDDEN internal test harness — it is absent from AdapterViews
-	// and from this inventory unless the internal gate (fake.Enabled — set by tests/golden runs, never
-	// by users) is on, so `list` never advertises a name users cannot configure. When enabled (tests),
-	// it is inserted in the alphabetical position AdapterViews' sorted output would have given it;
-	// exploremesh's `list` gates it the same way, so the two inventories stay symmetric.
+	// The fake adapter is an internal test harness, listed only when fake.Enabled, at its alphabetical
+	// position. exploremesh's list gates it the same way.
 	if fake.Enabled() {
 		fakeRow := listAdapter{Name: "fake", DisplayName: setup.AdapterDisplayName("fake"), Configured: true,
 			IdentityEvidenceCapability: string(review.EvidenceInvocationTag)}
@@ -152,8 +141,8 @@ func buildListView(mgr *setup.Manager) listView {
 	return view
 }
 
-// printList renders the human summary: adapters (configured?/kind/declared identity tier), then the
-// profiles with each lane as `role → adapter:model`.
+// printList renders the human summary: adapters, the model catalog, then profiles with each seat as
+// role → adapter:model.
 func printList(w io.Writer, view listView) {
 	fmt.Fprintln(w, "Adapters:")
 	for _, a := range view.Adapters {
@@ -180,9 +169,7 @@ func printList(w io.Writer, view listView) {
 		}
 		fmt.Fprintln(w, line)
 	}
-	// The catalog sits between the adapters and the profiles because that is what it joins: a key
-	// names a model, and each binding says which adapter carries it and with what argument. It is
-	// printed with the flag that consumes it, so a reader meets the vocabulary and its use together.
+	// The catalog sits between adapters and profiles, beside the flag that consumes it.
 	if len(view.Catalog) > 0 {
 		fmt.Fprintln(w, "\nModel catalog (the keys `--reviewer model=…` and profile lanes accept):")
 		for _, c := range view.Catalog {

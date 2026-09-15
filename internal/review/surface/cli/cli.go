@@ -1,6 +1,6 @@
-// Package cli is the standalone CLI Client (Surface). It parses arguments,
-// dispatches to a Manager / doctor, renders the outcome, and maps errors to the
-// documented process exit codes (meshcore/fault; the public table is in docs/architecture.md).
+// Package cli implements the reviewmesh command line. It parses arguments, dispatches to the
+// manager or doctor, renders the outcome, and maps errors to the process exit codes documented in
+// docs/architecture.md.
 package cli
 
 import (
@@ -174,9 +174,9 @@ func Run(args []string, out, errw io.Writer) int {
 	}
 }
 
-// runInit creates the local, VCS-excluded `.aimesh/` state directory (shared adapter locations, run
-// artifacts) — mirroring exploremesh's `init`/`repo init`/`folder init` and aikit's init. It seeds no
-// config: adapter locations are written by `aimesh review setup --adapter <name> --path`.
+// runInit creates the local, VCS-excluded .aimesh/ state directory for adapter locations and run
+// artifacts. It writes no config; `aimesh review setup --adapter <name> --path` records adapter
+// locations.
 func runInit(args []string, mode localstate.InitMode, out, errw io.Writer) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(errw)
@@ -217,9 +217,8 @@ func runVersion(args []string, out io.Writer) int {
 	return int(fault.OK)
 }
 
-// doctorDeepProbeTimeout bounds the WHOLE `--probe-deep` pass. Each adapter's deep probe is already
-// individually bounded; this is the outer guarantee that `doctor` terminates even with a large panel
-// of slow CLIs, because a human is waiting on it.
+// doctorDeepProbeTimeout bounds the whole --probe-deep pass, so doctor terminates even with many slow
+// CLIs.
 const doctorDeepProbeTimeout = 10 * time.Minute
 
 func runDoctor(args []string, out, errw io.Writer) int {
@@ -227,9 +226,8 @@ func runDoctor(args []string, out, errw io.Writer) int {
 	fs.SetOutput(errw)
 	cliflags.Style(fs, "aimesh review doctor")
 	probe := fs.Bool("probe", false, "run a safe `<binary> --version` probe of the selected profile's adapters (no model call, no auth)")
-	// --probe-deep is a SEPARATE flag rather than a stronger --probe because --probe is documented
-	// everywhere as free. A flag that costs nothing today must not start costing money because a
-	// better probe was invented; the spend gets its own name, and its own warning.
+	// --probe-deep is separate from --probe because --probe is documented as free; the probe that spends
+	// gets its own flag and warning.
 	probeDeep := fs.Bool("probe-deep", false, "additionally run the DEEP probe: one REAL, bounded model invocation per required adapter in a throwaway isolated directory, through the same path a run takes. SPENDS REAL TOKENS. It answers what --version cannot — whether the CLI does real work where a run actually happens. It NEVER answers an interactive trust/login prompt; it detects, classifies and reports the fix")
 	fix := fs.Bool("fix", false, "offer guided repair for issues doctor finds")
 	interactive := fs.Bool("interactive", false, "with --fix: interactively apply repairs (e.g. record an adapter binary path); default prints guidance only")
@@ -243,9 +241,7 @@ func runDoctor(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review doctor: --interactive applies only with --fix")
 		return int(fault.Usage)
 	}
-	// --json is a READ projection. Pairing it with --fix would mean an interactive repair
-	// flow writing prose into the same stream the projection occupies; refuse instead of
-	// emitting something a parser cannot read.
+	// --json is a read projection; an interactive repair would write prose into the same stream.
 	if *asJSON && (*fix || *interactive) {
 		fmt.Fprintln(errw, "aimesh review doctor: --json cannot be combined with --fix/--interactive (the repair flow is interactive; --json is a read-only projection)")
 		return int(fault.Usage)
@@ -259,8 +255,7 @@ func runDoctor(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review doctor:", err)
 		return int(fault.CodeOf(err))
 	}
-	// The deep pass is bounded as a WHOLE, not only per adapter: a large panel of slow CLIs must still
-	// terminate, and `doctor` is a diagnostic a human is waiting on.
+	// Bound the deep pass as a whole, not only per adapter.
 	dctx, dcancel := context.WithTimeout(context.Background(), doctorDeepProbeTimeout)
 	defer dcancel()
 	rep := a.DoctorWith(workspace, *profile, app.DoctorOptions{Probe: *probe, ProbeDeep: *probeDeep, Ctx: dctx})
@@ -271,7 +266,7 @@ func runDoctor(args []string, out, errw io.Writer) int {
 			fmt.Fprintln(errw, "aimesh review doctor:", err)
 			return int(fault.Internal)
 		}
-		// Exit semantics are unchanged by the rendering: a failing report is still exit 3.
+		// A failing report still exits 3.
 		if !rep.OK {
 			return int(fault.Config)
 		}
@@ -286,9 +281,8 @@ func runDoctor(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(out, "      No interactive prompt was answered on your behalf. A `probe-deep:` row that names folder_trust or login_required is telling you to complete that CLI's own setup once, yourself.")
 	}
 	if *fix {
-		// Repair writes to the user/global scope (the normal place for personal config),
-		// mirroring `setup`'s default. Interactive mode supplies a Stdin Prompter; otherwise
-		// guidance only (RB-17).
+		// Repairs write to the user scope, as setup does by default. Interactive mode prompts on stdin;
+		// otherwise doctor prints guidance only.
 		base, _ := os.Getwd()
 		if h, herr := config.HomeDir(); herr == nil {
 			base = h
@@ -298,14 +292,12 @@ func runDoctor(args []string, out, errw io.Writer) int {
 			ask = prompt.NewStdin(os.Stdin, out)
 		}
 		res := a.SetupManager(out).Repair(base, rep, ask)
-		// After an interactive repair that wrote config, re-run doctor (fresh app) so the
-		// user sees the post-repair state.
+		// After an interactive repair that wrote config, re-run doctor with a fresh app to show the result.
 		if *interactive && res.ConfigWritten {
 			fmt.Fprintln(out, "Re-running doctor after repair:")
 			if a2, derr := app.New(app.Options{}); derr == nil {
-				// The re-run deliberately does NOT repeat a deep probe: a repair that recorded a binary
-				// path has no bearing on whether the CLI trusts a directory, and spending a second time
-				// to say so is not a courtesy.
+				// The re-run skips the deep probe: recording a binary path does not change whether the CLI trusts a
+				// directory.
 				rep = a2.Doctor(workspace, *profile, *probe)
 				fmt.Fprint(out, rep.String())
 			}
@@ -329,8 +321,7 @@ func runSetup(args []string, out, errw io.Writer) int {
 	from := fs.String("from", "", "promote config from this scope into --scope project (only supported value: user)")
 	yes := fs.Bool("yes", false, "with --from: confirm the promotion non-interactively")
 	includePaths := fs.Bool("include-adapter-paths", false, "with --from: also promote machine-specific adapter binary paths (skipped by default)")
-	// The user-defined ACP adapter surface. It had NO CLI caller before — the detect/save/remove seams
-	// were reachable only from the web UI, so a headless install could not configure an ACP adapter at all.
+	// User-defined ACP adapter actions.
 	acpAction := fs.String("acp", "", "user-defined ACP adapter action: detect (probe only) | add | remove")
 	acpName := fs.String("name", "", "with --acp add: the instance key (default: derived from the binary); with --acp remove: the key to remove")
 	acpTitle := fs.String("title", "", "with --acp add: the display title (default \"ACP: <binary>\")")
@@ -343,7 +334,7 @@ func runSetup(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review setup: --interactive cannot be combined with --adapter/--path/--profile")
 		return int(fault.Usage)
 	}
-	// ACP guards: the action is its own surface, so it composes with --scope only.
+	// --acp composes only with --scope.
 	if *acpAction != "" {
 		if *interactive || *from != "" || *adapter != "" || *profile != "" {
 			fmt.Fprintln(errw, "aimesh review setup: --acp cannot be combined with --interactive/--from/--adapter/--profile")
@@ -368,7 +359,7 @@ func runSetup(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review setup: --name/--title/--acp-arg apply only with --acp")
 		return int(fault.Usage)
 	}
-	// Promotion (`--from`) guards.
+	// Guards for promotion with --from.
 	if *from != "" {
 		if *from != "user" {
 			fmt.Fprintln(errw, "aimesh review setup: --from only supports \"user\" (promotes user/global → project)")
@@ -390,7 +381,7 @@ func runSetup(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review setup: --scope must be user or project")
 		return int(fault.Usage)
 	}
-	// usage guards for the path-capture surface (--acp detect/add supply their own --path)
+	// Guards for path capture; --acp detect and add supply their own --path.
 	if *path != "" && *adapter == "" && *acpAction == "" {
 		fmt.Fprintln(errw, "aimesh review setup: --path requires --adapter (e.g. aimesh review setup --adapter claude-code --path /full/path/to/claude)")
 		return int(fault.Usage)
@@ -405,9 +396,8 @@ func runSetup(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review setup:", err)
 		return int(fault.CodeOf(err))
 	}
-	// scope → base dir: user = ~/.aimesh/review (the normal place for personal defaults),
-	// project = <repo-root>/.aimesh/review (optional, override-only). ProjectConfigPath(base)
-	// yields <base>/.aimesh/review/config.yaml for both.
+	// The scope picks the base directory: user is ~/.aimesh/review, project is <repo-root>/.aimesh/review.
+	// ProjectConfigPath(base) yields <base>/.aimesh/review/config.yaml for both.
 	base, _ := os.Getwd()
 	if *scope == "user" {
 		h, herr := config.HomeDir()
@@ -418,12 +408,10 @@ func runSetup(args []string, out, errw io.Writer) int {
 		base = h
 	}
 	mgr := a.SetupManager(out)
-	// Adapter binary paths persist to the scope's shared .aimesh/adapters.yaml (scope-anchored: user →
-	// AIMESH_HOME, project → repo root). The config.yaml (profiles/lanes) write target still derives
-	// from baseDir; WriteScope governs only the shared path target, and the two agree by construction.
+	// Adapter paths persist to the scope's shared .aimesh/adapters.yaml (user: AIMESH_HOME, project: repo
+	// root). config.yaml still derives from base; the two agree by construction.
 	mgr.WriteScope = *scope
-	// The ACP flow renders its own probe/save/remove outcome (and detect writes nothing at all), so it
-	// returns directly rather than folding into the shared write-and-report switch below.
+	// The ACP flow renders its own outcome, so it returns directly.
 	if *acpAction != "" {
 		return runSetupACP(mgr, *acpAction, *acpName, *acpTitle, *path, acpArgs, out, errw)
 	}
@@ -431,30 +419,29 @@ func runSetup(args []string, out, errw io.Writer) int {
 	var res setup.Result
 	switch {
 	case *from != "":
-		// user→project promotion. Interactive supplies a confirm prompt; otherwise --yes is required.
+		// User-to-project promotion: interactive mode prompts for confirmation; otherwise --yes is required.
 		var ask review.Prompter
 		if *interactive {
 			ask = prompt.NewStdin(os.Stdin, out)
 		}
 		res, serr = mgr.PromoteUserToProject(base, *includePaths, *yes, ask)
 	case *interactive:
-		// Interactive wizard: the CLI is the interactive surface, so supply a Stdin Prompter.
+		// The interactive wizard prompts on stdin.
 		res, serr = mgr.SetupWizard(base, prompt.NewStdin(os.Stdin, out))
 	case *adapter != "":
 		_, serr = mgr.SetAdapterPath(base, *adapter, *path)
 	case *profile == "fully-local-ollama":
 		_, serr = mgr.SetupLocalOllama(base, os.Getenv("REVIEWMESH_OLLAMA_MODEL"), nil)
 	default:
-		// non-interactive default: writes config idempotently (never clobbers an existing one)
+		// Non-interactive setup writes config idempotently and never overwrites an existing file.
 		_, serr = mgr.Setup(base, nil)
 	}
 	if serr != nil {
 		fmt.Fprintln(errw, "aimesh review setup: "+serr.Error()+diagSuffix(serr))
 		return int(fault.CodeOf(serr))
 	}
-	// After an interactive write, re-run the static doctor checks so the user sees the
-	// result. Use a FRESH app so doctor loads the just-written config (the original `a`
-	// snapshotted config at construction, before the wizard wrote).
+	// After an interactive write, re-run the static doctor checks with a fresh app, since a snapshotted
+	// its config before the wizard wrote.
 	if *interactive && res.ConfigWritten {
 		fmt.Fprintln(out, "Re-running doctor to verify the new configuration:")
 		if a2, derr := app.New(app.Options{}); derr == nil {
@@ -464,24 +451,20 @@ func runSetup(args []string, out, errw io.Writer) int {
 	return int(fault.OK)
 }
 
-// acpArgFlags collects a repeatable --acp-arg (order preserved). Launch args are passed one flag at a
-// time rather than comma-split: an argument may legitimately contain a comma, and a mangled launch line
-// fails looking like a broken CLI rather than a broken flag.
+// acpArgFlags collects repeatable --acp-arg values in order. Arguments are not comma-split because
+// an argument may contain a comma.
 type acpArgFlags []string
 
 func (a *acpArgFlags) String() string     { return strings.Join(*a, " ") }
 func (a *acpArgFlags) Set(v string) error { *a = append(*a, v); return nil }
 
-// acpProbeTimeout bounds `setup --acp detect|add`: both launch the REAL candidate CLI (each attempt is
-// itself watchdog-bounded inside acpagent), so this caps total wall time. It matches the web UI's budget
-// for the same two operations, so the two surfaces behave identically on a slow-starting CLI.
+// acpProbeTimeout bounds `setup --acp detect|add`, which launch the candidate CLI.
 const acpProbeTimeout = 90 * time.Second
 
-// runSetupACP drives the user-defined generic ACP adapter flow over the SetupManager's existing seams —
-// the CLI half that was missing: `detect` probes a candidate binary read-only, `add` validates then
-// persists the instance to the scope's shared adapters.yaml, and `remove` deletes it (blocked while a
-// profile lane still references it). There is no fixed ACP catalog: any ACP-capable CLI can be named,
-// which is exactly why detect/add have to launch it to confirm the launch args.
+// runSetupACP runs the user-defined ACP adapter actions: detect probes a candidate binary read-only,
+// add validates and saves the instance to the scope's adapters.yaml, and remove deletes it unless a
+// profile seat still references it. Any ACP-capable CLI can be named, so detect and add launch it to
+// confirm the launch arguments.
 func runSetupACP(mgr *setup.Manager, action, name, title, path string, args []string, out, errw io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), acpProbeTimeout)
 	defer cancel()
@@ -495,8 +478,8 @@ func runSetupACP(mgr *setup.Manager, action, name, title, path string, args []st
 		}
 		fmt.Fprintf(out, "ACP probe: %s\n", path)
 		if !res.OK {
-			// Reported as a failure so a script can branch on it, WITHOUT declaring the CLI unusable:
-			// mid-login and folder-trust are the common causes and both are fixed in that CLI, not here.
+			// Report the failure so a script can branch on it, without declaring the CLI unusable: login and
+			// folder trust are the usual causes and are fixed in that CLI.
 			fmt.Fprintf(out, "  handshake: FAILED — %s\n", res.Detail)
 			fmt.Fprintln(out, "  next step: complete the CLI's own login / folder-trust setup, then re-run detect (or `setup --acp add` anyway and re-save later).")
 			return int(fault.Adapter)
@@ -513,8 +496,7 @@ func runSetupACP(mgr *setup.Manager, action, name, title, path string, args []st
 		return int(fault.OK)
 
 	case "add":
-		// A handshake failure does NOT block the save (the manager warns instead), so a CLI that is
-		// mid-login can still be recorded and re-saved later to capture its model.
+		// A handshake failure does not block the save, so a CLI mid-login can be recorded and re-saved later.
 		res, err := mgr.SaveACPAdapter(ctx, name, title, path, args)
 		if err != nil {
 			fmt.Fprintln(errw, "aimesh review setup: "+err.Error()+diagSuffix(err))
@@ -532,8 +514,7 @@ func runSetupACP(mgr *setup.Manager, action, name, title, path string, args []st
 			return int(fault.CodeOf(err))
 		}
 		if res.Blocked {
-			// Still referenced by a profile lane (or simply not a saved ACP adapter): the manager reports
-			// this as a refusal, not an error, and the lanes are listed so the user knows what to change.
+			// A refusal, not an error: the referencing seats are listed so the user knows what to change.
 			fmt.Fprintln(errw, "aimesh review setup: "+res.Message)
 			for _, u := range res.UsedBy {
 				fmt.Fprintf(errw, "  in use by: %s / %s lane\n", u.ProfileDisplay, u.Role)
@@ -545,10 +526,9 @@ func runSetupACP(mgr *setup.Manager, action, name, title, path string, args []st
 	}
 }
 
-// runConfig hosts governed local-config maintenance. Today: `config clean-model-keys` renames
-// generated model-catalog keys off their adapter-key prefix (and repoints the lanes that use them)
-// through the same SetupManager→SetupEngine→ConfigAccess path the web UI uses. Preview by default;
-// `--apply` writes after taking a timestamped backup.
+// runConfig runs governed local-config maintenance. `config clean-model-keys` renames generated
+// model-catalog keys off their adapter-key prefix and repoints the seats that use them. It previews
+// by default; --apply writes after taking a timestamped backup.
 func runConfig(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] != "clean-model-keys" {
 		fmt.Fprintln(errw, "aimesh review config: known subcommand is `clean-model-keys` (preview; --apply to write)")
@@ -616,8 +596,7 @@ func runReview(args []string, out, errw io.Writer) int {
 	var verifyCmds setFlags
 	fs.Var(&verifyCmds, "verify-cmd", "your project's own build/test `command`, run on the CONTAINMENT COPY and RECORDED (repeatable, max "+strconv.Itoa(runmgr.MaxVerifyCommands)+"). Nothing model-authored is ever executed: these are commands you already run, in a copy of your own tree. On patch/apply they run TWICE — before any edit and after every edit — and the result is a `delta`. The delta is the signal, never absolute green: a repository with a red suite is an ordinary one, and what matters is whether your commands answered differently afterwards. IT GATES NOTHING — a failure does not invalidate a finding, does not stop the commit and does not change the exit code (the second pass runs after the commit, so it structurally cannot).")
 	verifyTimeout := fs.Duration("verify-timeout", runmgr.DefaultVerifyTimeout, "per-command wall-clock budget for --verify-cmd. A command that hits it is recorded as timed out, which makes the two passes NOT COMPARABLE rather than red — a wall clock is not a defect in your code.")
-	// SCOPE. Three baselines, and the two that work in ANY directory come first deliberately: not
-	// all usage is repo-focused, and `folder init` is a peer of `repo init` rather than a fallback.
+	// Scope: the two baselines that work in any directory come first, since not all usage is in a repo.
 	var scopePaths setFlags
 	fs.Var(&scopePaths, "path", "review only this workspace-relative `path` or glob (repeatable). A directory selects everything under it. Works in any directory. A selector matching NO file is refused rather than falling back to the whole tree — that fallback would review everything at full cost while you believed you had narrowed it.")
 	changedSince := fs.String("changed-since", "", "review only files modified within this `window` — a duration (\"2h\", \"90m\") or an RFC3339 timestamp. Works in ANY directory, including one under no version control, which is what makes \"what did I just change\" answerable outside a repository. Coarser than a diff (a touched-but-unchanged file is selected) and coarse in the safe direction.")
@@ -631,16 +610,14 @@ func runReview(args []string, out, errw io.Writer) int {
 	var reviewerSpecs setFlags
 	fs.Var(&reviewerSpecs, "reviewer", "ad-hoc BLIND REVIEWER PANEL seat as adapter=<name>,model=<m>[,effort=<e>] (repeatable, order preserved; 1.."+fmt.Sprint(review.MaxReviewerSeats)+" seats). Every seat reviews blind and in parallel; agreement counts are computed by the host. Mutually exclusive with --profile: a panel is composed OR selected, never half of each. The ADAPTER must be one your configuration defines; the MODEL may be a modelCatalog key (`list` shows them) or any string your adapter accepts, which is passed through verbatim and reported as such.")
 	var selectFPs setFlags
-	// The backquoted word is what Go's flag package prints as the value name, so it has to come
-	// first and has to be the thing a user types. Backquoting an example command instead makes the
-	// help render as `-select --report --json`.
+	// Go's flag package prints the backquoted word as the value name, so it must be the thing a user
+	// types.
 	fs.Var(&selectFPs, "select", "SELECTIVE APPLY: write only the accepted finding whose HOST-COMPUTED `fingerprint` is given (repeatable). Take the value from a prior --report --json run's findings[].fingerprint — NEVER a finding's id, which is model-authored and renumbered, so keying a write set on one would let the model steer which finding you selected. Omitted applies everything the run's own adjudication authorizes. A fingerprint that names no finding in THIS run is dropped and reported; if none matches, the run is refused rather than writing nothing silently. Valid only with --patch/--apply.")
 	var authPaths, authHashes setFlags
 	fs.Var(&authPaths, "authority", "authority/context document the review is judged AGAINST (requirements, design doc, spec) — repeatable. It is context, never a target: never reviewed, never patched, never applied. The document is read root-scoped (a .env or key file is refused) and embedded in full, or the run fails closed — it is never silently truncated. To declare PART of one, append a section (`spec.md#The Relevant Part`) or an explicit byte range (`spec.md:1012-3033`, start inclusive, end exclusive); either resolves to the same recorded `ranges` declaration the manifest takes, so the inclusion manifest states exactly which bytes were embedded.")
 	fs.Var(&authHashes, "authority-hash", "pin an --authority document's content: <name>=<sha256> (name defaults to the file's base name; repeatable). A mismatch HALTS, so a document cannot change between a report run and the apply run that acts on it.")
 	authManifest := fs.String("authority-manifest", "", "read the full authority declaration from a JSON file (array of {name,path|content,mediaType,expectedHash,completeness,ranges}) — the way to declare byte ranges, media types, or inline content. Cannot be combined with --authority/--authority-hash.")
-	// support both `review --report PATH` and `review PATH --report` by separating
-	// flag tokens (and their values) from positionals before parsing.
+	// Accept flags before or after the positional path.
 	flagArgs, positionals := splitArgs(fs, args)
 	if err := fs.Parse(flagArgs); err != nil {
 		return int(fault.Usage)
@@ -658,42 +635,32 @@ func runReview(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review:", err)
 		return int(fault.Usage)
 	}
-	// --include-host-review is report-only. Reject it early whenever an apply/patch mode was
-	// EXPLICITLY requested — independent of --ci (so `--ci --apply --include-host-review` is
-	// still a usage error, not silently forced to report). A bare flag (no explicit mode) is
-	// left to the manager's authoritative guard on the EFFECTIVE mode. CI (no explicit mode)
-	// composes fine. The manager re-checks before any model call regardless.
+	// --include-host-review is report-only. Reject it whenever patch or apply is explicitly requested,
+	// including with --ci. Without an explicit mode the manager checks the effective mode before any
+	// model call.
 	if *includeHostReview && (m == review.ModePatch || m == review.ModeApply) {
 		fmt.Fprintln(errw, "aimesh review: --include-host-review is only valid in report mode")
 		return int(fault.Usage)
 	}
-	// A DRY RUN REVIEWS NOTHING, so it finds nothing, so a findings gate over one always passes.
-	// Accepting the combination would turn `--ci --dry-run` into a green CI job that priced a
-	// review instead of running it — the single most dangerous way this flag could be misread.
-	// --ci sets --fail-on-findings itself, so naming either one is caught here.
+	// A dry run reviews nothing, so a findings gate over it always passes; refuse it so `--ci --dry-run`
+	// cannot produce a green job that ran no review. --ci implies --fail-on-findings.
 	if *dryRun && (*failOn || *ci) {
 		fmt.Fprintln(errw, "aimesh review: --dry-run cannot be combined with --fail-on-findings or --ci — a dry run reviews nothing, so a gate over its (always empty) findings would report success for a review that never happened")
 		return int(fault.Usage)
 	}
-	// A ledger path with the feature off names a file nothing would read or write. Accepting it
-	// would be an inert knob that looks configured — the same failure `--select` on a report run is
-	// refused for.
-	// The ceiling is checked HERE, before any spend, so an over-long command list is a usage error at
-	// the flag rather than a surprise after a panel has been paid for.
+	// Check the command limit here, before any spend.
 	verifyCommands, vcerr := runmgr.ValidateVerifyCommands(verifyCmds)
 	if vcerr != nil {
 		fmt.Fprintln(errw, "aimesh review:", vcerr)
 		return int(fault.Usage)
 	}
-	// The same inert-knob rule the ledger flag follows: a baseline opt-in with nothing to run, or a
-	// timeout bounding nothing, would look configured and do nothing.
+	// A baseline or timeout with no verify command would look configured and do nothing.
 	if len(verifyCommands) == 0 && (*verifyBaseline || *verifyTimeout != runmgr.DefaultVerifyTimeout) {
 		fmt.Fprintln(errw, "aimesh review: --verify-baseline / --verify-timeout need at least one --verify-cmd — without a command there is nothing to run, time out, or take a baseline of")
 		return int(fault.Usage)
 	}
-	// SELECTIVE APPLY is a filter over what gets WRITTEN, so it is refused on a mode that writes
-	// nothing rather than accepted and silently inert. It is also refused when every entry is
-	// blank: an empty narrowing filter names zero findings and must never fall back to "everything".
+	// --select filters what is written, so it is refused on a mode that writes nothing, and a list of
+	// blank entries is refused rather than meaning everything.
 	selection, serr := parseSelection(selectFPs, m)
 	if serr != nil {
 		fmt.Fprintln(errw, "aimesh review:", serr)
@@ -704,10 +671,8 @@ func runReview(args []string, out, errw io.Writer) int {
 		fmt.Fprintln(errw, "aimesh review:", perr)
 		return int(fault.Usage)
 	}
-	// AD-HOC PANEL vs PROFILE: composing a panel and selecting a profile that carries one are
-	// two ways to answer the same question, so naming both is a usage error rather than a silent
-	// precedence rule the user has to know (the same rule exploremesh applies to
-	// --explorer vs --roster/--profile).
+	// Composing a panel and selecting a profile answer the same question, so naming both is a usage
+	// error, as in exploremesh.
 	reviewerPanel, rperr := parseReviewerPanel(reviewerSpecs)
 	if rperr != nil {
 		fmt.Fprintln(errw, "aimesh review:", rperr)
@@ -723,10 +688,8 @@ func runReview(args []string, out, errw io.Writer) int {
 			return int(fault.Usage)
 		}
 	}
-	// Authority documents. The flag form covers the common case (whole documents, optionally
-	// hash-pinned); the manifest file is the escape hatch for the parts a flag cannot express
-	// (byte ranges, media types, inline content). They are mutually exclusive so there is
-	// never a question of which one won.
+	// Authority flags cover whole documents with optional hash pins; the manifest covers byte ranges,
+	// media types and inline content. They are mutually exclusive.
 	authDocs, aerr := parseAuthority(authPaths, authHashes, *authManifest)
 	if aerr != nil {
 		fmt.Fprintln(errw, "aimesh review:", aerr)
@@ -735,24 +698,20 @@ func runReview(args []string, out, errw io.Writer) int {
 
 	surface := "cli"
 	if *ci {
-		// CI is report-only and gated, regardless of flags or config: force report at
-		// the CLI boundary (so a project config can't widen `ci` to apply) and gate.
+		// CI is report-only and gated regardless of flags or config.
 		surface = "ci"
 		m = review.ModeReport
 		*failOn = true
 	}
 
-	// The human-given path is the CONSENT boundary for this run: the CLI passing it is
-	// what makes a filesystem root allowed at all. Validating it here (through the same
-	// resolver the manager confines writes with) turns a bad path into an immediate,
-	// machine-coded refusal instead of a failure discovered mid-run.
+	// The human-given path is the consent boundary for this run. Validate it with the resolver the
+	// manager uses, so a bad path is refused immediately with a machine code.
 	if code, cerr := checkWorkspacePath(path); cerr != nil {
 		fmt.Fprintln(errw, "aimesh review: "+cerr.Error())
 		return code
 	}
-	// Structural authority checks (no I/O) run here so a malformed declaration — or inline
-	// content in a write-capable mode — is refused before any config load or spend. The
-	// Manager re-checks on the EFFECTIVE mode; this is the fast, surface-local echo of it.
+	// Structural authority checks run before any config load or spend; the manager re-checks on the
+	// effective mode.
 	if verr := authority.Validate(authDocs, m); verr != nil {
 		fmt.Fprintln(errw, "aimesh review: "+verr.Error()+diagSuffix(verr))
 		return int(fault.CodeOf(verr))
@@ -776,10 +735,8 @@ func runReview(args []string, out, errw io.Writer) int {
 		VerifyCommands:    verifyCommands,
 		VerifyTimeout:     *verifyTimeout,
 		VerifyBaseline:    *verifyBaseline,
-		// THE OPERATOR WAIVERS. The human typing these IS the consent, exactly as the human-typed
-		// workspace path is: they are choosing, on their own machine and for this run, to widen what
-		// containment admits or what a blind reviewer's prompt carries. That is why each of them is
-		// a flag here and a LAUNCH flag on acp/mcp, and never a request field on any surface.
+		// Operator waivers: the person typing the command consents for this run. On acp and mcp they are
+		// launch flags, never request fields.
 		AllowProtectedPaths: *allowProtectedRun,
 		Scope: runmgr.Scope{
 			Paths: scopePaths, ChangedSince: strings.TrimSpace(*changedSince), VCSRef: strings.TrimSpace(*vcsRef),
@@ -787,15 +744,12 @@ func runReview(args []string, out, errw io.Writer) int {
 		MaxParallel:     *maxParallel,
 		DryRun:          *dryRun,
 		VerifyReadiness: *verifyReadiness,
-		// The narrowing selection travels UNEXAMINED into the one governed write path. The
-		// CLI resolves no fingerprint of its own, so `--select` cannot come to mean something here
-		// that `select` does not mean over MCP or ACP.
+		// The selection passes unexamined to the governed write path, so --select means what select means
+		// over MCP and ACP.
 		Select: selection,
 	})
-	// With --json, stdout carries the projection and NOTHING else: progress, hints and
-	// the error line stay on stderr so the stream stays parseable by a caller that only
-	// reads stdout. Exit codes are identical either way — the flag changes the rendering,
-	// never the outcome.
+	// With --json, stdout carries only the projection; progress, hints and errors go to stderr. Exit codes
+	// are the same either way.
 	progress := out
 	if *asJSON {
 		progress = errw
@@ -806,13 +760,10 @@ func runReview(args []string, out, errw io.Writer) int {
 	if runErr != nil {
 		fmt.Fprintln(errw, "aimesh review: "+runErr.Error()+diagSuffix(runErr))
 		printFailureHint(errw, outcome.Failure)
-		// ...and every OTHER seat that failed. The line above names the seat that decided the halt;
-		// this names the ones the caller also paid for and would otherwise have to dig out of the
-		// run directory.
+		// Also list every other seat that failed, not only the one that decided the halt.
 		printSeatFailures(errw, outcome.Panel)
 		if *asJSON {
-			// A halt still emits the projection (with the halt record populated), so an
-			// automated caller receives the taxonomy rather than a bare exit code.
+			// A halt still emits the projection with the halt record populated.
 			if werr := writeRunJSON(out, outcome, m, runErr); werr != nil {
 				fmt.Fprintln(errw, "aimesh review:", werr)
 				return int(fault.Internal)
@@ -820,9 +771,8 @@ func runReview(args []string, out, errw io.Writer) int {
 		}
 		return int(fault.CodeOf(runErr))
 	}
-	// A DRY RUN's entire output is the shape. It returns here rather than falling through so it
-	// can never print a findings/dispositions summary of a review that did not happen — the
-	// counts would all be zero and every one of those zeros would be a lie by omission.
+	// A dry run's output is its shape only; a findings summary of a review that did not happen would
+	// mislead.
 	if outcome.Shape != nil {
 		if *asJSON {
 			if werr := writeRunJSON(out, outcome, m, nil); werr != nil {
@@ -876,19 +826,11 @@ func runReview(args []string, out, errw io.Writer) int {
 	return gatingCode(*failOn, len(outcome.Findings))
 }
 
-// parseSelection validates `--select` at the flag boundary.
+// parseSelection validates --select at the flag boundary. A selection is meaningful only in a write
+// mode, and a present but blank selection is refused rather than meaning "apply everything".
 //
-// Two rules, both fail-closed, both here rather than mid-run so a caller pays nothing to learn them:
-//
-//  1. A selection is meaningful only in a WRITE mode. `--select` on `--report` names a filter over a
-//     write that will not happen, so it is a usage error rather than an accepted no-op.
-//  2. A selection that is present and blank names ZERO findings, and must never fall back to
-//     "apply everything" — the same fail-closed discipline the root intersection applies.
-//
-// It deliberately does NOT check that a fingerprint LOOKS like one. The write path matches selectors
-// against the run's own fingerprints and reports the ones that matched nothing; a shape check here
-// would be a check pretending to be a guarantee, and it would reject a value the write path might
-// legitimately match if the fingerprint format ever changed.
+// It does not check fingerprint syntax: the write path matches selectors against the run's own
+// fingerprints and reports those that matched nothing.
 func parseSelection(specs setFlags, m review.Mode) ([]string, error) {
 	if len(specs) == 0 {
 		return nil, nil
@@ -908,9 +850,8 @@ func parseSelection(specs setFlags, m review.Mode) ([]string, error) {
 	return out, nil
 }
 
-// printSelection states what a narrowing selection did on the human channel. The UNMATCHED list is
-// the reason this exists: a mistyped or stale fingerprint writes nothing, and a caller that is not
-// told would read a smaller-than-expected apply as a smaller-than-expected finding set.
+// printSelection reports what a selection did. The unmatched list matters most: a mistyped or stale
+// fingerprint writes nothing, which would otherwise read as fewer findings.
 func printSelection(w io.Writer, sel *review.ApplySelection) {
 	if !sel.Selective() {
 		return
@@ -927,26 +868,13 @@ func printSelection(w io.Writer, sel *review.ApplySelection) {
 	}
 }
 
-// refusalCode is the CLI's answer to a PARTIAL REFUSAL: exit 7, and no halt record.
+// refusalCode returns the exit code for a partial refusal: 7 (fault.Policy) when any finding was
+// refused for a protected path, and no halt record is written, because nothing halted.
 //
-// The exit code is the CLI's only machine-readable "not clean" channel, and CI scripts key on it,
-// so exit 0 would violate the partial-refusal contract on the one surface where violating it is
-// cheapest. The other candidates are all wrong for this case: exit 1 (`Findings`) is the GATING
-// code and fires only under `--fail-on-findings`/`--ci`; exit 6 (`Containment`) means a
-// containment BREACH, and nothing was breached — the denylist held, which is exactly why the
-// finding was refused; and a new code 9 would widen a range `docs/schema/halt-record.schema.json`
-// pins at 0–8 for one case.
-//
-// So exit 7 (`fault.Policy`), with the reason `apply_refused_protected_path`. Two consequences,
-// both deliberate: `fault.Policy` is documented as "halted by policy or cap, or completed with a
-// policy refusal that must not read as clean", and NO HALT RECORD IS WRITTEN, because there was
-// no halt. A reader who expects "exit 7 ⇒ halt record" will find that surprising exactly once,
-// which is why it is stated here and in docs/architecture.md rather than discovered.
-//
-// The two OTHER apply-refusal reasons (`authority_only`, `no_workspace_evidence`)
-// continue to exit 0 — they describe findings that were never eligible to
-// be applied, not a finding the model targeted at a path we refuse to touch. That asymmetry is
-// intended; changing it would be a separate, defensible decision.
+// Exit 0 would read as clean in CI, exit 1 is reserved for findings gating, exit 6 means a
+// containment breach, and halt-record.schema.json limits codes to 0–8. fault.Policy covers "completed
+// with a policy refusal that must not read as clean". The other refusal reasons (authority_only,
+// no_workspace_evidence) describe findings that were never eligible and exit 0.
 func refusalCode(refusals []review.ApplyRefusal) int {
 	if len(refusals) == 0 {
 		return int(fault.OK)
@@ -954,9 +882,7 @@ func refusalCode(refusals []review.ApplyRefusal) int {
 	return int(fault.Policy)
 }
 
-// printRefusals states the refusal on the human channel, naming each path and the fact that the
-// rest of the run proceeded. Silence here would recreate the failure the original halt existed to
-// prevent.
+// printRefusals names each refused path and states that the rest of the run proceeded.
 func printRefusals(w io.Writer, refusals []review.ApplyRefusal) {
 	if len(refusals) == 0 {
 		return
@@ -969,10 +895,9 @@ func printRefusals(w io.Writer, refusals []review.ApplyRefusal) {
 	fmt.Fprintln(w, "  Re-running will refuse them identically — edit those paths by hand if they need changing. Exit code 7; this is not a halt, and no halt record was written.")
 }
 
-// checkWorkspacePath validates the human-given path against the SAME confinement rules
-// the run will enforce on writes, with the path itself as the allowed root. It catches
-// the cases a later failure would report less clearly: an unreadable/unresolvable path,
-// and a path that is itself read-denied (pointing a review at a secret file).
+// checkWorkspacePath validates the human-given path against the confinement rules the run enforces,
+// with the path itself as the allowed root. It reports an unresolvable or read-denied path clearly
+// before the run starts.
 func checkWorkspacePath(path string) (int, error) {
 	res, err := scope.New(path)
 	if err != nil {
@@ -984,9 +909,8 @@ func checkWorkspacePath(path string) (int, error) {
 	return int(fault.OK), nil
 }
 
-// writeRunJSON encodes the run projection. The taxonomy values (exit code, machine reason,
-// signal) are resolved HERE, from the fault, and handed to the pure projection builder —
-// the projection package never depends on the exit-code mapping.
+// writeRunJSON encodes the run projection. The exit code, reason and signal are resolved here from
+// the fault, so the projection package does not depend on the exit-code mapping.
 func writeRunJSON(out io.Writer, outcome review.RunOutcome, requested review.Mode, runErr error) error {
 	view := runview.Build(runview.Input{
 		Outcome: outcome, RequestedMode: requested, Err: runErr,
@@ -999,14 +923,9 @@ func writeRunJSON(out io.Writer, outcome review.RunOutcome, requested review.Mod
 	return enc.Encode(view)
 }
 
-// printShape renders a dry run's disclosure: the panel that would be convened, the lanes that
-// would be called, and the model-call range the run is bounded by.
-//
-// It states the RANGE rather than a single number, and says why in one line, because a reader
-// given "21 calls" for a run that will almost certainly make five would learn to distrust the
-// figure — and a reader given "5" for a run that can make 21 would be ambushed. It also names
-// what neither bound counts (a retry after a schema-invalid response), since an undisclosed
-// exclusion is how a cost estimate becomes an untrue one.
+// printShape renders a dry run's disclosure: the panel, the seats that would be called, and the
+// range of model calls the run is bounded by. It gives a range rather than one number, and names
+// what the bounds exclude (retries after schema-invalid responses).
 func printShape(out io.Writer, s review.RunShape) {
 	fmt.Fprintf(out, "dry run: nothing was spent. This is what %s mode would do.\n\n", s.Mode)
 
@@ -1030,8 +949,7 @@ func printShape(out io.Writer, s review.RunShape) {
 			lw = max(lw, len(l.Role))
 		}
 		for _, l := range s.Lanes {
-			// "host" execution is in-process and free; saying so here is the difference between a
-			// reader budgeting for a lane and correctly ignoring it.
+			// Host execution is in-process and costs nothing.
 			cost := ""
 			if l.Execution == "host" {
 				cost = "  (in-process, no model call)"
@@ -1062,14 +980,9 @@ func printShape(out io.Writer, s review.RunShape) {
 	fmt.Fprintln(out, "\nDrop --dry-run to run it.")
 }
 
-// printShapePayload renders WHAT THE RUN WOULD CARRY: every file each reviewer would be shown, in
-// full, and the only thing that keeps a file out of that set.
-//
-// It is the whole workspace minus containment, so the byte total is a measurement and not a
-// budget — and it is the number to read before convening a large panel, because it is sent once
-// per seat per round. A WITHHELD file is an omission containment chose, and it is printed because
-// an omission nobody is told about is indistinguishable from a file that never existed. The file
-// list itself stays in run-shape.json, where it can be long without burying the summary.
+// printShapePayload renders what each reviewer would be shown: the whole workspace minus containment.
+// The byte total is sent once per seat per round, so it is worth reading before convening a large
+// panel. Withheld files are printed; the full file list stays in run-shape.json.
 func printShapePayload(out io.Writer, p review.ShapePayload) {
 	fmt.Fprintf(out, "  workspace: %d file(s), %s — every one shown to every reviewer, in full\n", p.Files, humanBytes(p.Bytes))
 	for _, w := range p.Withheld {
@@ -1079,19 +992,14 @@ func printShapePayload(out io.Writer, p review.ShapePayload) {
 	fmt.Fprintln(out)
 }
 
-// printShapeEgress says where this run's content would go, grouped by destination.
-//
-// It prints DIRECTLY UNDER the payload, because the two only mean something together: the payload
-// says how much of your tree is in every prompt, and this says who receives it. Either alone invites
-// the wrong conclusion — a big payload sounds alarming until you see it never leaves the machine, and
-// a small one sounds harmless until you see it reaches three providers.
+// printShapeEgress reports where the run's content would go, grouped by destination. It prints under
+// the payload because size and destination only mean something together.
 func printShapeEgress(out io.Writer, rows []review.ShapeEgress) {
 	if len(rows) == 0 {
 		return
 	}
 	if !runmgr.EgressLeavesTheMachine(rows) {
-		// The fully-local posture gets a positive statement rather than a list. It is the one case
-		// where the answer is short enough to be a sentence, and the sentence is the point.
+		// A fully local run gets a one-line positive statement.
 		fmt.Fprintln(out, "  content goes: NOWHERE — every seat and lane runs locally, nothing leaves this machine")
 		fmt.Fprintln(out)
 		return
@@ -1115,8 +1023,7 @@ func printShapeEgress(out io.Writer, rows []review.ShapeEgress) {
 	fmt.Fprintln(out)
 }
 
-// humanBytes renders a byte count for a person reading a cost disclosure. It stays exact under a
-// kilobyte, because "0.1 KB" is a worse answer than "97 B" for the file counts this prints.
+// humanBytes renders a byte count for a person, exact below one kilobyte.
 func humanBytes(n int) string {
 	if n < 1024 {
 		return fmt.Sprintf("%d B", n)
@@ -1131,26 +1038,18 @@ func effortSuffix(effort string) string {
 	return "  effort=" + effort
 }
 
-// printFailureHint renders an actionable next step when a lane failure carries a classified CLI
-// signal (folder-trust / login / model / update / timeout) — turning an opaque exit code into
-// guidance.
-//
-// It renders the signal the MANAGER already classified and persisted (LaneFailure.Signal), rather
-// than re-classifying the captured output here: the guidance a human reads and the `signal` a
-// machine reads out of halt-record.json are then the same fact, not two derivations that can
-// disagree. It falls back to classifying the excerpts only for a failure that predates the
-// manager's classification (e.g. one assembled by a caller).
+// printFailureHint renders a next step when a seat failure carries a classified CLI signal
+// (folder trust, login, model, update, timeout). It uses the signal the manager recorded, so the
+// hint matches halt-record.json, and classifies the captured output only for failures the manager
+// did not produce.
 func printFailureHint(errw io.Writer, f *review.LaneFailure) {
 	if f == nil {
 		return
 	}
 	sig := clihint.Signal(f.Signal)
 	if sig == "" {
-		// NO Prompt: a LaneFailure carries the captured output but not the text that was sent, and
-		// this branch exists only for a failure this process did not issue. Claiming a prompt we do
-		// not have would be worse than classifying without one — see meshcore/clihint on why the
-		// echo matters. The manager sets Signal for every failure it produces, so the accurate
-		// path is the normal one and this is the degraded fallback it is documented to be.
+		// No prompt: a LaneFailure carries the captured output but not the text sent. The manager sets
+		// Signal for every failure it produces, so this fallback is rare.
 		sig = clihint.ForFailure(clihint.Failure{
 			Stderr: f.StderrExcerpt, Stdout: f.StdoutExcerpt, ExitCode: f.ExitCode, Adapter: f.Adapter,
 		})
@@ -1173,15 +1072,13 @@ func printFailureHint(errw io.Writer, f *review.LaneFailure) {
 	}
 }
 
-// hintFor maps a classified signal to its remediation sentence. Shared by the run-level hint and the
-// per-seat enumeration so one seat and the run can never be given different advice for the same signal.
+// hintFor maps a classified signal to its remediation sentence, shared by the run-level hint and the
+// per-seat list so both give the same advice.
 func hintFor(sig clihint.Signal) string {
 	switch sig {
 	case clihint.QuotaExhausted:
-		// The only signal whose next step is to do NOTHING for a while. It is worded to stop the
-		// reflex every other signal invites — going to look for a fault — and it does not name a
-		// duration: aimesh cannot see the plan or its window, so the provider's own message (carried
-		// beside this line as the seat's detail) is the only honest source for when to come back.
+		// A rate limit needs waiting, not fixing. No duration is named: only the provider's message, shown as
+		// the seat's detail, knows the window.
 		return "the provider refused on a rate/usage limit — nothing here is misconfigured; wait for the window it names, then re-run."
 	case clihint.FolderTrust:
 		return "complete its own folder-trust setup once (in its CLI), then re-run."
@@ -1197,15 +1094,9 @@ func hintFor(sig clihint.Signal) string {
 	return ""
 }
 
-// printSeatFailures enumerates EVERY seat that failed, with its own cause and its own next step.
-//
-// The run-level hint above reports the first-by-index seat only, which is the correct halt contract
-// and the wrong thing to show a human on its own: a panel dispatches all its seats concurrently, so a
-// halted run has usually PAID for every seat's failure. Measured 2026-08-11, a two-seat panel failed
-// on an unusable model and a nonexistent model — two separate fixes — and printed one of them.
-//
-// It prints nothing when fewer than two seats failed: the run-level hint already covers that case, and
-// repeating it under a heading would be noise.
+// printSeatFailures lists every failed seat with its own cause and next step. Seats run concurrently,
+// so a halted run has usually paid for every failure, while the run-level hint names only the first.
+// It prints nothing when fewer than two seats failed.
 func printSeatFailures(errw io.Writer, panel []review.SeatStatus) {
 	var failed []review.SeatStatus
 	for _, s := range panel {
@@ -1225,10 +1116,9 @@ func printSeatFailures(errw io.Writer, panel []review.SeatStatus) {
 	}
 }
 
-// printIdentityCaveats surfaces model-identity caveats in the CLI review summary: the run PASSED (the
-// adapter ran and returned schema-valid output) but a lane's exact model was weak/self-reported or not
-// verified — the shared identity policy passes with a caveat rather than halting. A proven mismatch
-// would have halted instead. Each line is model-string/adapter-key only (no paths/secrets).
+// printIdentityCaveats lists model-identity caveats for a run that passed but where a seat's model was
+// weak, self-reported or unverified. A proven mismatch would have halted. Lines carry only model
+// strings and adapter keys.
 func printIdentityCaveats(out io.Writer, caveats []review.IdentityCaveat) {
 	if len(caveats) == 0 {
 		return
@@ -1248,11 +1138,8 @@ func printIdentityCaveats(out io.Writer, caveats []review.IdentityCaveat) {
 	}
 }
 
-// printWithheld surfaces files a CONTAINMENT rule kept out of the reviewed set. The run
-// PASSED, and that is exactly why this has to be said out loud: a reviewer cannot object to a
-// file it was never shown, so an unmentioned withhold turns a containment rule into a silent
-// blind spot in a report a human is about to trust. Paths are workspace-relative; the machine
-// reason code is printed alongside the rule so the line matches the run record.
+// printWithheld lists files a containment rule kept out of the review, since a reviewer cannot object
+// to a file it was never shown. Paths are workspace-relative, with the machine reason code.
 func printWithheld(out io.Writer, withheld []review.WithheldFile) {
 	if len(withheld) == 0 {
 		return
@@ -1270,12 +1157,8 @@ func printWithheld(out io.Writer, withheld []review.WithheldFile) {
 	}
 }
 
-// printGrounding renders the CITATION-GROUNDING tally for a human.
-//
-// It prints ONLY when something failed to resolve, which is a deliberate asymmetry. An all-grounded
-// run has nothing a reader needs to act on, and a line reporting it every time would train them past
-// the line that matters. When it does print, it leads with the caveat rather than the ratio: the
-// numbers invite "so those findings are wrong", and they do not mean that.
+// printGrounding renders the citation-grounding tally. It prints only when something failed to
+// resolve, and leads with the caveat that unresolved citations do not make findings wrong.
 func printGrounding(out io.Writer, g *review.GroundingSummary) {
 	if g == nil || g.Unresolved == 0 {
 		return
@@ -1291,11 +1174,8 @@ func printGrounding(out io.Writer, g *review.GroundingSummary) {
 	fmt.Fprintln(out, "  finding is wrong. Findings carry the detail; --json has it per finding.")
 }
 
-// printScope says that this review looked at part of the tree.
-//
-// It prints unconditionally when present and BEFORE the findings, because it changes what the whole
-// result means: a narrowed review is silent about everything it was not shown, and that silence must
-// not read as approval.
+// printScope reports that the review covered part of the tree. It prints before the findings, since a
+// narrowed review is silent about everything outside its scope.
 func printScope(out io.Writer, s *runmgr.ScopeSummary) {
 	if s == nil {
 		return
@@ -1311,11 +1191,8 @@ func printScope(out io.Writer, s *runmgr.ScopeSummary) {
 	fmt.Fprintln(out, "  This says nothing about the rest of the tree — no finding there means nobody looked.")
 }
 
-// printPartialPanel says that this review ran with fewer seats than were configured.
-//
-// It prints FIRST among the qualifiers, and unconditionally when present, because it changes the
-// denominator every other number in the output is read against. Its absence is the ordinary case, so
-// nothing is printed for a full panel.
+// printPartialPanel reports that the review ran with fewer seats than configured. It prints first
+// among the qualifiers because it changes the denominator for every other number.
 func printPartialPanel(out io.Writer, p *runmgr.PartialPanel) {
 	if p == nil {
 		return
@@ -1330,18 +1207,13 @@ func printPartialPanel(out io.Writer, p *runmgr.PartialPanel) {
 	fmt.Fprintln(out, "  configured. Re-run when capacity returns if the full panel matters.")
 }
 
-// printComposition tells a human what their panel's agreement counts were worth.
-//
-// It prints ONLY when a model is shared, on the same asymmetry printGrounding uses: a panel of
-// distinct models has nothing to act on, and a line every run would train a reader past the one that
-// matters. It names WHICH model is doubled — an operator who has to go read the roster to find out
-// has been told half a fact.
+// printComposition reports which model a panel shares, which weakens its agreement counts. It prints
+// only when a model is shared.
 func printComposition(out io.Writer, c *review.PanelComposition) {
 	if c == nil {
 		return
 	}
-	// A PASS-THROUGH seat is reported on its own asymmetry: it is absent from the ordinary run, and
-	// when present it is the one thing `list` cannot answer questions about afterwards.
+	// Report pass-through seats, which list cannot describe afterwards.
 	for _, s := range c.Seats {
 		if s.ModelSource != runmgr.ModelSourcePassThrough {
 			continue
@@ -1365,15 +1237,8 @@ func printComposition(out io.Writer, c *review.PanelComposition) {
 	fmt.Fprintln(out, "  does not make any finding wrong. --json carries it per finding.")
 }
 
-// printDissent tells a human how much of this result their panel actually agreed on.
-//
-// It prints ONLY when something is contested, on the same asymmetry printGrounding and
-// printComposition use: a result the panel agreed on throughout has nothing a reader needs to act on,
-// and a line every run would train them past the one that matters.
-//
-// It leads with what silence is NOT, before the number. The number invites "so those findings are
-// doubtful", and it does not mean that — the seats are blind, so a seat that did not report a finding
-// may equally never have reached that file.
+// printDissent reports how much of the result the panel agreed on. It prints only when something is
+// contested, and first states that a blind seat's silence is not a vote against a finding.
 func printDissent(out io.Writer, d *review.DissentSummary) {
 	if d == nil || d.Contested == 0 {
 		return
@@ -1385,11 +1250,8 @@ func printDissent(out io.Writer, d *review.DissentSummary) {
 	fmt.Fprintln(out, "  than skim them. review-summary.md marks each one; --json has it per finding.")
 }
 
-// printVerification renders the bounded-execution record for a human.
-//
-// It leads with the DELTA and states the two limits before the numbers, because both misreadings are
-// easy and they run in opposite directions: green invites "the change is fine", red invites "the
-// findings were wrong". Neither follows.
+// printVerification renders the bounded-execution record. It leads with the delta and states that
+// neither a pass nor a failure is a verdict on the change or the findings.
 func printVerification(out io.Writer, v *review.VerificationReport) {
 	if v == nil {
 		return
@@ -1418,8 +1280,8 @@ func printVerification(out io.Writer, v *review.VerificationReport) {
 	fmt.Fprintln(out, "  A pass does not mean the change is correct — your commands may not cover what changed.")
 }
 
-// verifyMark is one command's outcome as a short word. `timeout` and `unstartable` are their own
-// marks rather than folded into `FAIL`, because neither is a statement about the code.
+// verifyMark returns one command's outcome as a short word. timeout and unstartable are distinct from
+// FAIL because neither says anything about the code.
 func verifyMark(r review.VerificationResult) string {
 	switch {
 	case r.TimedOut:
@@ -1433,19 +1295,8 @@ func verifyMark(r review.VerificationResult) string {
 	}
 }
 
-// registerVerifyFlags declares the BOUNDED-EXECUTION flags on an AGENT-surface launch command (acp,
-// mcp) and returns the resolver. It is one function rather than two copies because the help text is
-// the consent an operator is giving, and two copies of a consent notice drift into two different
-// promises.
-//
-// The wording differs from the `review` command's on one point that matters: here the operator is
-// agreeing IN ADVANCE, for every run a peer or a model will later request. That is why these are
-// launch flags at all — a caller that could name a command to execute would have arbitrary code
-// execution on this machine dressed as a review parameter.
-//
-// It returns a struct rather than a tuple because these are OPERATOR POLICY settings and the set will
-// keep growing — every one of them is something a caller must not be able to decide for itself, and a
-// four-value return was already at the limit of what reads.
+// writePolicy holds the operator policy set by the write-policy launch flags: bounded execution and
+// the protected-path waiver.
 type writePolicy struct {
 	VerifyCommands      []string
 	VerifyTimeout       time.Duration
@@ -1453,6 +1304,9 @@ type writePolicy struct {
 	AllowProtectedPaths bool
 }
 
+// registerWritePolicyFlags declares the write-policy launch flags for an agent surface (acp or mcp) and
+// returns their resolver. The flag help is the operator's consent for runs a caller requests later, so
+// it is defined once for both surfaces.
 func registerWritePolicyFlags(fs *flag.FlagSet, surface string) func(io.Writer) (writePolicy, bool) {
 	var cmds setFlags
 	fs.Var(&cmds, "verify-cmd", "your project's own build/test `command`, run on the CONTAINMENT COPY and RECORDED for every review this "+surface+" runs (repeatable, max "+strconv.Itoa(runmgr.MaxVerifyCommands)+"). YOU are agreeing to this in advance, for runs a caller will request later: a caller can neither name a command nor cause one to run, because a peer that could would have arbitrary code execution here. Nothing model-authored is ever executed. The result GATES NOTHING — it is reported with a note saying so.")
@@ -1485,8 +1339,8 @@ func (s *setFlags) Set(v string) error {
 	return nil
 }
 
-// parseSets turns --set values ("role.adapter=NAME" / "role.model=NAME") into the
-// per-lane override maps the resolver consumes.
+// parseSets turns --set values ("role.adapter=NAME" or "role.model=NAME") into the per-role override
+// maps the resolver consumes.
 func parseSets(sets []string) (adapters, models map[review.Role]string, err error) {
 	for _, s := range sets {
 		kv := strings.SplitN(s, "=", 2)
@@ -1516,18 +1370,14 @@ func parseSets(sets []string) (adapters, models map[review.Role]string, err erro
 	return adapters, models, nil
 }
 
-// parseAuthority turns the CLI's authority flags into the declaration the core consumes.
+// parseAuthority turns the authority flags into the declaration the core consumes. The forms are
+// mutually exclusive:
+//   - --authority <path> (repeatable) with --authority-hash <name>=<sha256>: whole documents,
+//     optionally pinned; a document's name is its base name.
+//   - --authority-manifest <file.json>: the full declaration, including byte ranges, media types and
+//     inline content.
 //
-// Two forms, deliberately mutually exclusive:
-//   - `--authority <path>` (repeatable) + `--authority-hash <name>=<sha256>` — the common
-//     case: whole documents, optionally content-pinned. The document's NAME defaults to its
-//     base name, which is what a hash pin refers to.
-//   - `--authority-manifest <file.json>` — the full declaration (byte ranges, media types,
-//     inline content), for anything a flag cannot express.
-//
-// It performs SHAPE parsing only; the semantic rules (exactly-one-of, uniqueness, the
-// report-mode-only inline split, the budget, hash verification, root scoping) all live in
-// internal/engine/authority so every surface gets identical answers.
+// It parses shape only; semantic rules live in the authority engine so every surface agrees.
 func parseAuthority(paths, hashes []string, manifestPath string) ([]review.AuthorityDoc, error) {
 	if manifestPath != "" {
 		if len(paths) > 0 || len(hashes) > 0 {
@@ -1552,9 +1402,8 @@ func parseAuthority(paths, hashes []string, manifestPath string) ([]review.Autho
 	docs := make([]review.AuthorityDoc, 0, len(paths))
 	used := map[string]bool{}
 	for _, p := range paths {
-		// A value may carry a SECTION or a BYTE RANGE selector; see authorityref.go. Both resolve
-		// here into the same explicit `ranges` declaration the manifest takes, so nothing downstream
-		// — the run record, the inclusion manifest, any surface — sees the shorthand.
+		// A value may carry a section or byte-range selector (see authorityref.go), resolved here to an
+		// explicit ranges declaration.
 		ref, rerr := parseAuthorityRef(p)
 		if rerr != nil {
 			return nil, rerr
@@ -1567,8 +1416,7 @@ func parseAuthority(paths, hashes []string, manifestPath string) ([]review.Autho
 		docs = append(docs, doc)
 		used[name] = true
 	}
-	// An unmatched pin is a typo, and a typo'd pin silently pins NOTHING — which is the one
-	// failure mode a content pin exists to prevent. Refuse instead.
+	// An unmatched pin would silently pin nothing, so it is refused.
 	for name := range pins {
 		if !used[name] {
 			return nil, fmt.Errorf("--authority-hash names %q, which is not one of the declared --authority documents (names default to the file base name)", name)
@@ -1577,9 +1425,8 @@ func parseAuthority(paths, hashes []string, manifestPath string) ([]review.Autho
 	return docs, nil
 }
 
-// readAuthorityManifest loads the JSON authority declaration. It accepts either a bare array
-// or `{"authority": [...]}`, and rejects unknown fields — a mistyped key in a governance
-// declaration must fail loudly, never be silently ignored.
+// readAuthorityManifest loads a JSON authority declaration, either a bare array or
+// {"authority": [...]}. Unknown fields are refused.
 func readAuthorityManifest(path string) ([]review.AuthorityDoc, error) {
 	res, err := scope.New(path)
 	if err != nil {
@@ -1589,9 +1436,8 @@ func readAuthorityManifest(path string) ([]review.AuthorityDoc, error) {
 	if derr != nil {
 		return nil, fmt.Errorf("--authority-manifest: %w", derr)
 	}
-	// Read through the resolved root, not by re-opening the resolved STRING: this file names
-	// the documents (and their hash pins) the whole run is judged against, so a swap between
-	// the resolution and the read would substitute the governance declaration itself.
+	// Read through the resolved root rather than reopening the path string, so the file cannot be swapped
+	// between resolution and read.
 	b, rerr := rootfile.Read(res.Roots(), abs)
 	if rerr != nil {
 		return nil, fmt.Errorf("--authority-manifest %q: %w", path, rerr)
@@ -1620,8 +1466,7 @@ func decodeStrict(s string, v any) error {
 	return dec.Decode(v)
 }
 
-// diagSuffix appends the stable diagnostic halt code (e.g. " (Class E)" / " (M5)")
-// to a user-facing error, so the plain-English message leads and the code follows.
+// diagSuffix appends the diagnostic halt code (for example " (Class E)") to a user-facing error.
 func diagSuffix(err error) string {
 	var f *fault.Fault
 	if errors.As(err, &f) && f.Halt != "" {
@@ -1633,9 +1478,7 @@ func diagSuffix(err error) string {
 	return ""
 }
 
-// gatingCode returns exit 1 when gating is on and the review ended with findings,
-// else 0 — findings exit 0 unless gating is explicitly enabled, so a review that merely
-// reports never fails a caller's build by default.
+// gatingCode returns 1 when gating is on and the review ended with findings, and 0 otherwise.
 func gatingCode(failOnFindings bool, findings int) int {
 	if failOnFindings && findings > 0 {
 		return int(fault.Findings)
@@ -1676,23 +1519,17 @@ func runACP(args []string, out, errw io.Writer) int {
 	fs.SetOutput(errw)
 	cliflags.Style(fs, "aimesh review acp")
 	framing := fs.String("framing", acp.FramingNewline, "wire framing: newline | content-length")
-	// ADAPTERS AND WRITES come from the launch arguments alone: this agent reads no aimesh
-	// configuration, so it works on a fresh install with nothing set up first.
+	// Adapters and the write grant come from launch arguments only; the agent reads no aimesh config.
 	adapters := launchflags.RegisterAdapters(fs)
 	writes := launchflags.RegisterWrites(fs)
-	// SCOPE is declared per turn (the prompt's absolute workspace, or the session cwd). `--root` is an
-	// optional CEILING every declared path must lie inside.
+	// Scope is declared per turn; --root is an optional ceiling.
 	var roots setFlags
 	fs.Var(&roots, "root", "an absolute directory every turn's declared workspace and roots must lie inside (repeatable). Without it, a turn may declare any absolute directory that is not the filesystem root, a home directory, a system tree or a protected directory")
-	// An over-broad --root (`/`, a home directory, a system/shared tree) is refused unless the operator
-	// says so; it never waives the non-overridable read denylist.
+	// An over-broad --root is refused unless the operator opts in; the read denylist always applies.
 	allowBroadRoot := fs.Bool("allow-broad-root", false, "permit a --root that is normally refused as over-broad (/, a home directory, a system/shared tree)")
-	// The turn budget. Without it an ACP prompt could run until the host gave up — leaving a panel
-	// of model CLIs spending with nobody waiting for them. Every aimesh agent surface bounds a turn.
+	// The turn budget stops model CLIs spending after the host stops waiting.
 	turnTimeout := fs.Duration("turn-timeout", acp.DefaultTurnTimeout, "total wall-clock budget for one prompt/review turn")
-	// CROSS-RUN DISPOSITION MEMORY is an OPERATOR opt-in here, exactly as it is a human opt-in on
-	// `reviewmesh review`. It is not a `_meta` field: on this surface the caller is a peer process,
-	// so the consent has to be given before any request — the same rule `--root` follows.
+	// Bounded execution and the protected-path waiver are operator launch flags; a peer cannot set them.
 	resolveWritePolicy := registerWritePolicyFlags(fs, "acp")
 	if err := fs.Parse(args); err != nil {
 		return int(fault.Usage)
@@ -1727,8 +1564,7 @@ func runACP(args []string, out, errw io.Writer) int {
 	if writes.Allowed() {
 		fmt.Fprintln(errw, "aimesh review acp: --allow-writes: an apply turn can write accepted findings to a workspace; each one still carries the run handle of the report it applies.")
 	}
-	// degrade-vs-fail policy when a requested mode exceeds the effective ceiling (the built-in
-	// default is true).
+	// Degrade or fail when a requested mode exceeds the ceiling; the built-in default is degrade.
 	degrade := a.Cfg.Surfaces.DegradeWhenModeUnavailable == nil || *a.Cfg.Surfaces.DegradeWhenModeUnavailable
 	srv := &acp.Server{
 		Manager:     a.Manager(),
@@ -1742,16 +1578,16 @@ func runACP(args []string, out, errw io.Writer) int {
 		},
 		DegradeWhenModeUnavailable: degrade,
 		TurnTimeout:                *turnTimeout,
-		// Set ONLY by the web ACP-validation harness (it exports this env when spawning the child); a
-		// normal `reviewmesh acp` invocation leaves it unset → no synthetic host-adjudication probe.
+		// Set only by validation harnesses that spawn the agent; otherwise no synthetic adjudication probe
+		// runs.
 		ValidateHostAdjudication: os.Getenv("REVIEWMESH_ACP_VALIDATE_HOSTADJ") == "1",
 		VerifyCommands:           policy.VerifyCommands,
 		VerifyTimeout:            policy.VerifyTimeout,
 		VerifyBaseline:           policy.VerifyBaseline,
 		AllowProtectedPaths:      policy.AllowProtectedPaths,
 	}
-	// Durable session store (AIMESH_HOME-aware) → enables ACP v1 `session/resume` across an
-	// agent restart. If the home cannot be resolved, resume is simply unsupported (not fatal).
+	// A durable session store enables session/resume across restarts. Without a home directory, resume is
+	// unsupported.
 	if home, herr := config.HomeDir(); herr == nil {
 		srv.Sessions = acp.NewFileSessionStore(filepath.Join(config.ComponentDir(home), "acp-sessions"))
 	}
@@ -1762,10 +1598,8 @@ func runACP(args []string, out, errw io.Writer) int {
 	return int(fault.OK)
 }
 
-// splitArgs is meshcore/cliflags.SplitArgs. It lives behind a local name because both apps hit the
-// same two failures — a flag's value misread as the operand, and an operand that makes Go's parser
-// stop and silently drop every flag after it — and one implementation is how they stay fixed
-// together. See that package for what the rule is and why it is asked of the flag set.
+// splitArgs is cliflags.SplitArgs, shared by both apps so flag values and operands are split the same
+// way.
 func splitArgs(fs *flag.FlagSet, args []string) (flags, positionals []string) {
 	return cliflags.SplitArgs(fs, args)
 }

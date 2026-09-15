@@ -1,8 +1,7 @@
 package pipeline
 
-// End-to-end tests for the two ADJUDICATIVE modes (Challenge + Shortlist) and the shipped ai-collab
-// composition. Everything here is hermetic — deterministic in-process fakes, no real CLI —
-// and every test pins ONE invariant from the design rather than the shape of the implementation.
+// End-to-end tests for the adjudicative modes (Challenge and Shortlist) and the ai-collab composition. They
+// use deterministic in-process fakes, and each test checks one invariant.
 
 import (
 	"context"
@@ -41,9 +40,8 @@ func mustSpec(t *testing.T, name string) mode.ModeSpec {
 	return spec
 }
 
-// eventLog collects the pipeline's progress events IN ORDER, so a test can assert that one stage happened
-// before another (the only way to prove "frozen BEFORE the ballot" from the outside). It is written from the
-// pipeline's own goroutines, so it locks.
+// eventLog collects the pipeline's progress events in order, so a test can check that one stage preceded
+// another. The pipeline writes it from several goroutines.
 type eventLog struct {
 	mu     sync.Mutex
 	events []audit.EventLine
@@ -102,17 +100,16 @@ func entryFor(t *testing.T, out mode.ChallengeOutput, statement string) mode.Cha
 
 // --- 1. Challenge ---
 
-// TestChallenge_SeverityRegisterWithHostComputedCorroboration is the mode's headline contract: a 2-round run
-// produces a SEVERITY-TRIAGED register in which a finding raised by 2 of 3 reviewers is `corroborated` with
-// BOTH denominators, a lone finding is `single_source` and SURVIVES, the severity is the host's max over the
-// blind sources, and round 2 contributes depth without contributing to any count.
+// A challenge run produces a severity-ordered register: a finding raised by 2 of 3 reviewers is corroborated
+// with both denominators, a lone finding survives as single_source, severity is the maximum over the blind
+// sources, and round 2 adds depth without affecting any count.
 func TestChallenge_SeverityRegisterWithHostComputedCorroboration(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid, fake.Valid}, fake.Valid)
 	res, err := runAdjudicative(t, reg, plan, mode.Challenge, theArtifact, Options{}, nil)
 	if err != nil {
 		t.Fatalf("challenge run: %v", err)
 	}
-	// Two FIXED rounds: a blind attack, then the mediated cross-review.
+	// Two fixed rounds: a blind attack, then the mediated cross-review.
 	if len(res.Rounds) != 2 || !res.Rounds[0].Blind() || res.Rounds[1].Blind() {
 		t.Fatalf("challenge is 2 rounds, blind then mediated: %d round(s)", len(res.Rounds))
 	}
@@ -124,7 +121,7 @@ func TestChallenge_SeverityRegisterWithHostComputedCorroboration(t *testing.T) {
 		t.Errorf("a register must pin the artifact + the partition it was computed at: %+v", out)
 	}
 
-	// The finding two reviewers independently raised: CORROBORATED, with both denominators over the 3-member panel.
+	// The finding two reviewers raised independently is corroborated, with both denominators over 3.
 	shared := entryFor(t, out, "Race condition on shutdown")
 	if shared.Corroboration.Label != govern.LabelCorroborated {
 		t.Errorf("a finding raised by 2 distinct blind sources must be corroborated, got %q", shared.Corroboration.Label)
@@ -147,7 +144,7 @@ func TestChallenge_SeverityRegisterWithHostComputedCorroboration(t *testing.T) {
 			t.Errorf("every count pins {formulationHash, partitionRevisionHash, rulesVersion, policyHash, baselineRoundID}: %+v", shared.Corroboration)
 		}
 	}
-	// HOST triage: the max severity any blind source assigned (A said high, B said critical).
+	// Host triage takes the highest severity any blind source assigned (A said high, B critical).
 	if shared.Severity != schema.SeverityCritical {
 		t.Errorf("host severity triage must take the MAX blind severity, got %q", shared.Severity)
 	}
@@ -160,7 +157,7 @@ func TestChallenge_SeverityRegisterWithHostComputedCorroboration(t *testing.T) {
 		}
 	}
 
-	// MINORITY CARRY-THROUGH: a finding only one reviewer raised is labeled single_source and is STILL HERE.
+	// A finding only one reviewer raised is kept and labeled single_source.
 	lone := entryFor(t, out, "No input validation on the config path")
 	if lone.Corroboration.Label != govern.LabelSingleSource || !lone.SingleSource {
 		t.Errorf("a lone finding must survive as single_source, got %q (singleSource=%v)", lone.Corroboration.Label, lone.SingleSource)
@@ -176,7 +173,7 @@ func TestChallenge_SeverityRegisterWithHostComputedCorroboration(t *testing.T) {
 		t.Errorf("expected 5 register entries (one merged + 4 singletons), got %d: %+v", len(out.Register), out.Register)
 	}
 
-	// TRIAGE ORDER: most severe first.
+	// Most severe first.
 	for i := 1; i < len(out.Register); i++ {
 		if out.Register[i-1].Severity.Rank() < out.Register[i].Severity.Rank() {
 			t.Errorf("the register must be severity-triaged: %q(%s) precedes %q(%s)",
@@ -184,8 +181,8 @@ func TestChallenge_SeverityRegisterWithHostComputedCorroboration(t *testing.T) {
 		}
 	}
 
-	// Round 2 really ran, added DEPTH, and the round-2 prompt carried the pooled canonical digest as UNTRUSTED
-	// DATA — never raw peer output.
+	// Round 2 ran and added depth, and its prompt carried the pooled canonical digest as untrusted data rather
+	// than raw peer output.
 	if len(shared.Deepening) == 0 {
 		t.Error("the mediated cross-review must attach attributed depth to the register")
 	}
@@ -217,14 +214,12 @@ func TestChallenge_SeverityRegisterWithHostComputedCorroboration(t *testing.T) {
 	}
 }
 
-// TestChallenge_AntiEcho_CrossReviewNeverInflatesACount is the anti-echo invariant for the adjudicative path:
-// the round-2 reviewers are SHOWN the pooled findings and echo every one of them back, and not a
-// single count moves — because corroboration is computed over the immutable blind round-1 artifacts and a
-// later round cannot become a counting baseline at all.
+// Cross-reviewers who echo every pooled finding back move no count, because corroboration uses only the blind
+// round-1 artifacts.
 func TestChallenge_AntiEcho_CrossReviewNeverInflatesACount(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid, fake.Valid}, fake.Valid)
 
-	// The same mode contract with the cross-review round REMOVED — the control.
+	// The control: the same contract without the cross-review round.
 	single := mustSpec(t, mode.Challenge)
 	single.Rounds, single.LaterRound = 1, nil
 	one, err := RunSpec(context.Background(), reg, plan, adjudicativeTask(mode.Challenge, theArtifact),
@@ -277,9 +272,8 @@ func TestChallenge_AntiEcho_CrossReviewNeverInflatesACount(t *testing.T) {
 	}
 }
 
-// TestChallenge_ContestedMapping_WithholdsCorroboratedAndEmitsRange: a merge only ONE canonicalizer proposed
-// leaves the mapping CONTESTED, so every dependent register entry becomes conditional — a sensitivity range
-// with the definitive `corroborated` label WITHHELD — and the renderer says so rather than hiding it.
+// A merge only one canonicalizer proposed leaves the mapping contested, so every register entry carries a
+// sensitivity range with `corroborated` withheld, and the rendering says so.
 func TestChallenge_ContestedMapping_WithholdsCorroboratedAndEmitsRange(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	reg["merger"] = fake.New("merger", "M", fake.CanonMergeAll) // the aggressive merger the dual rule neutralizes
@@ -315,9 +309,8 @@ func TestChallenge_ContestedMapping_WithholdsCorroboratedAndEmitsRange(t *testin
 	}
 }
 
-// TestChallenge_MissingArtifact_RefusedBeforeAnySpend pins the mode's task contract: Challenge exists to
-// attack a supplied artifact, so a task without one is refused BEFORE the fan-out — not discovered by a panel
-// that reviewed nothing.
+// A challenge task without an artifact is refused before the fan-out, and mode.ValidateTask applies the same
+// rule for every surface.
 func TestChallenge_MissingArtifact_RefusedBeforeAnySpend(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	cA := counted(reg["explorer-A"])
@@ -344,10 +337,9 @@ func TestChallenge_MissingArtifact_RefusedBeforeAnySpend(t *testing.T) {
 
 // --- 2. Shortlist ---
 
-// TestShortlist_HostTalliedRankingOverConfirmedUniverse is the mode's headline contract: the ranking is
-// computed by the HOST from the recorded ballots over the CONFIRMED canonical universe, every ranked entry is
-// pinned to a claim with both denominators, the criteria carry origin + aggregation method, the rejects are
-// carried with a host reason, and the result is NEVER rendered as consensus.
+// The host tallies the recorded ballots over the confirmed universe: ranked entries carry claims with both
+// denominators, criteria carry origin and aggregation method, rejects carry a host reason, and the result is
+// never rendered as consensus.
 func TestShortlist_HostTalliedRankingOverConfirmedUniverse(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	res, err := runAdjudicative(t, reg, plan, mode.Shortlist, "", Options{}, nil)
@@ -358,7 +350,7 @@ func TestShortlist_HostTalliedRankingOverConfirmedUniverse(t *testing.T) {
 	if !ok {
 		t.Fatalf("shortlist must produce a ShortlistOutput, got %T", res.Output)
 	}
-	// The ballot ran over the CONFIRMED universe (3 canonical candidates), and the host tallied it.
+	// The ballot ran over the confirmed universe of 3 candidates, and the host tallied it.
 	if res.Decision == nil || res.Decision.RuleVersion != govern.DecisionRuleVersion {
 		t.Fatalf("a shortlist run must record the host tally: %+v", res.Decision)
 	}
@@ -391,12 +383,12 @@ func TestShortlist_HostTalliedRankingOverConfirmedUniverse(t *testing.T) {
 		if len(e.Provenance) == 0 {
 			t.Errorf("a ranked candidate must carry its blind round-1 provenance: %+v", e)
 		}
-		// `voted` and `emergent` are reported SIDE BY SIDE and are different measurements.
+		// Ballot support and blind salience are reported side by side as different measurements.
 		if e.EmergentSalience == nil || e.EmergentSalience.Query != govern.CorroborationQuery {
 			t.Errorf("a ranked entry must report its blind round-1 salience alongside its ballot support: %+v", e.EmergentSalience)
 		}
 	}
-	// The criteria are frozen with their ORIGIN + AGGREGATION METHOD.
+	// The criteria are frozen with their origin and aggregation method.
 	if len(out.Criteria) != 2 {
 		t.Fatalf("the user's criteria must be frozen with the decision: %+v", out.Criteria)
 	}
@@ -408,15 +400,15 @@ func TestShortlist_HostTalliedRankingOverConfirmedUniverse(t *testing.T) {
 			t.Errorf("frozen criterion invalid: %v", err)
 		}
 	}
-	// The rejects are carried with a HOST reason — a nominated candidate is never silently dropped.
+	// Rejects carry the host's reason, so no nominated candidate is dropped silently.
 	if out.Rejects[0].Reason == "" || out.Rejects[0].Name == "" {
 		t.Errorf("a reject must carry the host's arithmetic reason: %+v", out.Rejects[0])
 	}
 
-	// HONEST LABELING: a ballot is an informed preference under shared framing, never consensus, and never
-	// confused with emergent salience.
+	// A ballot is an informed preference under shared framing: never consensus, and distinct from emergent
+	// salience.
 	for _, text := range []string{out.Decision, out.Summary(), res.Decision.Rendering} {
-		// The ONLY sanctioned way the word may appear is as a DENIAL ("not consensus").
+		// "consensus" may appear only as "not consensus".
 		if strings.Contains(strings.ToLower(text), "consensus") && !strings.Contains(strings.ToLower(text), "not consensus") {
 			t.Errorf("a ballot must never be rendered as consensus: %q", text)
 		}
@@ -438,14 +430,9 @@ func TestShortlist_HostTalliedRankingOverConfirmedUniverse(t *testing.T) {
 	}
 }
 
-// TestShortlist_DecisionInputsFrozenBeforeTheBallot pins the central ordering rule: the candidate-universe
-// revision, the criterion set, the method, the shortlist cut, the quorum, the tie rule and the missing-response
-// policy are fixed AND HASHED before the ballot is solicited — else a criterion can be introduced after seeing
-// which candidate it favors.
-//
-// It is asserted two independent ways: the event stream shows the freeze strictly before the ballot round's
-// dispatch, and the ballot PROMPT BYTES the panel actually received carry the frozen inputs hash — which can
-// only be in them if the freeze already happened.
+// The decision inputs (universe revision, criteria, method, cut, quorum, tie rule and missing-response policy)
+// are frozen and hashed before the ballot, so no criterion can be chosen after seeing whom it favors. The event
+// order shows the freeze before the ballot dispatch, and the ballot prompt carries the frozen hash.
 func TestShortlist_DecisionInputsFrozenBeforeTheBallot(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	log := &eventLog{}
@@ -458,7 +445,7 @@ func TestShortlist_DecisionInputsFrozenBeforeTheBallot(t *testing.T) {
 		t.Fatalf("the decision inputs must be frozen + hashed: %+v", frozen)
 	}
 
-	// (a) ORDER IN THE EVENT STREAM: the freeze precedes the ballot round's dispatch, and precedes the tally.
+	// (a) Event order: the freeze precedes the ballot dispatch, which precedes the tally.
 	froze := log.firstIndex("decision_frozen")
 	ballotDispatch := log.firstIndexWhere("explorer_dispatch", func(d map[string]any) bool {
 		phase, _ := d["phase"].(string)
@@ -475,7 +462,7 @@ func TestShortlist_DecisionInputsFrozenBeforeTheBallot(t *testing.T) {
 		t.Errorf("the tally must follow the ballot (dispatch@%d, tally@%d)", ballotDispatch, tallied)
 	}
 
-	// (b) IN THE PROMPT BYTES: the panel was shown the frozen hash + the exact framing it voted under.
+	// (b) Prompt content: the panel was shown the frozen hash and the framing it voted under.
 	if len(res.LaterRoundPrompts) != 1 {
 		t.Fatalf("expected 1 ballot prompt, got %d", len(res.LaterRoundPrompts))
 	}
@@ -483,11 +470,8 @@ func TestShortlist_DecisionInputsFrozenBeforeTheBallot(t *testing.T) {
 	if !strings.Contains(p, frozen.InputsHash) {
 		t.Error("the ballot prompt must carry the frozen inputs hash — that is what proves the framing predates the vote")
 	}
-	// The ASSEMBLED prompt must not open with a dash. govern's own test pins this on Render(), but the
-	// property belongs to this concatenation: Render() is only the prompt head because the host prepends
-	// it here, so anything prepended in front of it later would break the property while that test stays
-	// green. An argv-passing adapter parses a leading `-` as an option and casts no ballot (the shell
-	// adapter now refuses such a call outright); this pins the prompt so that refusal is never reached.
+	// The assembled prompt must not start with a dash: the shell adapter refuses an option-like prompt for
+	// argv-passing recipes. govern tests Render() alone, so this checks the full concatenation.
 	if strings.HasPrefix(p, "-") {
 		t.Errorf("the assembled ballot prompt must not begin with '-': argv-passing adapters read it as an option. Got: %.80q", p)
 	}
@@ -523,9 +507,8 @@ func TestShortlist_DecisionInputsFrozenBeforeTheBallot(t *testing.T) {
 	}
 }
 
-// TestShortlist_ContestedCandidate_WithholdsRankedAndEmitsRange: a contested mapping reaching a ranked
-// candidate makes the ballot's own option set conditional, so the definitive `ranked` label is WITHHELD and a
-// range over both plausible partitions is emitted instead.
+// A contested mapping makes the ballot's option set conditional, so ranked candidates carry a sensitivity
+// range with `ranked` withheld.
 func TestShortlist_ContestedCandidate_WithholdsRankedAndEmitsRange(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	reg["merger"] = fake.New("merger", "M", fake.CanonMergeAll)
@@ -563,12 +546,10 @@ func TestShortlist_ContestedCandidate_WithholdsRankedAndEmitsRange(t *testing.T)
 	}
 }
 
-// TestShortlist_TieAtTheBoundary_WithholdsRankedUnderTheFrozenRule: when the tally ties across the shortlist
-// cut, the FROZEN tie rule applies — no winner is picked, every tied candidate is carried, and the definitive
-// `ranked` label is withheld for them. The rule was frozen before the ballot, so it cannot have been chosen to
-// favor whichever candidate the tie involves.
+// A tie across the shortlist cut applies the frozen tie rule: no winner is picked, every tied candidate is
+// carried, and their `ranked` label is withheld.
 func TestShortlist_TieAtTheBoundary_WithholdsRankedUnderTheFrozenRule(t *testing.T) {
-	// Voter B casts the exact REVERSE of voter A's ballot: under the positional tally every candidate ties.
+	// Voter B casts the reverse of voter A's ballot, so every candidate ties.
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.BallotReverse}, fake.Valid)
 	res, err := runAdjudicative(t, reg, plan, mode.Shortlist, "", Options{}, nil)
 	if err != nil {
@@ -584,11 +565,11 @@ func TestShortlist_TieAtTheBoundary_WithholdsRankedUnderTheFrozenRule(t *testing
 	if !strings.Contains(out.TieOutcome, string(res.Decision.Frozen.Inputs.TieRule)) {
 		t.Errorf("the tie outcome must name the FROZEN tie rule: %q", out.TieOutcome)
 	}
-	// Every tied candidate is CARRIED (picking one would be the judgment the frozen rule declines to make)…
+	// Every tied candidate is carried...
 	if len(out.Ranked) <= res.Decision.Frozen.Inputs.ShortlistSize {
 		t.Errorf("a boundary tie carries every tied candidate: %d ranked for a cut of %d", len(out.Ranked), res.Decision.Frozen.Inputs.ShortlistSize)
 	}
-	// …and the tied ones carry a WITHHELD label rather than a ranked one.
+	// ...with a withheld label rather than a ranked one.
 	withheld := 0
 	for _, e := range out.Ranked {
 		if e.Claim.Label == govern.LabelWithheldTie {
@@ -603,13 +584,11 @@ func TestShortlist_TieAtTheBoundary_WithholdsRankedUnderTheFrozenRule(t *testing
 	}
 }
 
-// TestShortlist_UnusableBallotIsRecordedNotInvented: a voter whose ballot names a candidate outside the
-// confirmed universe casts no usable ballot. The host records the absence and keeps counting with the dual
-// denominators — it never repairs the ballot by deleting the offending entry (which would change the voter's
-// expressed preference) and never halts a paid-for panel over one bad reply.
+// An abstaining voter casts no ballot and the count continues with both denominators; a ballot naming a
+// candidate outside the confirmed universe is rejected rather than repaired.
 func TestShortlist_UnusableBallotIsRecordedNotInvented(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid, fake.Valid}, fake.Valid)
-	// An explorer that ABSTAINS returns a schema-valid empty ballot: a recorded position, not a vote.
+	// An abstaining explorer returns a schema-valid empty ballot: a recorded position, not a vote.
 	reg["explorer-C"] = fake.New("explorer-C", "C", fake.Abstain)
 	res, err := runAdjudicative(t, reg, plan, mode.Shortlist, "", Options{}, nil)
 	if err != nil {
@@ -639,12 +618,11 @@ func TestShortlist_UnusableBallotIsRecordedNotInvented(t *testing.T) {
 	}
 }
 
-// --- 3. ai-collab: the shipped multi-round COMPOSITION ---
+// --- 3. ai-collab: a multi-round composition ---
 
-// TestAICollab_ComposedMultiRoundExampleRunsEndToEnd is the acceptance test for the composition: the owner's
-// ai-collab — each agent shortlists its OWN findings blind, the agents then CHALLENGE each other's findings,
-// then one terminal collation — runs end to end on fakes and produces the expected shape, WITHOUT a supplied
-// artifact and WITHOUT any machinery of its own.
+// ai-collab runs end to end without a supplied artifact: each agent lists its own findings blind, the agents
+// cross-review each other's findings, and one collation produces Challenge's register using Challenge's
+// contracts.
 func TestAICollab_ComposedMultiRoundExampleRunsEndToEnd(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid, fake.Valid}, fake.Valid)
 	res, err := RunSpec(context.Background(), reg, plan,
@@ -654,7 +632,7 @@ func TestAICollab_ComposedMultiRoundExampleRunsEndToEnd(t *testing.T) {
 		t.Fatalf("ai-collab run: %v", err)
 	}
 
-	// STAGE 1 — each agent shortlisted its OWN findings, blind, with no artifact supplied.
+	// Stage 1: each agent produced its own findings blind, with no artifact supplied.
 	if len(res.Rounds) != 2 || !res.Rounds[0].Blind() {
 		t.Fatalf("ai-collab is a blind round then a cross-review round: %d round(s)", len(res.Rounds))
 	}
@@ -667,8 +645,8 @@ func TestAICollab_ComposedMultiRoundExampleRunsEndToEnd(t *testing.T) {
 		}
 	}
 
-	// STAGE 2 — the agents challenged EACH OTHER's findings, through the host-mediated pooled digest (never
-	// raw peer output), and the panel confirmed the partition those findings were grouped into.
+	// Stage 2: the agents cross-reviewed through the mediated pooled digest, and the panel confirmed the
+	// partition.
 	if len(res.Mediations) != 1 || res.Mediations[0].Artifact.ContentHash == "" {
 		t.Fatalf("the cross-review round must be collator-mediated with a recorded digest: %+v", res.Mediations)
 	}
@@ -682,7 +660,7 @@ func TestAICollab_ComposedMultiRoundExampleRunsEndToEnd(t *testing.T) {
 		t.Errorf("the composition is count-bearing, so it must use the DUAL canonicalizer: %+v", res.CanonicalizerCalls)
 	}
 
-	// STAGE 3 — one terminal collation: the severity-triaged register, with HOST-computed counts.
+	// Stage 3: one collation produces the severity-ordered register with host-computed counts.
 	out, ok := res.Output.(mode.ChallengeOutput)
 	if !ok {
 		t.Fatalf("the composition must produce the same register Challenge does, got %T", res.Output)
@@ -704,7 +682,7 @@ func TestAICollab_ComposedMultiRoundExampleRunsEndToEnd(t *testing.T) {
 		t.Errorf("every register entry must be pinned to an emitted claim: %+v", res.Governance)
 	}
 
-	// The composition genuinely REUSES Challenge's contracts — that reuse is the claim being tested.
+	// The composition reuses Challenge's contracts.
 	collab, chal := mustSpec(t, mode.AICollab), mustSpec(t, mode.Challenge)
 	if collab.Objective != chal.Objective || collab.Canonicalization != chal.Canonicalization || collab.Rounds != chal.Rounds {
 		t.Errorf("the composition must reuse Challenge's contract, not fork it: %+v vs %+v", collab, chal)
@@ -716,9 +694,8 @@ func TestAICollab_ComposedMultiRoundExampleRunsEndToEnd(t *testing.T) {
 
 // --- 4. Regression: the observe-posture modes are unaffected by the adjudicative ones ---
 
-// TestObserveModes_UnaffectedByAdjudicativeModes pins the behavior of Map, Synthesize and Catalog against the
-// adjudicative machinery: their own terminal output types, no ballot, no decision, and — for Catalog — the
-// single-canonicalizer, no-confirmation, no-counts path.
+// Map, Synthesize and Catalog keep their own output types with no ballot or mediated round; Catalog keeps its
+// single-canonicalizer path with no confirmation or counts.
 func TestObserveModes_UnaffectedByAdjudicativeModes(t *testing.T) {
 	for _, name := range []string{mode.Map, mode.Synthesize, mode.Catalog} {
 		t.Run(name, func(t *testing.T) {
@@ -751,7 +728,7 @@ func TestObserveModes_UnaffectedByAdjudicativeModes(t *testing.T) {
 				if _, ok := res.Output.(schema.CatalogOutput); !ok {
 					t.Fatalf("catalog must still produce a CatalogOutput, got %T", res.Output)
 				}
-				// Catalog keeps its SINGLE-canonicalizer, non-count path.
+				// Catalog keeps its single-canonicalizer path without counts.
 				if res.Confirmation != nil || res.Provisional != nil || res.Governance != nil {
 					t.Error("catalog (observe posture) runs no confirmation round and emits no counts")
 				}

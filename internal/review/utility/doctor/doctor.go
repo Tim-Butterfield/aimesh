@@ -1,7 +1,5 @@
-// Package doctor performs static, local readiness checks for reviewmesh. Batch 1 requires no
-// cloud auth or real model calls; cloud adapters are reported as not-verified (verify-on-
-// provision). It composes meshcore's domain-free readiness primitives (meshcore/doctor) with
-// roster-aware checks (profile/lane resolvability) over the typed config.Config.
+// Package doctor performs local readiness checks for review: config layers, adapter availability
+// and profile resolvability. It makes no model call unless the deep probe is requested.
 package doctor
 
 import (
@@ -19,8 +17,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// Check and Report are re-exported from meshcore/doctor so existing reviewmesh callers keep using
-// `doctor.Report` / `doctor.Check` unchanged. The probe capability is now `model.Prober`.
+// Check and Report re-export meshcore/doctor's result types.
 type (
 	Check  = mdoctor.Check
 	Report = mdoctor.Report
@@ -34,36 +31,18 @@ type Input struct {
 	ArtifactDir string
 	Workspace   string // optional path under review
 	Profile     string // optional: also check this profile's readiness (e.g. fully-local-ollama)
-	// Resolved, when set, is the plan the CALLER already resolved for Profile — so readiness is
-	// judged against THE LANES THAT WILL ACTUALLY RUN rather than re-derived from the profile.
-	//
-	// Without it this check re-resolved from config alone, which meant it could not see a `--set`
-	// role override or a composed `--reviewer` panel. A run whose plan resolved perfectly was then
-	// halted Class A by a preflight that had examined a different plan:
-	//
-	//	preflight failed: profile: default ready (no adapter resolvable for role "author_remediator")
-	//
-	// ...with that exact role overridden on the command line. The check was answering "is the
-	// PROFILE ready", while the question the run needed answered is "is what I am about to run
-	// ready" — and those diverge the moment an invocation overrides anything.
-	//
-	// Optional and additive: `aimesh review doctor` calls this standalone with no plan in hand and
-	// keeps its existing behaviour, which is the right answer there — asking after the profile is
-	// exactly what a bare `doctor` means.
+	// Resolved is the plan the caller already resolved for Profile, when it has one, so readiness is
+	// judged against the lanes that will run, including `--set` overrides and a composed panel. A
+	// standalone `doctor` leaves it nil and checks the profile.
 	Resolved *review.RunPlan
-	// ResolvedSeats is the resolved reviewer PANEL for Resolved, when the caller has one. The plan's
-	// `Lanes[reviewer]` is only seat 1, so a panel whose seats sit on different adapters would
-	// otherwise have the rest of them go unchecked.
+	// ResolvedSeats is the resolved reviewer panel for Resolved. Lanes[reviewer] is only seat 1, so
+	// the other seats' adapters are checked from here.
 	ResolvedSeats []review.LaneResolution
-	Probe         bool // run a safe no-model binary probe for the selected profile's adapters
-	// ProbeDeep additionally runs the DEEP probe: one REAL, bounded model invocation per required
-	// adapter, in a throwaway isolated directory, through the same path a run takes. It SPENDS REAL
-	// TOKENS, which is why it is a separate field from Probe rather than a stronger setting of it —
-	// `--probe` is documented everywhere as free, and quietly making a free flag cost money would be
-	// the worst possible way to add this. ProbeDeep implies Probe (the cheap ladder still runs first,
-	// so a resolve/version failure is reported before anything is spent).
+	Probe         bool // run a no-model binary probe of the selected profile's adapters
+	// ProbeDeep additionally makes one real, bounded model call per required adapter in a throwaway
+	// directory. It spends tokens, so it is separate from the free Probe, which it implies.
 	ProbeDeep bool
-	// Ctx bounds the (opt-in) adapter probe so a cancel/timeout propagates; nil → context.Background().
+	// Ctx bounds the probes; nil means context.Background().
 	Ctx context.Context
 }
 
@@ -85,8 +64,7 @@ func Run(in Input) Report {
 		r.Checks = append(r.Checks, Check{Name: name, OK: ok, Detail: detail})
 	}
 
-	// Config layers loaded (precedence: shipped defaults ← user/global ← project ←
-	// explicit). These are informational (always OK) so users can see what was merged.
+	// Config layers, lowest precedence first. These checks are informational and always OK.
 	add("config: shipped defaults loaded", true, "built-in seed (defaultProfile=default)")
 	add("config: user/global config", true, layerDetail(in.Layers.UserPath, in.Layers.UserLoaded, "~/.aimesh/review/config.yaml"))
 	add("config: project config (optional)", true, layerDetail(in.Layers.ProjectPath, in.Layers.ProjectLoaded, "<repo-root>/.aimesh/review/config.yaml"))
@@ -94,22 +72,18 @@ func Run(in Input) Report {
 		add("config: --config override", true, layerDetail(in.Layers.ExplicitPath, in.Layers.ExplicitLoaded, in.Layers.ExplicitPath))
 	}
 
-	// Shared adapter-location layers (`.aimesh/adapters.yaml`) — the PATH-ONLY substrate shared with
-	// exploremesh. Informational, like the config layers.
+	// Shared adapter-location layers (`.aimesh/adapters.yaml`), also informational.
 	add("adapters: user shared locations", true, layerDetail(in.Layers.SharedUserPath, in.Layers.SharedUserLoaded, "~/.aimesh/adapters.yaml"))
 	if in.Layers.SharedProjectHasRoot {
 		add("adapters: project shared locations", true, layerDetail(in.Layers.SharedProjectPath, in.Layers.SharedProjectLoaded, in.Layers.SharedProjectPath))
 	}
-	// A shadowed adapter path is a saved path that a HIGHER-precedence layer overrode — the user may
-	// think a path is active when a different one takes effect. Surface it as a non-fatal warning.
+	// A saved path overridden by a higher layer is reported, since the user may think it is active.
 	if len(in.Layers.AdapterPathShadowed) > 0 {
 		add("adapters: no shadowed saved paths", false,
 			fmt.Sprintf("a higher layer overrides the saved path for: %s (see `reviewmesh config` for the effective source)", strings.Join(in.Layers.AdapterPathShadowed, ", ")))
 	}
 
-	// Count only profiles the user can actually SEE. The shipped `fake-smoke` profile is hidden from
-	// every profile list, so including it made doctor report "2 profile(s)" for a config with one
-	// visible profile. Readiness still keys off the raw map: a hidden profile is real and resolvable.
+	// The count excludes hidden profiles; readiness still uses the full map.
 	visibleProfiles := 0
 	for name := range in.Config.Profiles {
 		if !config.IsHiddenProfile(name) {
@@ -126,11 +100,8 @@ func Run(in Input) Report {
 	add("config: default profile resolvable", defProf == "" || hasDef,
 		fmt.Sprintf("defaultProfile=%q", defProf))
 
-	// The target profile is the one the run actually uses: the explicitly-selected
-	// profile if given, else the default. Only its adapters are "required"; adapters
-	// used only by OTHER profiles are opt-in (reported, but a missing one does not
-	// fail doctor). This keeps a review's preflight scoped to the lanes it will use —
-	// an unrelated (possibly cloud) default profile never fails a `--profile X` run.
+	// Only the target profile's adapters are required, so an unrelated profile never fails a run's
+	// preflight. Other adapters are reported without failing doctor.
 	target := in.Profile
 	if target == "" {
 		target = in.Config.DefaultProfile
@@ -143,25 +114,18 @@ func Run(in Input) Report {
 		}
 	}
 
-	// Adapter inventory availability (generic mechanism over the runnable adapter registry). The
-	// `fake` adapter is a HIDDEN internal test harness: doctor lists it only under the internal
-	// gate (fake.Enabled), so it never advertises a name users cannot configure.
+	// The internal `fake` adapter is listed only under the test gate.
 	names := sortedAdapterNames(in.Config.Adapters)
 	if !fake.Enabled() {
 		names = slices.DeleteFunc(names, func(n string) bool { return n == "fake" })
 	}
 	r.Checks = append(r.Checks, mdoctor.AdapterAvailability(in.Adapters, names, required)...)
 
-	// Profile readiness: does each checked profile resolve, and are its lane adapters
-	// available? Cloud model calls are NOT made here (binary presence only).
-	//
-	// The resolved lanes are also where the DEEP probe's seats come from, when it is asked for: a
-	// deep probe passes the model argument a real run would pass, and this is the only place that
-	// argument is authoritatively resolved.
+	// Profile readiness: each profile resolves and its lane adapters are available. The resolved
+	// lanes also supply the deep probe's model arguments.
 	var deepSeats []mdoctor.DeepSeat
 	for _, pn := range profilesToCheck {
-		// THE CALLER'S OWN PLAN WINS for the profile it resolved. Re-resolving here would discard
-		// its overrides and its composed panel, and then report on a plan nobody is going to run.
+		// The caller's resolved plan wins, keeping its overrides and composed panel.
 		var plan review.RunPlan
 		lanes := []review.LaneResolution{}
 		if in.Resolved != nil && pn == target {
@@ -197,18 +161,14 @@ func Run(in Input) Report {
 		}
 	}
 
-	// Optional safe binary probe (no model call) for the selected profile's adapters. The deep probe
-	// implies it, so the cheap ladder always reports first: a binary that cannot even resolve is named
-	// before anything is spent finding that out the expensive way.
+	// The free binary probe runs before the deep probe, so a missing binary is reported before any
+	// spend.
 	if in.Probe || in.ProbeDeep {
 		ctx := in.Ctx
 		if ctx == nil {
 			ctx = context.Background()
 		}
 		r.Checks = append(r.Checks, mdoctor.ProbeAdapters(ctx, in.Adapters, names, required)...)
-		// The DEEP probe: one real, bounded invocation per required adapter in a throwaway directory.
-		// It SPENDS, so it happens only on this explicit opt-in, and only for adapters a lane of the
-		// checked profile actually uses.
 		if in.ProbeDeep {
 			r.Checks = append(r.Checks, mdoctor.ProbeAdaptersDeep(ctx, in.Adapters, deepSeats)...)
 		}

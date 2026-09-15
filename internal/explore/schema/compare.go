@@ -1,28 +1,11 @@
 package schema
 
-// This file holds the COMPARE mode's app-owned TASK INPUTS + round artifacts.
+// This file holds the Compare mode's task inputs, round-1 prompt and schema, and response parsing.
 //
-// Compare is a FIXED-SPACE mode, and that single fact decides its whole shape. The option set and the
-// criteria are DECLARED BY THE USER BEFORE ANY EXPLORER SPEAKS, so:
-//
-//   - there is nothing to canonicalize. Two explorers writing "Postgres" mean the same option because the
-//     host handed them both the string — matching them is arithmetic over a declared universe, not the
-//     entity-resolution JUDGMENT the canonicalization record exists to keep visible. So Compare runs ONE blind round with no
-//     canonicalizer, no confirmation round and no partition revision. Bolting canonicalization onto it
-//     would not make it safer; it would manufacture a contestable judgment where none exists.
-//   - the CELL is the unit of evidence. Every explorer answers the same options×criteria grid, so a
-//     disagreement between two explorers about one cell is a genuine, directly comparable disagreement —
-//     which is why the host surfaces it PER CELL and never averages it into a single "score".
-//
-// Two properties of the criterion vocabulary are load-bearing:
-//
-//   - DIRECTION is declared, never inferred. A criterion says whether a higher or a lower value is better,
-//     because the host's Pareto dominance is computed under it. A model asked to "score" latency cannot be
-//     relied on to know which way the scale runs, and a silently inverted axis inverts the frontier.
-//   - ROLE separates a GATE from an AXIS. A `filter` criterion is pass/fail and excludes an option BEFORE
-//     dominance is computed (an option that fails a hard requirement is not a trade-off, it is out); a
-//     `dimension` is scored and participates in the frontier. Collapsing the two would let a hard
-//     requirement be traded away against a soft one.
+// The user declares the options and criteria up front, so every explorer fills in the same
+// options×criteria grid and each cell can be compared directly. Each criterion declares a direction
+// (whether higher or lower is better), since Pareto dominance depends on it. Its role is either a scored
+// dimension or a pass/fail filter applied before dominance.
 
 import (
 	"encoding/json"
@@ -31,19 +14,19 @@ import (
 	"strings"
 )
 
-// Direction is a criterion's SCALE ORIENTATION — which end of the value range is better. It is
-// declared by the user with the criterion and consumed by the HOST's Pareto rule; no model ever decides it.
+// Direction states which end of a criterion's scale is better.
 type Direction string
 
+// Directions a criterion may declare.
 const (
 	HigherIsBetter Direction = "higher_is_better"
 	LowerIsBetter  Direction = "lower_is_better"
 )
 
-// Valid reports whether the direction is one of the two declared orientations.
+// Valid reports whether d is HigherIsBetter or LowerIsBetter.
 func (d Direction) Valid() bool { return d == HigherIsBetter || d == LowerIsBetter }
 
-// Better reports whether value a is STRICTLY better than b under this direction.
+// Better reports whether a is strictly better than b under d.
 func (d Direction) Better(a, b float64) bool {
 	if d == LowerIsBetter {
 		return a < b
@@ -51,7 +34,7 @@ func (d Direction) Better(a, b float64) bool {
 	return a > b
 }
 
-// AtLeastAsGood reports whether value a is at least as good as b under this direction.
+// AtLeastAsGood reports whether a is at least as good as b under d.
 func (d Direction) AtLeastAsGood(a, b float64) bool {
 	if d == LowerIsBetter {
 		return a <= b
@@ -59,33 +42,27 @@ func (d Direction) AtLeastAsGood(a, b float64) bool {
 	return a >= b
 }
 
-// CriterionRole is a declared criterion's ROLE: a scored trade-off axis, or a hard pass/fail gate.
+// CriterionRole is whether a criterion is scored or a pass/fail gate.
 type CriterionRole string
 
 const (
-	// RoleDimension is a SCORED axis: it carries a numeric value per option and participates in the host's
-	// Pareto dominance under the criterion's direction.
+	// RoleDimension is a scored criterion that takes part in Pareto dominance.
 	RoleDimension CriterionRole = "dimension"
-	// RoleFilter is a GATE: pass/fail per option, applied BEFORE dominance. An option that fails a filter is
-	// EXCLUDED from the frontier rather than traded off against it — that is what makes it a requirement.
+	// RoleFilter is a pass/fail criterion. Options that fail it are excluded before dominance is computed.
 	RoleFilter CriterionRole = "filter"
 )
 
-// CompareCriterion is ONE declared evaluation criterion: its name, the direction
-// its scale runs in, its role, and an OPTIONAL user-supplied weight. The weight is the ONLY thing that can
-// license a scalar ranking — absent it the host emits the Pareto/trade-off view and says why (a single
-// number over several criteria is a weighting, and a weighting nobody declared is one the host invented).
+// CompareCriterion is one declared Compare criterion. A scalar ranking is produced only when every scored
+// criterion has a weight.
 type CompareCriterion struct {
 	Name      string        `json:"name"`
 	Direction Direction     `json:"direction,omitempty"`
 	Role      CriterionRole `json:"role,omitempty"`
-	// Weight is the user's declared relative weight for a scored dimension (0 = none declared).
+	// Weight is the relative weight of a scored criterion; 0 means none was declared.
 	Weight float64 `json:"weight,omitempty"`
 }
 
-// EffectiveRole returns the criterion's role, defaulting an unset role to RoleDimension — the common case
-// (a criterion is an axis unless the user says it is a gate). A gate must be declared explicitly: silently
-// promoting an axis to a requirement would exclude options the user never asked to exclude.
+// EffectiveRole returns the criterion's role. Anything other than RoleFilter is treated as RoleDimension.
 func (c CompareCriterion) EffectiveRole() CriterionRole {
 	if c.Role == RoleFilter {
 		return RoleFilter
@@ -93,8 +70,7 @@ func (c CompareCriterion) EffectiveRole() CriterionRole {
 	return RoleDimension
 }
 
-// Validate checks one declared criterion is usable. A DIMENSION must declare its direction (the host's
-// dominance rule reads it); a FILTER need not, because pass/fail has no scale.
+// Validate checks the criterion. A scored dimension must declare a direction; a filter need not.
 func (c CompareCriterion) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("compare criterion: empty name")
@@ -117,10 +93,8 @@ func (c CompareCriterion) Validate() error {
 	return nil
 }
 
-// ValidateCompareTask checks the DECLARED comparison space is usable BEFORE any spend: a
-// non-empty option set with no duplicates, and a non-empty, individually valid criterion set with no
-// duplicates. It is the mode's ValidateTask, so every surface rejects a malformed declaration with one
-// message and a panel is never paid for a comparison that has nothing to compare.
+// ValidateCompareTask is Compare's ValidateTask. It requires at least two distinct options and a set of
+// valid, distinct criteria that includes a scored dimension.
 func ValidateCompareTask(raw RawTask) error {
 	opts := NonBlank(raw.Options)
 	if len(opts) < 2 {
@@ -156,9 +130,7 @@ func ValidateCompareTask(raw RawTask) error {
 	return nil
 }
 
-// NonBlank returns the entries of s that are non-empty after trimming, trimmed. It is the one place the
-// surfaces and the host agree on what "declared" means, so a stray blank in a CSV flag can never become an
-// option named "".
+// NonBlank returns the trimmed, non-empty entries of s.
 func NonBlank(s []string) []string {
 	out := make([]string, 0, len(s))
 	for _, v := range s {
@@ -169,24 +141,19 @@ func NonBlank(s []string) []string {
 	return out
 }
 
-// --- the blind round-1 explorer contract ---
-
-// FilterVerdict is the CLOSED pass/fail vocabulary an explorer answers a `filter` criterion with. It is
-// closed for the same reason Challenge's severity enum is: the host's gate rule reads it, and an
-// unrecognized value must be recorded as unrecognized rather than guessed at.
+// FilterVerdict is an explorer's answer for a filter criterion.
 type FilterVerdict string
 
+// Filter verdicts.
 const (
 	VerdictPass FilterVerdict = "pass"
 	VerdictFail FilterVerdict = "fail"
-	// VerdictUnknown is the HOST normalization of a filter answer outside the enum (or a missing one) — a
-	// real value, because "the explorer gave no verdict we recognize" is different from "the explorer said
-	// this option fails".
+	// VerdictUnknown marks a missing or unrecognized answer, which is distinct from fail.
 	VerdictUnknown FilterVerdict = "unknown"
 )
 
-// NormalizeVerdict maps a model-supplied filter answer onto the closed enum. A JSON boolean is accepted
-// (true = pass) because it is an unambiguous statement of the same thing; anything else is `unknown`.
+// NormalizeVerdict converts a model's filter answer to a FilterVerdict. It accepts "pass", "fail" and JSON
+// booleans; anything else is VerdictUnknown.
 func NormalizeVerdict(v any) FilterVerdict {
 	switch t := v.(type) {
 	case bool:
@@ -205,11 +172,8 @@ func NormalizeVerdict(v any) FilterVerdict {
 	return VerdictUnknown
 }
 
-// compareExplorerFields is the Compare mode's FIXED round-1 explorer schema. `evaluations` is a repeated
-// OBJECT because a cell is a record — flattening it into parallel arrays would make the option↔criterion↔
-// value pairing an inference. `optionsEvaluated` is the explorer's explicit COVERAGE declaration over the
-// DECLARED option universe: it is the field the fixed-space degraded register is keyed on (a real host
-// register is honest here precisely because the key universe was given to the explorers).
+// compareExplorerFields is the Compare round-1 explorer schema. Each evaluation is one cell object;
+// optionsEvaluated lists the options covered and keys the degraded register.
 var compareExplorerFields = []Field{
 	{Name: "evaluations", Type: TypeObject, Required: true, Repeated: true},
 	{Name: "optionsEvaluated", Type: TypeString, Required: true, Repeated: true},
@@ -217,29 +181,22 @@ var compareExplorerFields = []Field{
 	{Name: "notes", Type: TypeString, Required: false, Repeated: false},
 }
 
-// CompareExplorerSchema returns a fresh copy of the Compare round-1 explorer schema (the copy-per-call
-// contract MinimumSchema establishes).
+// CompareExplorerSchema returns a new copy of the Compare round-1 explorer schema.
 func CompareExplorerSchema() Schema {
 	fields := make([]Field, len(compareExplorerFields))
 	copy(fields, compareExplorerFields)
 	return Schema{Fields: fields}
 }
 
-// Prompt markers for the machine-readable declarations. They are constants so the exact bytes are
-// assertable and a deterministic fake can recover the same declared space a real model is shown.
+// Markers that introduce the JSON declarations in the Compare prompt. The fake model parses them.
 const (
 	CompareOptionSetMarker = "declared option set (JSON):\n"
 	CompareCriteriaMarker  = "declared criteria (JSON):\n"
 )
 
-// CompareExplorerPrompt is the deterministic, app-owned round-1 prompt: evaluate the GIVEN options against
-// the GIVEN criteria. Both declarations are rendered twice — once for a human reader and once as an
-// explicit JSON block — because the grid is the contract: an explorer that invents an option or renames a
-// criterion produces a cell the host cannot place, and the host records that as unrecognized rather than
-// quietly re-attaching it to something (which would be the entity resolution this mode exists without).
-//
-// The instruction about direction is not decoration. The host applies the declared direction itself, so an
-// explorer that "helpfully" inverts a lower-is-better score would invert the frontier.
+// CompareExplorerPrompt builds the Compare round-1 prompt. The options and criteria appear both as lists
+// and as JSON blocks, and the prompt asks for raw values because the host applies each criterion's
+// direction itself.
 func CompareExplorerPrompt(raw RawTask) string {
 	opts := NonBlank(raw.Options)
 	var b strings.Builder
@@ -300,7 +257,7 @@ func CompareExplorerPrompt(raw RawTask) string {
 	return b.String()
 }
 
-// directionPhrase renders a scored criterion's direction as the sentence an evaluator reads.
+// directionPhrase describes d for the prompt.
 func directionPhrase(d Direction) string {
 	if d == LowerIsBetter {
 		return "a LOWER value is better"
@@ -308,10 +265,8 @@ func directionPhrase(d Direction) string {
 	return "a HIGHER value is better"
 }
 
-// criterionWire is the per-criterion shape rendered into the prompt's machine-readable block: the fields a
-// reader (or a deterministic fake) needs to reproduce the declared grid, and nothing else. The user's WEIGHT
-// is deliberately absent — an evaluator that knew which criterion the requester cares about most has been
-// told which answer would please them.
+// criterionWire is one criterion in the prompt's JSON block. Weight is left out so evaluators cannot tell
+// which criterion the requester values most.
 type criterionWire struct {
 	Name      string        `json:"name"`
 	Direction Direction     `json:"direction,omitempty"`
@@ -330,8 +285,7 @@ func criteriaWire(cs []CompareCriterion) []criterionWire {
 	return out
 }
 
-// mustJSON renders a value as compact JSON for a prompt block. The inputs here are plain strings/structs,
-// so marshaling cannot realistically fail; an empty array is safer than a half-rendered block.
+// mustJSON returns v as compact JSON, or "[]" if marshaling fails.
 func mustJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -340,29 +294,23 @@ func mustJSON(v any) string {
 	return string(b)
 }
 
-// CompareEvaluation is ONE cell an explorer reported, lifted out of a validated response by
-// ParseEvaluations. It is a mechanical projection: the host normalizes a filter verdict and reads a numeric
-// score, and does nothing else — it does not match the names to the declared universe (that is the caller's
-// job, over the DECLARED set) and it never repairs, rounds or rescales a value.
+// CompareEvaluation is one cell from an explorer's response. Names are not matched against the declared
+// options or criteria here.
 type CompareEvaluation struct {
 	Option    string `json:"option"`
 	Criterion string `json:"criterion"`
-	// Value is the raw value exactly as the explorer wrote it, retained verbatim for the record even when
-	// the host could read a number out of it.
+	// Value is the value as the explorer wrote it.
 	Value string `json:"value"`
-	// Score / HasScore carry the numeric reading for a scored dimension. HasScore is false when the value
-	// was not a number — the host then has no cell value, and says so, rather than coercing one.
+	// Score is the numeric value; HasScore is false when Value is not a number.
 	Score    float64 `json:"score,omitempty"`
 	HasScore bool    `json:"hasScore,omitempty"`
-	// Verdict is the normalized gate answer for a filter criterion (`unknown` when unrecognized).
+	// Verdict is the normalized filter answer.
 	Verdict   FilterVerdict `json:"verdict,omitempty"`
 	Rationale string        `json:"rationale,omitempty"`
 }
 
-// ParseEvaluations lifts the typed cell evaluations out of ONE validated round-1 response. Entries with no
-// option or no criterion are skipped (there is no cell to attach them to); everything else is carried,
-// including a value the host could not read as a number — an unreadable value is evidence about the panel
-// and is reported, not dropped.
+// ParseEvaluations returns the evaluations in a validated round-1 response. Entries missing an option or
+// criterion are skipped; non-numeric values are kept.
 func ParseEvaluations(response map[string]any) []CompareEvaluation {
 	raw, _ := response["evaluations"].([]any)
 	out := make([]CompareEvaluation, 0, len(raw))
@@ -389,9 +337,8 @@ func ParseEvaluations(response map[string]any) []CompareEvaluation {
 	return out
 }
 
-// numericValue reads a JSON value as a number. A JSON number is taken directly; a STRING that parses
-// cleanly as a number is accepted too (a model that wrote "12.5" said 12.5), and anything else yields
-// ok=false — the host does not extract digits out of prose, because "about 12, maybe more" is not 12.
+// numericValue returns v as a number if it is a JSON number or a string that parses entirely as one. Numbers
+// are never extracted from surrounding prose.
 func numericValue(v any) (float64, bool) {
 	switch t := v.(type) {
 	case float64:
@@ -410,9 +357,7 @@ func numericValue(v any) (float64, bool) {
 	return 0, false
 }
 
-// ParseMissingEvidence lifts an explorer's explicit "I could not judge this" statements out of a validated
-// response. They are a first-class part of the terminal output: a cell nobody could judge and a cell
-// everybody scored the same must never look alike.
+// ParseMissingEvidence returns the non-empty missingEvidence entries in a validated response.
 func ParseMissingEvidence(response map[string]any) []string {
 	raw, _ := response["missingEvidence"].([]any)
 	out := make([]string, 0, len(raw))

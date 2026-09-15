@@ -1,57 +1,14 @@
 package run
 
-// FROM-RUN REMEDIATION — applying an ALREADY-ADJUDICATED decision set.
+// Remediate applies an already-adjudicated decision set from an earlier report run, with no reviewers
+// and no re-adjudication, so exactly the set that was inspected is written (see docs/mcp.md). All
+// writing goes through governedWrite, which reconciles decisions by finding id, binds the workspace by
+// identity, checks base hashes before the write window and again inside the commit, journals durably
+// before the first edit, stages each finding all-or-nothing, and always persists a receipt.
 //
-// `RunContext` runs the whole governed cycle and, in patch/apply mode, writes at the end of it.
-// This file is the OTHER half of the two-phase remediation design (see docs/mcp.md, the
-// `review_remediate` double opt-in): a prior REPORT run paid for the panel and the host adjudication, its accepted
-// set exists as an inspectable artifact, and this path applies exactly that set — no reviewers, no
-// re-adjudication, no second opinion that could differ from the one the human read.
-//
-// Six properties make that safe, and all six live here rather than in a surface:
-//
-//  1. THE DECISION SET IS RECONCILED BY IDENTITY. Findings and decisions are paired by finding ID,
-//     not by array position, and a set that does not reconcile (different lengths, a duplicate or
-//     empty id, a decision bound to a different finding) is a halt. Positional pairing silently
-//     authorizes the wrong finding for any record that was reordered, truncated or migrated.
-//  2. THE WORKSPACE IS BOUND BY IDENTITY, not by pathname. The reviewed root's device+inode and
-//     canonical path are captured by the run that produced the decision set and must still name the
-//     same object here. A path is not a repository: re-pointing it at a different tree whose
-//     targeted files happen to hash the same would otherwise pass every other check.
-//  3. STALENESS IS ENFORCED — TWICE. The base hashes captured when the decision set was produced are
-//     re-verified against the live workspace before anything is written, AND each destination's
-//     content is re-verified against the same pin inside the commit window, immediately before it is
-//     replaced. The first check is cheap and catches the ordinary case; the second is what survives
-//     the minutes a model call can take (see workspace.CommitExpecting for the residue that no
-//     lock-free design can close).
-//  4. THE WRITE WINDOW IS JOURNALED, DURABLY, FIRST. Every intended hunk — including a digest of its
-//     replacement text and a digest of the whole intent — is computed and PERSISTED (fsynced) before
-//     the first edit is applied. A journal that cannot be written is a HALT: the promise is
-//     "journal before write", so a write with no journal must be unreachable rather than merely
-//     unlikely. Cancellation is honored only at the window's boundaries; once the commit is entered
-//     it is uncancellable BY CONSTRUCTION (see writeWindow), so "cancelled" and "wrote something"
-//     are mutually exclusive answers.
-//  5. AN APPLIED FINDING IS ALL-OR-NOTHING. A finding's hunks are staged: if any hunk fails, the
-//     finding's earlier hunks are rolled back out of the copy, so a finding the receipt reports as
-//     NOT applied has nothing of it in the committed bytes.
-//  6. THE RECEIPT ALWAYS EXISTS, AND IT REPORTS THE COMMITTED REALITY. It is written to the run
-//     directory on every path — success, halt, cancellation, nothing-to-do — and its applied set,
-//     its file list and its `committed` flag are derived ONLY from a commit that actually succeeded.
-//     A receipt that could not be persisted is a terminal failure of the run: an unrecorded write is
-//     worse than a refused one.
-//
-// The write-layer rules are unchanged and are not re-implemented: the same `scope.Resolver` guard,
-// the same protected-path denylist, the same isolated copy, the same commit. This path can only
-// write LESS than a full cycle would (it never re-derives an accepted finding), never more.
-//
-// WHAT REMAINS UNPROTECTED, stated plainly. There is no exclusive lock on the workspace, and this
-// path does not pretend to take one. Two things follow. (a) A writer that lands inside the few
-// syscalls between the commit's content re-verification and its create is neither prevented nor
-// detected. (b) A crash between the commit and the receipt leaves the tree written and the receipt
-// absent; the run directory is made reconcilable for exactly that case — `remediation/journal.json`
-// says what was intended and `remediation/commit-attempt.json` (fsynced before the first live write)
-// says the commit was entered, so a run directory with an attempt and no receipt is the signature of
-// an interrupted write window rather than an ambiguity.
+// There is no exclusive workspace lock. A writer landing between the commit's final content check and
+// its replace is not detected, and a crash between commit and receipt leaves remediation/journal.json
+// and remediation/commit-attempt.json without a receipt, which identifies an interrupted write window.
 
 import (
 	"context"
@@ -76,10 +33,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// Stable MACHINE reason codes for the from-run remediation path (lower_snake, never sentences).
+// Reason codes for the fromRun remediation path.
 const (
 	// ReasonStaleDecisionSet — a file the decision set targets changed between the report run and
-	// this apply. The decisions describe a workspace that no longer exists.
+	// this apply, so the decisions describe a different workspace.
 	ReasonStaleDecisionSet = "stale_decision_set"
 	// ReasonRemediateModeInvalid — the requested output mode is not patch/apply.
 	ReasonRemediateModeInvalid = "remediate_mode_invalid"
@@ -113,25 +70,19 @@ const (
 	// ReasonDiffFailed — the copy could not be diffed against the live tree, so what would be
 	// committed is not knowable.
 	ReasonDiffFailed = "remediation_diff_failed"
-	// ReasonStageRollbackFailed — a finding's partially-applied hunks could not be rolled back out
-	// of the copy, so the copy no longer matches any recorded intent.
+	// ReasonStageRollbackFailed — a finding's partially applied hunks could not be rolled back out
+	// of the copy, so the copy matches no recorded intent.
 	ReasonStageRollbackFailed = "remediation_stage_rollback_failed"
 	// ReasonApplyCommitFailed — the commit to the live workspace failed (and was rolled back).
 	ReasonApplyCommitFailed = "apply_commit_failed"
 )
 
 // BaseHashAbsent is the recorded digest of a file that did not exist when the decision set was
-// captured. It is a VALUE rather than an omission so that "this file appeared after the review"
-// is a mismatch like any other, instead of an untracked key.
-//
-// It is meshcore's pin sentinel by DEFINITION, not by coincidence: the same map is handed to
-// workspace.CommitExpecting, so the two layers cannot drift into disagreeing about what "absent"
-// spells.
+// captured, so a file that appears later is a mismatch. It is meshcore's pin sentinel, shared with
+// workspace.CommitExpecting.
 const BaseHashAbsent = workspace.ContentAbsent
 
-// IntendedHunk is one entry of the write journal: an edit that is ABOUT to be attempted. It is
-// recorded before any write, so the journal is a statement of intent that cannot be retro-fitted
-// to whatever happened to succeed.
+// IntendedHunk is one write-journal entry: an edit about to be attempted, recorded before any write.
 type IntendedHunk struct {
 	FindingID string `json:"findingId"`
 	File      string `json:"file"`
@@ -142,11 +93,8 @@ type IntendedHunk struct {
 	// anchored fix) or "marker" (the deterministic engine fallback).
 	Bytes  int    `json:"bytes"`
 	Origin string `json:"origin"`
-	// ReplacementSHA256 is the digest of the replacement text AS PROPOSED (before the line-ending
-	// adaptation the copy write applies). A byte COUNT does not identify a replacement — every
-	// string of that length shares it — so without this the journal cannot answer "what was this
-	// call about to write", only "how much of it". The text itself is deliberately not recorded:
-	// the journal is an audit record, not a second copy of the patch.
+	// ReplacementSHA256 is the digest of the replacement text as proposed, before line-ending
+	// adaptation. The journal records the digest, not the text.
 	ReplacementSHA256 string `json:"replacementSha256"`
 }
 
@@ -157,24 +105,20 @@ type Journal struct {
 	SourceRunID   string         `json:"sourceRunId,omitempty"`
 	Mode          string         `json:"mode"`
 	Hunks         []IntendedHunk `json:"hunks"`
-	// IntentSHA256 is a canonical digest over the WHOLE ordered hunk list. One value identifies
-	// the complete intent, so a receipt and a journal can be tied together, and a journal that was
-	// edited after the fact does not match the receipt that quotes it.
+	// IntentSHA256 is a digest over the whole ordered hunk list; the receipt repeats it to tie the
+	// two together.
 	IntentSHA256 string `json:"intentSha256"`
 }
 
-// hunkDigest is the digest format used for a replacement (meshcore's pin format, so one spelling
-// of "sha256:<hex>" is used everywhere in this repo's write path).
+// hunkDigest returns a replacement's digest in meshcore's sha256:<hex> pin format.
 func hunkDigest(s string) string { return workspace.ContentPin([]byte(s)) }
 
-// intentDigest is the canonical whole-intent digest: each hunk's JSON encoding, length-prefixed so
-// no concatenation of two hunks can be mistaken for a different pair, hashed in order. Order is
-// part of the intent — the same hunks applied in a different order are a different write.
+// intentDigest hashes each hunk's length-prefixed JSON encoding in order; order is part of the intent.
 func intentDigest(hs []IntendedHunk) string {
 	h := sha256.New()
 	for _, k := range hs {
-		// IntendedHunk is basic types only, so Marshal cannot fail; the error is checked anyway so
-		// a future field that CAN fail does not silently produce a digest over nothing.
+		// Marshal cannot fail for these fields; the fallback keeps a future field from producing a
+		// digest over nothing.
 		b, err := json.Marshal(k)
 		if err != nil {
 			b = []byte(fmt.Sprintf("unencodable:%+v", k))
@@ -191,12 +135,12 @@ type AppliedFinding struct {
 	File      string `json:"file,omitempty"`
 	// State is the finding's terminal decision state (applied | reported_valid | skipped).
 	State string `json:"state"`
-	// Reason is the stable machine code when the finding was NOT applied.
+	// Reason is the reason code when the finding was not applied.
 	Reason string `json:"reason,omitempty"`
 }
 
-// Receipt is the durable answer to "what did this call actually write". It is persisted to the run
-// directory on EVERY path — including a cancelled call, which gets no response to carry it.
+// Receipt is the durable record of what a call wrote, persisted on every path including
+// cancellation.
 type Receipt struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	RunID         string `json:"runId"`
@@ -211,28 +155,20 @@ type Receipt struct {
 	Applied            []AppliedFinding `json:"applied"`
 	NotApplied         []AppliedFinding `json:"notApplied"`
 	Files              []string         `json:"files"`
-	// IntentSHA256 is the journal's whole-intent digest, repeated here so the receipt and the
-	// journal are tied by value rather than by both merely existing in the same directory.
+	// IntentSHA256 repeats the journal's whole-intent digest, tying receipt and journal by value.
 	IntentSHA256 string `json:"intentSha256,omitempty"`
-	// PatchArtifact is the run-directory-relative patch path ("" when nothing changed), and
-	// PatchSHA256 its digest — a link plus a hash, never inline content.
+	// PatchArtifact is the run-relative patch path (empty when nothing changed), and PatchSHA256 its
+	// digest.
 	PatchArtifact string `json:"patchArtifact,omitempty"`
 	PatchSHA256   string `json:"patchSha256,omitempty"`
-	// CommitAttempted reports whether the LIVE commit was entered. It is the difference between
-	// "nothing was tried" and "something was tried and rolled back or interrupted", which
-	// `Committed` alone cannot express — and it is what makes an interrupted run reconcilable
-	// against the fsynced `remediation/commit-attempt.json` marker.
+	// CommitAttempted reports whether the live commit was entered, distinguishing a rolled-back or
+	// interrupted attempt from no attempt. It pairs with remediation/commit-attempt.json.
 	CommitAttempted bool `json:"commitAttempted"`
-	// Committed reports whether the LIVE commit completed successfully. It is derived ONLY from a
-	// commit that returned success: false for patch mode by construction, false for every
-	// cancelled call, and false for a commit that failed and rolled back. WHAT it wrote is Files —
-	// a successful commit with an empty Files wrote nothing because nothing differed, which is a
-	// different fact from not having committed at all.
+	// Committed reports whether the live commit succeeded: false in patch mode, on cancellation and
+	// on rollback. Files lists what it wrote, which is empty when nothing differed.
 	Committed bool `json:"committed"`
-	// Selection is the narrowing selection this window was given, if any. It rides the
-	// DURABLE receipt for the same reason `outcome` and `refused` do: a caller whose response was
-	// cancelled must still be able to answer "which findings did I ask for, and did any selector
-	// name nothing" from the run directory alone.
+	// Selection is the narrowing selection this window was given, recorded so it can be read from
+	// the run directory even if the response was lost.
 	Selection *review.ApplySelection `json:"selection,omitempty"`
 }
 
@@ -240,67 +176,49 @@ type Receipt struct {
 type RemediateRequest struct {
 	// Workspace is the live workspace the accepted findings were adjudicated against.
 	Workspace string
-	// WorkspaceIdentity is that root's CANONICAL IDENTITY as the run which produced the decision
-	// set captured it. A pathname is not a repository: without this, the same string can be made
-	// to name a different tree between the review and the apply. It is REQUIRED — an unbound
-	// request halts rather than trusting the string.
+	// WorkspaceIdentity is the root's canonical identity as captured by the report run. It is
+	// required; an unbound request halts.
 	WorkspaceIdentity WorkspaceIdentity
-	// Mode must be ModePatch or ModeApply. ModeReport has nothing to remediate.
+	// Mode must be ModePatch or ModeApply.
 	Mode    review.Mode
 	Surface string
 	Profile string
-	// ReviewerPanel is carried only so the plan resolves to the SAME configuration the report run
-	// used (it selects the author_remediator lane); no reviewer seat is executed on this path.
+	// ReviewerPanel is carried only so the plan resolves the report run's author_remediator lane; no
+	// reviewer seat runs.
 	ReviewerPanel []review.SeatSpec
-	// ComposedRoles are the source run's call-composed role seats, carried for the same reason as
-	// ReviewerPanel (see Request.ComposedRoles).
+	// ComposedRoles are the source run's composed role seats, carried for the same reason.
 	ComposedRoles map[review.Role]review.SeatSpec
-	// TrustedRoots are the out-of-band trusted roots of an agent surface (see Request.TrustedRoots).
-	// They are ENFORCED here, not merely carried: the workspace must resolve inside them before a
-	// copy is made. A surface whose caller is not a human establishes its roots at launch, and a
-	// decision set that travelled from another surface (or a registry entry that outlived a root
-	// change) must not be able to write outside the set in force NOW.
+	// TrustedRoots are an agent surface's roots (see Request.TrustedRoots); the workspace must resolve
+	// inside the roots in force at apply time.
 	TrustedRoots []string
 	// SourceRunID identifies the report run whose decision set this applies.
 	SourceRunID string
-	// Findings / Decisions are the ALREADY-ADJUDICATED set, aligned by index exactly as
-	// RunOutcome carries them. Nothing here is re-judged.
+	// Findings and Decisions are the adjudicated set, index-aligned as in RunOutcome; nothing is
+	// re-judged.
 	Findings  []review.Finding
 	Decisions []review.Decision
-	// Select, when non-nil, NARROWS the accepted set to the findings whose HOST-COMPUTED
-	// fingerprint it names. nil applies the whole accepted set; an EMPTY non-nil slice is a
-	// refusal, never a fallback to "everything". See writeRequest.Select — this is carried straight
-	// through to the one governed write path, unexamined here, so the rule has one implementation.
+	// Select narrows the accepted set by host-computed fingerprint; see writeRequest.Select.
 	Select []string
-	// Shown is the set of workspace-relative files the reviewers were actually shown. It gates the
-	// write exactly as it does in a full cycle: a finding about a file no reviewer saw is never
-	// applied.
+	// Shown is the set of files reviewers were shown; a finding about any other file is never applied.
 	Shown map[string]bool
-	// BaseHashes is path → digest as captured when the decision set was produced (see BaseHashes).
+	// BaseHashes maps each path to its digest as captured with the decision set.
 	BaseHashes map[string]string
-	// OnJournal, when set, receives the write journal at the moment it is durable and BEFORE the
-	// first edit is applied. It must not block or panic.
+	// OnJournal, when set, receives the journal once it is durable and before the first edit. It must
+	// not block or panic.
 	OnJournal func(Journal)
-	// VerifyCommands / VerifyTimeout are the operator's own build/test commands, run on the
-	// containment copy before and after the accepted set is applied to it, and RECORDED. Empty means
-	// nothing is executed. See verify.go — in particular, why the second pass runs after the commit.
+	// VerifyCommands and VerifyTimeout are the operator's build/test commands, run on the containment
+	// copy before and after the edits and recorded. See verify.go.
 	VerifyCommands []string
 	VerifyTimeout  time.Duration
-	// AllowProtectedPaths waives the protected-config half of containment (root admission + the
-	// write denylist), never the secret family. See Request.AllowProtectedPaths. It matters on
-	// THIS path too: a from-run apply replays a decision set whose report run had the waiver, and
-	// an apply without it would refuse every destination the report was allowed to propose.
+	// AllowProtectedPaths waives the protected-config half of containment, never secrets; see
+	// Request.AllowProtectedPaths. A fromRun apply needs it whenever its report run had it.
 	AllowProtectedPaths bool
 	OnEvent             func(audit.EventLine)
-	// Trace is the caller's W3C trace context, when the surface that accepted the request carried
-	// one. It is the trace of the APPLY turn, deliberately not inherited from the report run: the
-	// two are separate requests and a host that traced them separately must be able to see that.
-	// nil records nothing. See review.Trace.
+	// Trace is the apply turn's own W3C trace context, not the report run's; nil records nothing.
 	Trace *review.Trace
 }
 
-// RemediateOutcome is the result of a from-run remediation. It is populated on every path,
-// including a halt, so a caller always has the receipt.
+// RemediateOutcome is the result of a fromRun remediation, populated on every path including a halt.
 type RemediateOutcome struct {
 	RunID       string
 	RunDir      string
@@ -310,40 +228,30 @@ type RemediateOutcome struct {
 	Receipt     Receipt
 	Cancelled   bool
 	Withheld    []review.WithheldFile
-	// Selection is what a narrowing `select` did — requested, matched, unmatched. nil when
-	// no selection was supplied. Populated on every path, refusals included, so a caller learns
-	// which of its selectors named nothing even when the call refused for naming nothing at all.
+	// Selection is what a narrowing select did; nil when none was supplied. It is set on refusals too.
 	Selection *review.ApplySelection
-	// Refusals lists the findings refused because their target is a PROTECTED PATH. Nothing was
-	// written to any of them (the denylist is non-overridable), every other accepted finding was
-	// applied, and the non-emptiness of this slice is what makes the call answer `isError: true`
-	// with `outcome: "partial_refusal"` rather than reading as a clean success.
+	// Refusals lists findings refused because they target a protected path; nothing was written to
+	// them. A non-empty list makes the call a partial refusal.
 	Refusals []review.ApplyRefusal
-	// Verification is what the operator's own build/test commands did on the containment copy,
-	// before and after this remediation's edits. nil when none were supplied. It is a RECORD:
-	// nothing here branches on it, and a red result blocked nothing.
+	// Verification is what the operator's commands did before and after the edits; nil when none were
+	// supplied. Nothing branches on it.
 	Verification *review.VerificationReport
 }
 
-// Applied is how many findings this remediation put into the live tree (apply) or the produced
-// diff (patch). It reads the receipt rather than keeping a second counter: the receipt is the
-// durable answer, and a count derived anywhere else could disagree with it.
+// Applied is how many findings reached the live tree (apply) or the diff (patch), counted from the
+// receipt.
 func (o RemediateOutcome) Applied() int { return len(o.Receipt.Applied) }
 
 // Refused is how many findings were refused for a protected path.
 func (o RemediateOutcome) Refused() int { return len(o.Refusals) }
 
-// Outcome is the write-outcome discriminator for this remediation — the same derivation every
-// surface uses (review.ApplyOutcome), so MCP, ACP and the CLI cannot spell the same run
-// differently.
+// Outcome is the write-outcome discriminator, derived by review.ApplyOutcome as on every surface.
 func (o RemediateOutcome) Outcome() string {
 	return review.ApplyOutcome(o.Applied(), o.Refused())
 }
 
-// BaseHashes digests the given workspace-relative files as they exist NOW, reading each through an
-// identity-bound handle on the workspace root (never by re-opening a path string). A file that
-// cannot be read is recorded as BaseHashAbsent rather than skipped: an unreadable file at capture
-// time and a readable one at apply time is precisely the change the pin exists to catch.
+// BaseHashes digests the given workspace-relative files as they currently exist, reading through rootfile.
+// An unreadable file is recorded as BaseHashAbsent, so becoming readable later counts as a change.
 func BaseHashes(workspaceRoot string, rels []string) map[string]string {
 	out := make(map[string]string, len(rels))
 	for _, rel := range rels {
@@ -384,15 +292,9 @@ func StaleBaseHashes(workspaceRoot string, want map[string]string) []string {
 	return stale
 }
 
-// AcceptedForApply reports whether an already-adjudicated decision is part of the ACCEPTED set a
-// from-run remediation may write.
-//
-// It is deliberately narrow. A report run finalizes every actionable finding as
-// `reported_valid` — that state IS the accepted set, and it is the only one this path acts on.
-// Everything else (invalid, skipped, already-addressed, withheld, upstream-conflicted) was decided
-// against, and a finding the WRITE-PATH RULE refused (authority-only support, no workspace
-// evidence, weak-identity-only support) stays refused here: the refusal was computed once, by the
-// host, over the run that produced it.
+// AcceptedForApply reports whether a decision is in the accepted set a fromRun remediation may write:
+// valid, not refused by the write-path rule, and reported_valid, the state report mode gives every
+// actionable finding.
 func AcceptedForApply(d review.Decision) bool {
 	if !d.Valid || d.ApplyRefusalReason != "" {
 		return false
@@ -405,37 +307,26 @@ func AcceptedForApply(d review.Decision) bool {
 
 // --- workspace identity ---
 
-// WorkspaceIdentity is a reviewed workspace root's identity, captured by the run that produced a
-// decision set and re-verified by the run that applies it.
-//
-// The stored workspace on a decision set is a STRING, and a string is not a repository. Point it at
-// a different checkout whose targeted files happen to carry the same bytes and every other check
-// passes: the base hashes match (same content), `scope.New` then authorizes the substitute as its
-// own root, and the accepted set is written into a tree no one reviewed. Binding the root by
-// device+inode AND by canonical path closes that: the same object, reached by the same resolved
-// name, or nothing is written.
+// WorkspaceIdentity is a reviewed root's identity, captured by the report run and re-verified before
+// applying. Binding by filesystem identity as well as canonical path stops a different tree with
+// identical target files from being written under the same path.
 type WorkspaceIdentity struct {
 	// Info is os.Stat's report for the root at capture time.
 	Info fs.FileInfo
-	// Key is the durable identity — device+inode on unix, volume serial + file index on Windows —
-	// resolved EAGERLY at capture time by rootIdentityKey. It is the authoritative comparison, and
-	// os.SameFile is not, because os.SameFile is not a point-in-time capture on every platform: on
-	// Windows os.Stat defers loading the file index to a lazy loadFileId that reopens BY PATH the
-	// first time SameFile is called, so comparing two captured FileInfos after a swap compares the
-	// substitute against itself and reports a match. Empty only when the platform could not express
-	// one, which is stated at every use rather than papered over.
+	// Key is the durable identity (device and inode on Unix, volume serial and file index on Windows),
+	// resolved eagerly by rootIdentityKey. It is compared instead of os.SameFile because on Windows
+	// SameFile lazily reopens by path and would compare a substitute against itself. It is empty when
+	// the platform cannot express one.
 	Key string
-	// Canonical is the symlink-resolved absolute path at capture time. It is carried alongside the
-	// inode because an inode is reused after a delete: matching both is what distinguishes "the
-	// same directory" from "a new directory that inherited its inode number".
+	// Canonical is the symlink-resolved absolute path at capture time; matching it as well as Key
+	// distinguishes the same directory from a new one that reused the inode.
 	Canonical string
 }
 
-// Bound reports whether an identity was actually captured.
+// Bound reports whether an identity was captured.
 func (w WorkspaceIdentity) Bound() bool { return w.Info != nil && w.Canonical != "" }
 
-// CaptureWorkspaceIdentity records a workspace root's identity. It is called by the surface that
-// completes a REPORT run, and its result travels with the decision set.
+// CaptureWorkspaceIdentity records a workspace root's identity.
 func CaptureWorkspaceIdentity(root string) (WorkspaceIdentity, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -452,12 +343,8 @@ func CaptureWorkspaceIdentity(root string) (WorkspaceIdentity, error) {
 	return WorkspaceIdentity{Info: fi, Key: rootIdentityKey(canon, fi), Canonical: canon}, nil
 }
 
-// verifyAgainst requires the live path to still name the captured object.
-//
-// The durable key is preferred over os.SameFile wherever both captures have one: os.SameFile is a
-// deferred, path-reopening comparison on Windows (see WorkspaceIdentity.Key), so it cannot detect
-// the substitution this check exists to refuse. SameFile remains the fallback for a platform that
-// cannot express a key, where it is still better than comparing pathnames alone.
+// verifyAgainst returns an error unless root still names the captured object. It compares durable keys
+// when both captures have one and falls back to os.SameFile (see WorkspaceIdentity.Key).
 func (w WorkspaceIdentity) verifyAgainst(root string) error {
 	now, err := CaptureWorkspaceIdentity(root)
 	if err != nil {
@@ -476,10 +363,8 @@ func (w WorkspaceIdentity) verifyAgainst(root string) error {
 	return nil
 }
 
-// foldPaths is true only on Windows, where the filesystem itself is case-insensitive. It is a VAR
-// so the Windows branch of the reviewed-root identity check can be exercised on any platform —
-// this repository does not gate on Windows, and a containment branch compiled everywhere but
-// executed nowhere is not a tested branch.
+// foldPaths is true on Windows, whose filesystems are case-insensitive. It is a variable so tests can
+// exercise the Windows branch on any platform.
 var foldPaths = runtime.GOOS == "windows"
 
 // sameCanonicalPath compares two canonical paths, folding case only on Windows.
@@ -493,31 +378,18 @@ func sameCanonicalPath(a, b string) bool {
 
 // --- decision-set reconciliation ---
 
-// acceptedTarget is one accepted finding together with the decision that accepted it, and its
-// position in the arrays it came from (so a per-finding call id is stable regardless of how many
-// earlier findings were refused).
+// acceptedTarget is one accepted finding, the decision that accepted it, and its original index, which
+// keeps per-finding call ids stable.
 type acceptedTarget struct {
 	finding  review.Finding
 	decision review.Decision
 	index    int
 }
 
-// reconcileDecisions pairs decisions to findings BY FINDING ID and returns the subset `accept`
-// authorizes.
-//
-// The wire form carries the two as parallel arrays, and pairing them by POSITION is an assumption
-// about an artifact that has travelled: through a registry, possibly through a schema migration,
-// possibly through a client that re-serialized it. A set that was reordered or truncated then
-// authorizes a DIFFERENT finding than the one a human read — silently, because every individual
-// value is still well-formed. So the alignment is verified rather than assumed, and a set that does
-// not reconcile is refused whole: there is no safe subset of a set whose bindings are unknown.
-//
-// The same check runs for a full cycle, where the arrays never left memory. That is not ceremony:
-// the ids are lane-supplied, and an id that repeats makes "which finding does this decision
-// authorize" unanswerable in exactly the same way — see uniqueFindingIDs, which is what a full
-// cycle runs BEFORE those ids are allowed to authorize a write.
-//
-// `accept` decides which reconciled pairs are writable; nothing here re-judges a decision.
+// reconcileDecisions pairs decisions to findings by finding id and returns the pairs accept
+// authorizes. Positional pairing would silently authorize the wrong finding if a stored set were
+// reordered or truncated, so a set that does not reconcile is refused whole. A full cycle runs it
+// too, after uniqueFindingIDs, because lane-supplied ids can repeat.
 func reconcileDecisions(findings []review.Finding, decisions []review.Decision, accept func(review.Decision) bool) ([]acceptedTarget, error) {
 	if len(findings) != len(decisions) {
 		return nil, fmt.Errorf("%d finding(s) but %d decision(s): the two arrays must correspond one-to-one",
@@ -546,19 +418,9 @@ func reconcileDecisions(findings []review.Finding, decisions []review.Decision, 
 	return accepted, nil
 }
 
-// uniqueFindingIDs makes every finding's id present and unique IN PLACE, and re-binds each
-// decision to the id its finding now carries.
-//
-// A full cycle's ids come from the lanes: two lanes can both call their first finding "F-001", and
-// the merge keeps both (it dedupes by fingerprint, not by id). Those ids then authorize writes,
-// where "which decision authorizes which finding" must have exactly one answer — so a collision is
-// resolved here, before the write path binds anything, rather than being tolerated by a weaker
-// binding rule.
-//
-// It is deliberately MINIMAL: an id that is already present and unique is left exactly as it was,
-// because a finding's id is user-visible (the remediation marker quotes it). Only a duplicate or an
-// empty id is rewritten, and the run's final renumbering still assigns the stable f1..fN ids
-// afterwards.
+// uniqueFindingIDs makes every finding id present and unique in place, and rebinds each decision to its
+// finding's id. Lane-supplied ids can collide after merging, and ids authorize writes. Ids that are
+// already unique are unchanged, because the remediation marker quotes them.
 func uniqueFindingIDs(findings []review.Finding, decisions []review.Decision) {
 	seen := make(map[string]bool, len(findings))
 	for i := range findings {
@@ -586,18 +448,9 @@ func uniqueFindingIDs(findings []review.Finding, decisions []review.Decision) {
 
 // --- durability ---
 
-// writeDurableJSON writes v to a run-relative path and makes it DURABLE before returning: the file
-// is fsynced, and its parent directory is fsynced too so the directory entry itself survives.
-//
-// audit.Run's ordinary writers are best-effort by design (an events line that does not reach disk
-// must not fail a run). The journal and the receipt are not in that class: the journal is the
-// precondition of opening the write window, and the receipt is the only thing anyone can read
-// afterwards. Both must be able to FAIL, and both must be on disk — not merely in the page cache —
-// before the run proceeds past them.
-//
-// The parent-directory fsync is best effort: on Windows a directory handle cannot be synced, and
-// treating that platform difference as a run failure would refuse every Windows remediation. The
-// FILE's sync is not best effort anywhere.
+// writeDurableJSON writes v as JSON to a run-relative path durably; see writeDurable. Unlike
+// audit.Run's best-effort writers, the journal and receipt must be able to fail and must be on disk
+// before the run proceeds.
 func writeDurableJSON(runDir, rel string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -606,6 +459,8 @@ func writeDurableJSON(runDir, rel string, v any) error {
 	return writeDurable(runDir, rel, append(b, '\n'))
 }
 
+// writeDurable writes data to a run-relative path and fsyncs the file. The parent directory is also
+// synced where the platform allows it; Windows cannot sync a directory handle.
 func writeDurable(runDir, rel string, data []byte) error {
 	p := filepath.Join(runDir, filepath.FromSlash(rel))
 	dir := filepath.Dir(p)
@@ -636,22 +491,10 @@ func writeDurable(runDir, rel string, data []byte) error {
 
 // --- the write window ---
 
-// writeWindow makes "this call was cancelled" and "this call entered the live commit" mutually
-// exclusive answers, decided ONCE under a lock.
-//
-// Reading ctx.Err() and then calling Commit is two acts: a cancellation landing between them is not
-// observed by the check, and a caller told "cancelled" can still have had its commit run. The gate
-// collapses them. enter() is the only place the decision is made; after it returns true the context
-// is never consulted again for this call's disposition, so a late cancellation cannot retroactively
-// turn a completed commit into a cancelled one. That is not a limitation being papered over — an
-// entered write window is deliberately UNCANCELLABLE (a commit interrupted halfway is the outcome
-// the rollback exists to prevent), and this makes the receipt say so honestly.
-//
-// What the lock is and is not, stated plainly: Remediate runs on ONE goroutine, so today the mutex
-// arbitrates nothing at runtime. Its job is to make the invariant a single guarded act with one
-// entry point, so that a future observer of cancellation (a watchdog, a surface that wants to
-// answer "did it start?") has somewhere correct to synchronize instead of re-reading ctx beside the
-// commit — which is exactly the shape that produced the defect.
+// writeWindow makes cancellation and entering the live commit mutually exclusive, decided once under
+// a lock. After enter returns true the context is never consulted again, so an entered commit, which
+// is deliberately uncancellable, cannot be reported as cancelled. The write path runs on one goroutine
+// today; the lock gives any future cancellation observer a single place to synchronize.
 type writeWindow struct {
 	mu      sync.Mutex
 	entered bool
@@ -671,15 +514,11 @@ func (w *writeWindow) enter(ctx context.Context) bool {
 	return true
 }
 
-// testHookInsideWriteWindow runs after the write window has been entered and before the live commit
-// begins. It is this file's ONLY test seam, and it exists for one reason: the property under test —
-// "a cancellation that lands after the gate does not make this call report itself cancelled" — is a
-// race, and staging a real one would make the test flaky and would prove nothing when it passed. It
-// is nil in every non-test build and is reachable from no exported API.
+// testHookInsideWriteWindow runs after the write window is entered and before the live commit, so a
+// test can inject a late cancellation deterministically. It is nil outside tests.
 var testHookInsideWriteWindow func()
 
-// Remediate applies an already-adjudicated decision set to the workspace. See the file comment for
-// the properties it exists to guarantee.
+// Remediate applies an already-adjudicated decision set to the workspace. See the file comment.
 func (m *Manager) Remediate(ctx context.Context, req RemediateRequest) (RemediateOutcome, error) {
 	var out RemediateOutcome
 	out.SourceRunID, out.Mode = req.SourceRunID, req.Mode
@@ -703,9 +542,7 @@ func (m *Manager) Remediate(ctx context.Context, req RemediateRequest) (Remediat
 	if err != nil {
 		return out, err
 	}
-	// The config ceiling is AUTHORITATIVE, and it is re-read here rather than trusted from the
-	// surface: a surface that computed the ceiling itself would be the only thing standing between
-	// a request and a live write.
+	// The mode ceiling is re-resolved here rather than trusted from the surface.
 	if plan.Mode != req.Mode {
 		return out, fault.New(fault.Policy, fmt.Sprintf(
 			"remediation refused: the %q surface's write-authority ceiling resolves %q down to %q — grant the capability in config (`surfaces.capabilitiesBySurface.%s: [%s]`) rather than expecting the ceiling to be bypassed",
@@ -725,27 +562,17 @@ func (m *Manager) Remediate(ctx context.Context, req RemediateRequest) (Remediat
 		"mode": string(req.Mode), "sourceRunId": req.SourceRunID, "findings": len(req.Findings),
 	})
 
-	// FROM HERE ON THIS FUNCTION DOES NOT WRITE. The journal, the pins, the cancel/commit gate,
-	// the per-finding staging, the commit and the receipt are governedWrite's, and they are the
-	// SAME ones every other surface gets — see writepath.go for why that is the whole point.
-	//
-	// What this path contributes that a full cycle cannot: the pins were captured by an EARLIER
-	// run (so they are re-verified against the live tree before anything is copied), the accepted
-	// set is the report run's `reported_valid` set, and the out-of-band trusted roots are enforced
-	// because a decision set is durable and can outlive them.
+	// governedWrite does all writing (see writepath.go). This path supplies pins from the report run,
+	// accepts its reported_valid set, and enforces the trusted roots in force at apply time.
 	res, werr := m.governedWrite(ctx, run, writeRequest{
 		Workspace: req.Workspace, Identity: req.WorkspaceIdentity,
 		Mode: req.Mode, Plan: plan, SourceRunID: req.SourceRunID,
 		Findings: req.Findings, Decisions: req.Decisions, Accept: AcceptedForApply,
-		// A from-run remediation opens exactly ONE write window, so it is always the primary one:
-		// its selection is the caller's list and is measured against it.
+		// A fromRun remediation has a single write window, so it is always primary.
 		Select: req.Select, SelectPrimary: true,
 		Shown: req.Shown, Pins: req.BaseHashes, TrustedRoots: req.TrustedRoots,
 		OnJournal:      req.OnJournal,
 		VerifyCommands: req.VerifyCommands, VerifyTimeout: req.VerifyTimeout,
-		// The dirty check is asked HERE, at the apply, and is deliberately not inherited from the
-		// report run that produced this decision set: that run's view of the tree is minutes or hours
-		// old, and the pins it recorded cover only the files it targeted.
 		AllowProtectedPaths: req.AllowProtectedPaths,
 	})
 	out.Journal, out.Receipt, out.Cancelled = res.Journal, res.Receipt, res.Cancelled
@@ -763,9 +590,7 @@ func (m *Manager) Remediate(ctx context.Context, req RemediateRequest) (Remediat
 		"applied": out.Applied(), "refused": out.Refused(), "outcome": out.Outcome(),
 		"files": len(out.Receipt.Files), "committed": out.Receipt.Committed,
 	})
-	// `outcome` and `refused` are recorded HERE as well as on the wire: a partially-refused run
-	// that the caller never collected a response for must still be answerable from the run
-	// directory alone, which is the same reason the receipt is fsynced.
+	// Record outcome and refusals in run-state too, so they can be read without the response.
 	runState := map[string]any{
 		"schemaVersion": 1, "runId": run.ID, "kind": "remediation", "sourceRunId": req.SourceRunID,
 		"mode": string(req.Mode), "status": out.Receipt.Status, "committed": out.Receipt.Committed,
@@ -783,28 +608,10 @@ func (m *Manager) Remediate(ctx context.Context, req RemediateRequest) (Remediat
 	return out, nil
 }
 
-// authorizeEditTarget answers the three questions ROOT CONFINEMENT DOES NOT ANSWER about one
-// proposed edit. Confinement (scope.Resolver + the protected-path denylist) says where a write may
-// land; it says nothing about what was reviewed. An edit is model-authored output, so an accepted
-// finding about `a.go` can come back proposing a hunk in any other in-root, non-denylisted file —
-// a file no reviewer was shown under this finding, no host adjudicated, and no run base-hashed.
-// Applying it would be a write nobody judged, wearing the authorization of one they did.
-//
-// So an edit must be:
-//
-//  1. INSIDE ITS FINDING. The finding names the file it was adjudicated about; its edits target
-//     that file and no other. There is deliberately NO bypass. Cross-file remediation would need
-//     an explicit per-finding authorization carried in the adjudicated decision set — so that a
-//     human reads it before it is written — plus a record of that authorization in the receipt.
-//     Neither exists, nothing in this repo proposes cross-file edits, and the honest
-//     implementation of "not authorized" is "not possible".
-//  2. SHOWN. The same gate a full cycle applies to a finding, applied to the thing being written.
-//  3. PINNED. Present in the base-hash set with real content, so "is this file still what was
-//     judged" is answerable at all — before the window and again inside the commit.
-//
-// Every failure is a HALT, never a skip. A proposal that reached outside its authorization is not
-// a proposal whose other hunks can be assumed sound, and a skip would let the run finish reporting
-// success.
+// authorizeEditTarget checks what root confinement cannot: whether a model-proposed edit targets what
+// was reviewed. The edit must target its finding's own file, a file reviewers were shown, and a file
+// with a real base-hash pin; cross-file edits are not supported. Every failure halts rather than
+// skips, since a proposal that reached outside its authorization cannot be partly trusted.
 func authorizeEditTarget(f review.Finding, e review.Edit, shown map[string]bool, pins map[string]string) error {
 	if e.File != f.File {
 		return fault.New(fault.Policy, fmt.Sprintf(
@@ -824,8 +631,8 @@ func authorizeEditTarget(f review.Finding, e review.Edit, shown map[string]bool,
 	return nil
 }
 
-// isDestinationDrift reports whether a commit refusal means "the live destination is not what this
-// write was decided against" — content changed, object swapped, or no base recorded for it at all.
+// isDestinationDrift reports whether a commit refusal means the live destination is not what this
+// write was decided against: its content changed, it was swapped, or it has no recorded base.
 func isDestinationDrift(r workspace.Reason) bool {
 	switch r {
 	case workspace.ReasonDestinationContentChanged,

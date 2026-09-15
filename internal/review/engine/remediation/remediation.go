@@ -1,10 +1,7 @@
-// Package remediation is the deterministic RemediationEngine fallback: it turns an accepted
-// finding into a concrete, appliable review-marker edit. It is pure (no I/O, no writes) — the
-// Manager applies the returned edits through WorkspaceAccess. This marker is the FALLBACK path:
-// with a real (non-fake) author_remediator host lane the Manager first attempts model-driven
-// remediation (internal/engine/remediationprompt + schema.ParseRemediationResult), which produces
-// an actual anchored code fix; the marker is used only when no real host lane is configured or the
-// model declines / cannot produce a safe edit.
+// Package remediation is the deterministic remediation fallback: it turns an accepted finding into a
+// review-marker edit without I/O. The Manager first attempts a model-driven fix (remediationprompt
+// and schema.ParseRemediationResult) when a real author_remediator lane is configured, and uses the
+// marker when there is none or the model declines.
 package remediation
 
 import (

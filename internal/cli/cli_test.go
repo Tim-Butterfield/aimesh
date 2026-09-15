@@ -20,9 +20,8 @@ func run(t *testing.T, args ...string) (int, string, string) {
 	return code, out.String(), errb.String()
 }
 
-// TestNoCommand_IsAUsageError: a bare invocation prints help to STDERR and exits non-zero, while
-// asking for help prints to STDOUT and exits 0. Conflating the two is how `aimesh --help | less`
-// and any CI script gating on the exit code break.
+// A bare invocation prints help to stderr and exits non-zero; asking for help prints to stdout and
+// exits 0.
 func TestHelpGoesToStdoutAndNoCommandIsAUsageError(t *testing.T) {
 	code, out, errb := run(t)
 	if code != int(fault.Usage) {
@@ -43,9 +42,7 @@ func TestHelpGoesToStdoutAndNoCommandIsAUsageError(t *testing.T) {
 	}
 }
 
-// `aimesh review --help` must answer with REVIEW's help, not the top-level tree the user just came
-// from. The domain's curated usage is the ONLY place its modes, mode-specific flags and exit codes
-// are documented — reprinting the root hides them, and restating them at the root would drift.
+// `aimesh review --help` answers with the domain's own help, not the top-level usage.
 func TestDomainHelp_ForwardsToTheDomainNotTheRoot(t *testing.T) {
 	_, rootOut, _ := run(t, "--help")
 
@@ -75,8 +72,7 @@ func TestUnknownCommand_NamesWhatWasTyped(t *testing.T) {
 	}
 }
 
-// An unknown verb is refused BY THE ROOT, naming the domain — not passed down to produce an error
-// that talks about a command tree the user did not type.
+// An unknown verb is refused by the root CLI, naming the domain.
 func TestUnknownDomainVerb_IsRefusedByTheRootNamingTheDomain(t *testing.T) {
 	for _, noun := range []string{"review", "explore"} {
 		code, _, errb := run(t, noun, "nonesuch")
@@ -94,9 +90,7 @@ func TestUnknownDomainVerb_IsRefusedByTheRootNamingTheDomain(t *testing.T) {
 	}
 }
 
-// `run` is the ONLY verb that is renamed on the way down: it becomes the domain's own name, which is
-// exactly the bare spelling this tree replaces. Everything else must pass through unchanged, or the
-// root would silently redirect one command to another.
+// run is the only verb renamed when forwarding; every other verb passes through unchanged.
 func TestVerbTables_OnlyRunIsRenamed(t *testing.T) {
 	for _, d := range []domain{reviewDomain, exploreDomain} {
 		if got := d.verbs["run"]; got != d.noun {
@@ -113,8 +107,7 @@ func TestVerbTables_OnlyRunIsRenamed(t *testing.T) {
 	}
 }
 
-// Help that drifts from dispatch is worse than no help: it documents commands that do not exist, or
-// hides ones that do. Every dispatchable verb must appear in the usage text.
+// Every dispatchable verb must appear in the usage text.
 func TestUsageListsEveryDispatchableVerb(t *testing.T) {
 	for _, d := range []domain{reviewDomain, exploreDomain} {
 		for verb := range d.verbs {
@@ -168,8 +161,7 @@ func TestInit_JSONRecordAndRepoAssertion(t *testing.T) {
 	}
 }
 
-// --require-folder inside a repository is the assertion doing its job: without it, running where you
-// believed you were outside a repo silently produces the other mode.
+// --require-folder fails inside a repository.
 func TestInit_RequireFolderRefusesInsideARepo(t *testing.T) {
 	repo := t.TempDir()
 	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
@@ -183,8 +175,7 @@ func TestInit_RequireFolderRefusesInsideARepo(t *testing.T) {
 
 // --- version ----------------------------------------------------------------------------------
 
-// `aimesh --version` must name AIMESH, not a domain: it is the first command the quick start tells a
-// new user to run, and it must name the binary they ran.
+// `aimesh --version` names the aimesh binary, not a domain.
 func TestVersion_NamesTheBinaryNotADomain(t *testing.T) {
 	for _, a := range []string{"--version", "version"} {
 		code, out, errb := run(t, a)
@@ -217,8 +208,7 @@ func TestVersion_NamesTheBinaryNotADomain(t *testing.T) {
 
 // --- doctor -----------------------------------------------------------------------------------
 
-// doctor REPORTS: with no root it says ready=false and exits 0, because a read-only probe that
-// errors tells a caller nothing about what to do next. --require-root turns that into a gate.
+// doctor reports ready=false and exits 0 with no root; --require-root makes that a failure.
 func TestDoctor_ReportsByDefaultAndGatesOnRequest(t *testing.T) {
 	bare := t.TempDir() // no .git, no .aimesh
 	t.Chdir(bare)
@@ -292,7 +282,7 @@ func TestAgentsMD_ServesTheEmbeddedGuideCleanly(t *testing.T) {
 	if errb != "" {
 		t.Errorf("no override is active, so nothing belongs on stderr: %q", errb)
 	}
-	// The guide is load-bearing: it must actually carry the rules an agent gets wrong.
+	// The guide must carry the rules agents most often get wrong.
 	for _, must := range []string{"Identity is recorded, never acted on", "containment copy", "denylist"} {
 		if !strings.Contains(out, must) {
 			t.Errorf("the embedded guide omits %q", must)
@@ -300,8 +290,7 @@ func TestAgentsMD_ServesTheEmbeddedGuideCleanly(t *testing.T) {
 	}
 }
 
-// An override is served VERBATIM on stdout — but disclosed on stderr, because with one active the
-// "matches the binary" guarantee no longer holds and a reader who cannot tell has been misled.
+// An override is served verbatim on stdout and disclosed on stderr.
 func TestAgentsMD_OverrideIsServedAndDisclosed(t *testing.T) {
 	custom := filepath.Join(t.TempDir(), "custom.md")
 	if err := os.WriteFile(custom, []byte("# CUSTOM\n"), 0o644); err != nil {
@@ -321,8 +310,7 @@ func TestAgentsMD_OverrideIsServedAndDisclosed(t *testing.T) {
 	}
 }
 
-// An unreadable override is an ERROR. Falling back would hand the agent a document the operator did
-// not choose while reporting success.
+// An unreadable override is an error, not a fallback to the embedded guide.
 func TestAgentsMD_UnreadableOverrideIsAnErrorNamingTheRemedy(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent.md")
 	t.Setenv(agentguide.EnvVar, missing)

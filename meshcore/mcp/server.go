@@ -53,9 +53,8 @@ type Call struct {
 	f   Framer
 	env *RequestEnv // the protocol context of THIS request; never nil for a dispatched call
 
-	// taskID is set by Call.CreateTask when the handler chose to answer this call with a TASK
-	// HANDLE rather than a result. It is read once, by callTool, and it is written only through
-	// CreateTask — which is where the "never return a task to a non-declaring client" rule lives.
+	// taskID is set only by CreateTask, when the handler answers with a task handle instead of a
+	// result.
 	taskID string
 
 	mu   sync.Mutex
@@ -75,15 +74,12 @@ func (c *Call) Env() *RequestEnv {
 	return c.env
 }
 
-// HasProgressToken reports whether the caller volunteered a progress token. A server MUST NOT invent one:
-// without it, progress notifications are not merely unwanted, they are unroutable.
+// HasProgressToken reports whether the caller supplied a progress token. Without one, progress
+// notifications cannot be routed.
 func (c *Call) HasProgressToken() bool { return c != nil && len(c.Env().ProgressToken) > 0 }
 
-// Progress emits `notifications/progress` — ONLY when the caller supplied a token, and only when `done`
-// strictly exceeds the last value emitted for this call. Monotonicity is enforced here rather than trusted
-// from callers: the natural progress source (a fraction of phases complete) is monotonic, but a per-item
-// counter reset by a retried phase is not, and a client that sees progress go backwards has no way to tell
-// the difference between a bug and a restart.
+// Progress emits `notifications/progress` only when the caller supplied a token and done exceeds the
+// last value emitted for this call, so a client never sees progress go backwards.
 func (c *Call) Progress(done, total float64, message string) {
 	if !c.HasProgressToken() {
 		return
@@ -105,22 +101,10 @@ func (c *Call) Progress(done, total float64, message string) {
 	c.srv.notify(c.f, "notifications/progress", params)
 }
 
-// Log emits `notifications/message` at the given level, dropped when the client has raised its level
-// above it. Log notifications are BEST-EFFORT BY CONTRACT: no governance-relevant fact may exist only
-// here — anything that must survive belongs in the tool result or the run record.
-//
-// THE ERA DECIDES WHETHER ANYTHING IS EMITTED AT ALL; the session decides the level.
-//
-// The era half is per-request and is read from the env: `server/utilities/logging` is DEPRECATED in
-// 2026-07-28, its named stdio migration is stderr (which this server already writes diagnostics to),
-// so the modern era emits no `notifications/message` and Log becomes a no-op there.
-//
-// The LEVEL half deliberately stays session-live rather than moving onto the env. `logging/setLevel`
-// is a control the client may send AT ANY TIME, including while a call that streams for minutes is
-// running; filtering against a level snapshotted when the request arrived would silently ignore a
-// client that asked to be quieted. RequestEnv.LogLevel therefore records the level at arrival and
-// documents that it is not this filter — one fact, one reader, and the difference stated instead of
-// discovered.
+// Log emits `notifications/message` at level, dropped when the client selected a higher level. Log
+// notifications are best effort: anything that must survive belongs in the result or the run record.
+// On the modern era Log does nothing. The filter reads the session's current level rather than a
+// snapshot, because `logging/setLevel` may arrive while a call is running.
 func (c *Call) Log(level Level, logger string, data any) {
 	if c == nil {
 		return
@@ -141,80 +125,52 @@ type Server struct {
 	// Framing selects the wire framing ("" / "newline" → newline-delimited JSON, the MCP stdio default).
 	Framing string
 
-	// Protocol is the ERA POSTURE this process was launched with ("" → ProtocolDual). Under
-	// ProtocolLegacy the process is a pre-2026-07-28 server in every observable respect — see the
-	// constant's own comment for why `server/discover` must be an unknown method there.
+	// Protocol is the era posture this process was launched with ("" → ProtocolDual); see
+	// ProtocolLegacy.
 	//
 	// SUNSET-PATH (MCP26-SUNSET): the whole field goes with the era.
 	Protocol ProtocolMode
 	// PageSize bounds one `tools/list` page. 0 (the default) returns every tool in one page with no
-	// nextCursor — the honest answer for a handful of tools. A non-zero value exercises real paging; a
-	// cursor is always validated, never ignored.
+	// nextCursor. A cursor is always validated.
 	PageSize int
-	// Diagnostics is where SERVER-side logging goes. It exists so that stdout stays pure JSON-RPC: a
-	// server that spawns child processes has no second chance at that invariant. nil discards.
+	// Diagnostics receives server-side logging, keeping stdout pure JSON-RPC. nil discards.
 	Diagnostics io.Writer
 
-	// WithheldTools names tools this server DELIBERATELY did not register, each mapped to the reason a
-	// caller should be told. It changes nothing about advertisement — a withheld name is absent from
-	// `tools/list`, which is the point of withholding it — and only replaces the generic "unknown tool"
-	// refusal when someone calls the name anyway.
-	//
-	// It exists because those two facts are not the same and a caller must act differently on them. A
-	// name that does not exist means "you are confused"; a name withheld by a launch decision means
-	// "ask the operator to relaunch". "unknown tool" says the first about the second, which sends a
-	// model looking for a different tool instead of reporting a missing grant.
-	//
-	// Values are supplied by the surface that withheld the tool: this package holds no vocabulary for
-	// anyone's launch flags.
+	// WithheldTools maps tools this server deliberately did not register to the reason a caller should
+	// be told. Withheld tools stay absent from `tools/list`; calling one returns the reason instead of
+	// "unknown tool", so a model reports a missing grant rather than searching for another tool.
 	WithheldTools map[string]string
 
 	// Resources, when non-nil, declares the `resources` capability and backs `resources/list` and
-	// `resources/read`. nil leaves both methods a -32601 — the honest answer for a server that publishes
-	// nothing, rather than an advertised capability returning an empty list.
+	// `resources/read`. With nil, both methods return -32601.
 	Resources ResourceProvider
 
 	// Tasks, when non-nil, declares the `io.modelcontextprotocol/tasks` extension in
-	// `server/discover`, backs `tasks/get` / `tasks/update` / `tasks/cancel`, and lets a handler
-	// answer a `tools/call` with a task handle (Call.CreateTask).
-	//
-	// nil is the whole extension off: no advertisement, three -32601s, and CreateTask always false.
-	// The extension is MODERN-ERA ONLY by construction — a legacy client cannot declare it, and the
-	// three methods live only in the modern method set. See tasks.go.
+	// `server/discover`, backs `tasks/get`, `tasks/update` and `tasks/cancel`, and lets a handler
+	// answer a `tools/call` with a task handle (Call.CreateTask). nil disables the extension, which
+	// is modern-era only; see tasks.go.
 	Tasks TaskProvider
 
-	// OnRoots, when non-nil, receives the client's declared roots after the handshake and again on every
-	// `notifications/roots/list_changed`. It is called ONLY when the client declared the `roots`
-	// capability: a client that declared nothing must leave the server's own root set exactly as it was.
+	// OnRoots, when non-nil, receives the client's declared roots after the handshake and on every
+	// `notifications/roots/list_changed`. It is called only when the client declared the `roots`
+	// capability.
 	OnRoots func([]Root)
 
-	// RequestTimeout bounds ONE server→client request (0 → DefaultRequestTimeout). A client that never
-	// answers must cost this server a deadline, not a wedged session.
+	// RequestTimeout bounds one server-to-client request (0 → DefaultRequestTimeout), so a client
+	// that never answers costs a deadline rather than a stuck session.
 	RequestTimeout time.Duration
 
-	// TrustFor supplies the EFFECTIVE trusted roots and the resolver for one request, so that
-	// confinement is a property of the REQUEST rather than of the process (see env.go). It is called
-	// once per dispatched request and its answer is carried on the Call.
+	// TrustFor supplies the effective trusted roots and resolver for one request, so confinement is
+	// per request (see env.go). It receives the era because legacy clients narrow roots through
+	// `roots/list`, which the modern era lacks, and an application must not grant a modern client
+	// more authority for that reason. SUNSET-PATH (MCP26-SUNSET): the parameter goes with the era.
 	//
-	// IT TAKES THE ERA, because confinement is era-dependent and this is the only seam that can see
-	// both. Under the legacy era a client narrows the server through `roots/list`; the modern era
-	// deletes that method, so the same launch configuration would otherwise grant strictly MORE
-	// filesystem authority to a client merely because it speaks a newer revision. An application
-	// answers that here — fail-closed — rather than in a handler that has no way to know which
-	// revision asked. SUNSET-PATH (MCP26-SUNSET): the parameter goes with the era.
-	//
-	// nil means "this server's tools take no filesystem paths": the env then carries the zero
-	// resolver, which refuses every path. That is the correct answer for such a server — a tool that
-	// never asks is never told yes, and a tool that unexpectedly starts asking is refused rather than
-	// silently granted the process's authority.
+	// nil means this server's tools take no filesystem paths, and every path is refused.
 	TrustFor func(Era) TrustContext
 
-	// StrictSchema turns on SEND-TIME validation of every `structuredContent` against its tool's declared
-	// outputSchema. It is OFF by default because it is not free: the schema is compiled once per tool, but
-	// each result is then re-marshalled and walked, so the cost scales with the PAYLOAD — a large
-	// structured result is the expensive case, and it is paid on every call rather than once in CI. On a
-	// violation the call fails LOUDLY (see enforceOutputSchema) instead of sending a payload that does
-	// not satisfy the schema the client was handed.
+	// StrictSchema validates every `structuredContent` against its tool's outputSchema before sending,
+	// failing the call on a violation (see enforceOutputSchema). It is off by default because the
+	// cost scales with payload size on every call.
 	StrictSchema bool
 
 	tools    []Tool
@@ -223,10 +179,8 @@ type Server struct {
 
 	wmu sync.Mutex // serializes frame writes across goroutines
 
-	// latched is THE era cell (era.go). It is an atomic because a compare-and-set is the only writer:
-	// there must be no read-then-write window in which two openers both believe they latched. It is
-	// deliberately NOT under `mu` — a mutex would make the winner and the losers agree, but it would
-	// also let a future caller read it, decide, and write, which is the race the CAS forbids.
+	// latched is the era cell (era.go), written only by compare-and-set and deliberately not guarded
+	// by mu.
 	//
 	// SUNSET-PATH (MCP26-SUNSET).
 	latched eraLatchCell
@@ -241,22 +195,19 @@ type Server struct {
 	inflight    map[string]context.CancelFunc
 	cancelled   map[string]bool
 
-	// The server→client request table (see outgoing.go). It has its own mutex because a Request may be
-	// issued from a handler goroutine while the read loop is delivering another one's response.
+	// The server-to-client request table (see outgoing.go), with its own mutex because a handler
+	// goroutine may issue a request while the read loop delivers another's response.
 	//
-	// SUNSET-PATH (MCP26-SUNSET). These four fields, the `OnRoots` and
-	// `RequestTimeout` fields above, and the `closeOutgoing` / `deliver` / `refreshRoots` call sites
-	// in this file all belong to outgoing.go and are deleted WITH that file. They are named here
-	// because the checklist row says "file deleted outright" and the file's dependents live in this
-	// one — deleting outgoing.go alone does not compile.
+	// SUNSET-PATH (MCP26-SUNSET): these four fields, OnRoots, RequestTimeout, and the closeOutgoing,
+	// deliver and refreshRoots call sites in this file are deleted with outgoing.go.
 	omu     sync.Mutex
 	outSeq  uint64
 	pending map[string]chan *rpcResponse
 	closed  bool
 }
 
-// Register declares a tool and its handler. It panics on a duplicate name or a missing input schema —
-// both are programming errors caught at startup, in the same spirit as the mode registry.
+// Register declares a tool and its handler. It panics on an empty or duplicate name, a missing input
+// schema or a nil handler, all programming errors caught at startup.
 func (s *Server) Register(t Tool, h Handler) {
 	if s.handlers == nil {
 		s.handlers = map[string]Handler{}
@@ -291,10 +242,9 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 func (s *Server) ServeFramed(f Framer) error {
 	baseCtx, cancelAll := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	// The framer is published for the SERVER→CLIENT direction (roots/list). Shutdown order is
-	// cancelAll → closeOutgoing → wg.Wait, deliberately: a handler blocked on a client answer must be
-	// released BEFORE the loop waits for it, or a departed client would cost the shutdown a full
-	// request timeout. (Defers run LIFO, so the registration order below is the reverse.)
+	// The framer is published for server-to-client requests. Shutdown runs cancelAll, closeOutgoing,
+	// then wg.Wait, so a handler blocked on a client answer is released before the loop waits for it.
+	// Defers run LIFO, so they are registered in reverse.
 	s.mu.Lock()
 	s.active = f
 	s.mu.Unlock()
@@ -318,9 +268,7 @@ func (s *Server) ServeFramed(f Framer) error {
 		if len(raw) == 0 {
 			continue
 		}
-		// Wire tolerance: JSON-RPC batching existed in the 2025-03-26 revision and was REMOVED in
-		// 2025-06-18. An array on the wire is refused as one invalid request; it must never crash the
-		// reader, because the client that sent it is still owed an answer it can act on.
+		// JSON-RPC batching was removed in 2025-06-18; an array is refused as one invalid request.
 		if raw[0] == '[' {
 			s.write(f, errResp(nil, CodeInvalidRequest, "batch requests are not supported (JSON-RPC batching was removed in MCP 2025-06-18); send one request per message"))
 			continue
@@ -330,17 +278,14 @@ func (s *Server) ServeFramed(f Framer) error {
 			s.write(f, errResp(nil, CodeParse, "parse error"))
 			continue
 		}
-		// A frame with an `id` and NO `method` is a RESPONSE — the client answering something this
-		// server asked it (roots/list). It is routed to the waiting request and never treated as a
-		// request, because replying to a response is a protocol violation. This check has to precede
-		// the notification test: a response has an id, so it is not a notification either.
+		// A frame with an id and no method is a response to a server-to-client request. It is checked
+		// before the notification test, since a response has an id.
 		if req.Method == "" && len(req.ID) > 0 {
 			if s.deliver(raw) {
 				continue
 			}
 		}
-		// Only the ABSENCE of `id` makes a message a notification. `id: null` is a valid identifier and
-		// still receives a response.
+		// Only an absent id makes a message a notification; `id: null` still receives a response.
 		notif := len(req.ID) == 0
 		if req.JSONRPC != "2.0" {
 			if !notif {
@@ -348,10 +293,8 @@ func (s *Server) ServeFramed(f Framer) error {
 			}
 			continue
 		}
-		// ADMISSION — step 1 of the era order finishes here (the envelope is now known valid), and
-		// steps 2–5 plus the latch happen inside admit. Three outcomes, and the third is the one that
-		// keeps the legacy surface byte-identical: a request carrying no modern `_meta` falls straight
-		// through to the switch below, unchanged by era handling.
+		// Admission: the envelope is valid, and steps 2-5 plus the latch happen in admit. A request with
+		// no modern `_meta` falls through to the legacy switch below.
 		if !notif {
 			menv, answer := s.admit(&req)
 			if answer != nil {
@@ -366,53 +309,42 @@ func (s *Server) ServeFramed(f Framer) error {
 		switch req.Method {
 		case "notifications/initialized", "initialized":
 			s.markInitialized()
-			// The session is live, so the server→client half is now usable: ask the client for its
-			// roots. It runs in its own goroutine because the read loop must keep reading — the
-			// answer to this very request arrives through it.
+			// The session is live, so ask the client for its roots, in a goroutine because the answer
+			// arrives through this read loop.
 			if s.OnRoots != nil && s.ClientDeclaredRoots() {
-				wg.Add(1)
-				go func() { defer wg.Done(); s.refreshRoots("after initialize") }()
+				wg.Go(func() { s.refreshRoots("after initialize") })
 			}
 		case "notifications/cancelled":
 			s.handleCancelled(req.Params)
 		case "notifications/roots/list_changed":
-			// The client's root set changed. RE-FETCH it: the notification carries no roots, and a
-			// server that acknowledged it without asking again would keep enforcing a set the client
-			// has already withdrawn.
+			// The notification carries no roots, so fetch them again.
 			if s.OnRoots != nil && s.ClientDeclaredRoots() {
-				wg.Add(1)
-				go func() { defer wg.Done(); s.refreshRoots("roots/list_changed") }()
+				wg.Go(func() { s.refreshRoots("roots/list_changed") })
 			}
 		case "notifications/progress":
-			// Client-originated notifications this server has no use for. Ignored by design: a
-			// notification never gets a response, and refusing one would be a protocol violation.
+			// A client notification this server does not use; notifications never get a response.
 		case "initialize":
 			if notif {
 				continue
 			}
-			// A handshake against a process that already latched MODERN is refused with our supported
-			// versions named, because a legacy client has no fall-forward mechanism and this message
-			// may be the only diagnostic it can surface.
+			// A handshake on a modern-latched process is refused with the supported versions named.
 			if s.era() == EraModern {
 				s.write(f, s.initializeAfterModernRefusal(req.ID))
 				continue
 			}
 			resp := s.initialize(req.ID, req.Params)
-			// THE LEGACY LATCH, and it is the LAST step: only a handshake that actually succeeded
-			// selects the era. A refused `initialize` — an unsupported or unreadable version — leaves
-			// the process unlatched, so a modern client that follows it is still served.
+			// The legacy latch is the last step: only a successful handshake selects the era, so a
+			// refused `initialize` leaves the process unlatched.
 			if resp.Error == nil {
 				if got := s.latchEra(EraLegacy); got != EraLegacy {
-					// Lost the race to a modern opener. Answer the modern refusal instead of a
-					// handshake this process can no longer honour.
+					// Lost the race to a modern opener.
 					resp = s.initializeAfterModernRefusal(req.ID)
 					s.rollbackInitialize()
 				}
 			}
 			s.write(f, resp)
 		case "ping":
-			// `ping` is the ONE request allowed before initialization completes (it is how a host proves
-			// liveness during a slow handshake).
+			// `ping` is allowed before initialization completes, so a host can check liveness.
 			if !notif {
 				s.write(f, okResp(req.ID, map[string]any{}))
 			}
@@ -438,8 +370,7 @@ func (s *Server) ServeFramed(f Framer) error {
 			if notif {
 				continue
 			}
-			// A server with no provider declares no `resources` capability, so the method genuinely
-			// does not exist here — -32601, not an advertised capability answering emptily.
+			// Without a provider there is no `resources` capability, so the method does not exist.
 			if s.Resources == nil {
 				s.write(f, errResp(req.ID, CodeMethodNotFound, "method not found: "+req.Method+" (this server declares no `resources` capability)"))
 				continue
@@ -480,10 +411,7 @@ func (s *Server) ServeFramed(f Framer) error {
 				defer wg.Done()
 				defer cancel()
 				resp := s.callTool(ctx, f, nil, req)
-				// A CANCELLED request gets NO response: on 2025-06-18 servers SHOULD NOT send one and
-				// clients are told to ignore a late one; 2026-07-28 stdio hardens that to MUST NOT, for
-				// ANY further message. Either way the receipt of what it did or did not do has to live in
-				// the handler's own durable record, never only in the response.
+				// A cancelled request gets no response; the handler records its outcome.
 				if s.finishInflight(key) {
 					return
 				}
@@ -500,12 +428,10 @@ func (s *Server) ServeFramed(f Framer) error {
 	}
 }
 
-// serveModern dispatches an ADMITTED modern request. It is deliberately a separate switch from the
-// legacy one rather than a flag threaded through it: the two eras have different method sets, and the
-// modern era has NO pre-initialization state to check, so requireInitialized (and with it `-32002`, a
-// code 2026-07-28 forbids emitting) is unreachable from here by construction rather than by care.
+// serveModern dispatches an admitted modern request. It is separate from the legacy switch because the
+// method sets differ and the modern era has no pre-initialization state, so -32002 is unreachable here.
 //
-// SUNSET-PATH inverted (MCP26-SUNSET): at legacy removal this switch is what SURVIVES and the one below is deleted.
+// SUNSET-PATH (MCP26-SUNSET): this switch survives legacy removal; the legacy one is deleted.
 func (s *Server) serveModern(baseCtx context.Context, f Framer, wg *sync.WaitGroup, req rpcRequest, env *RequestEnv) {
 	switch req.Method {
 	case "tools/list":
@@ -521,42 +447,30 @@ func (s *Server) serveModern(baseCtx context.Context, f Framer, wg *sync.WaitGro
 	case "tasks/update":
 		s.write(f, s.updateTask(env, req.ID, req.Params))
 	case "tasks/cancel":
-		// `tasks/cancel` is answered INLINE rather than on a goroutine, and that is not an
-		// oversight: it does one non-blocking thing (deliver the cancel to the run's context) and
-		// its acknowledgement promises nothing beyond that delivery. See cancelTask.
+		// Answered inline: it only delivers the cancel to the run's context. See cancelTask.
 		s.write(f, s.cancelTask(env, req.ID, req.Params))
 	case "tools/call":
 		ctx, cancel := context.WithCancel(baseCtx)
 		key := canonicalID(req.ID)
 		s.putInflight(key, cancel)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer cancel()
 			resp := s.callTool(ctx, f, env, req)
-			// A CANCELLED request gets NO further message at all on 2026-07-28 stdio: "Servers SHOULD
-			// stop work on a cancelled request as soon as practical and MUST NOT send any further
-			// messages for it."
+			// A cancelled request gets no further message on 2026-07-28 stdio.
 			if s.finishInflight(key) {
 				return
 			}
 			s.write(f, resp)
-		}()
+		})
 	default:
-		// Unreachable: admit already refused every method outside the modern set. Answering rather
-		// than falling silent keeps the invariant checkable instead of assumed.
+		// Unreachable: admit refuses methods outside the modern set.
 		s.write(f, errResp(req.ID, CodeMethodNotFound, modernMethodNotFound(req.Method, s.Resources != nil)))
 	}
 }
 
-// rollbackInitialize undoes the session state a handshake wrote when the handshake then LOST the era
-// race. It exists to keep the mutation and the latch paired: a process that answered `initialize` with
-// an error must not be left holding `negotiated`.
-//
-// It is unreachable on the stdio read loop as written (admission is serialized there, so nothing can
-// latch between the handshake's validation and its CAS). It is here because the pairing is a property
-// of the code, not of the current caller — and an unpaired mutation is exactly the kind of thing a
-// later dispatcher change turns into a bug nobody can see.
+// rollbackInitialize undoes the session state a handshake wrote when it then lost the era race, so a
+// process that answered `initialize` with an error holds no negotiated version. The stdio read loop
+// serializes admission, so this is currently unreachable.
 func (s *Server) rollbackInitialize() {
 	s.mu.Lock()
 	s.handshook, s.negotiated, s.clientRoots, s.level = false, "", false, ""
@@ -566,7 +480,7 @@ func (s *Server) rollbackInitialize() {
 // requireInitialized returns the refusal for a request that arrived before the client's
 // `notifications/initialized`, or nil when the session is ready.
 //
-// LEGACY-ONLY and SUNSET-PATH (MCP26-SUNSET): the modern era has no session to be outside of.
+// Legacy only. SUNSET-PATH (MCP26-SUNSET): the modern era has no session.
 func (s *Server) requireInitialized(id json.RawMessage, method string) *rpcResponse {
 	s.mu.Lock()
 	ready := s.initialized
@@ -595,25 +509,21 @@ type initializeParams struct {
 }
 
 // clientCapabilities is the subset of the client's declaration this transport acts on. `roots` is a
-// POINTER because its presence is the whole signal: `{"roots": {}}` declares the capability, and an
-// absent key declares nothing — which must leave the server's own root set untouched.
+// pointer because presence is the signal: `{"roots": {}}` declares the capability.
 type clientCapabilities struct {
 	Roots *struct {
 		ListChanged bool `json:"listChanged,omitempty"`
 	} `json:"roots,omitempty"`
 }
 
-// initialize answers the handshake: NEGOTIATE the protocol version (echo a supported one verbatim, answer
-// any other with the latest supported version), declare capabilities, and return serverInfo + instructions.
+// initialize answers the handshake: it negotiates the protocol version (echoing a supported one and
+// answering any other with the latest supported version), declares capabilities, and returns
+// serverInfo and instructions.
 //
-// SUNSET-PATH (MCP26-SUNSET). THE WHOLE HANDSHAKE GOES WITH THE LEGACY ERA,
-// and this comment covers the block it anchors: `initialize`, `initializeParams`,
-// `clientCapabilities`, `markInitialized`, `rollbackInitialize`, `NegotiatedVersion`, the
-// `notifications/initialized` dispatch arm, and the session fields `initialized` / `handshook` /
-// `negotiated` / `clientRoots` / `level`. `2026-07-28` has no session to open: every request carries
-// its own protocol context in `_meta`, so there is nothing here to generalize — it is deleted.
-// The `logging` capability this function declares goes with it, and the modern probe never
-// advertised one.
+// SUNSET-PATH (MCP26-SUNSET): the whole handshake goes with the legacy era, including
+// initializeParams, clientCapabilities, markInitialized, rollbackInitialize, NegotiatedVersion, the
+// `notifications/initialized` dispatch arm, the session fields initialized, handshook, negotiated,
+// clientRoots and level, and the `logging` capability declared here.
 func (s *Server) initialize(id json.RawMessage, params json.RawMessage) *rpcResponse {
 	var ip initializeParams
 	if len(params) > 0 {
@@ -628,18 +538,16 @@ func (s *Server) initialize(id json.RawMessage, params json.RawMessage) *rpcResp
 		}
 	}
 	want = strings.TrimSpace(want)
-	// Version negotiation per the MCP lifecycle: a supported version is echoed; any other is answered
-	// with the latest version this server supports, and the client decides whether to proceed. Refusing
-	// instead breaks clients that open with a newer revision than this server implements.
+	// The MCP lifecycle requires an unsupported version to be answered with a supported one; the client
+	// decides whether to proceed. Refusing breaks clients that open with a newer revision.
 	if !slices.Contains(SupportedProtocolVersions, want) {
 		want = LatestProtocolVersion
 	}
 	s.mu.Lock()
 	s.handshook = true
 	s.negotiated = want
-	// Whether the client declared `roots` is recorded HERE, once, from the handshake. Everything the
-	// root round trip does is gated on it, and the gate is one-directional: a client that declared
-	// nothing is never asked and can therefore never change what this server may read.
+	// Whether the client declared `roots` is recorded once, here. A client that declared nothing is
+	// never asked and cannot change what this server may read.
 	s.clientRoots = ip.Capabilities != nil && ip.Capabilities.Roots != nil
 	if s.level == "" {
 		s.level = LevelInfo
@@ -647,19 +555,16 @@ func (s *Server) initialize(id json.RawMessage, params json.RawMessage) *rpcResp
 	s.mu.Unlock()
 
 	caps := map[string]any{
-		// listChanged is false and says so: this server binds its tool set at startup (compose, never
-		// configure), so the list cannot change mid-session.
+		// The tool set is fixed at startup, so the list never changes.
 		"tools":   map[string]any{"listChanged": false},
 		"logging": map[string]any{},
 	}
 	if s.Resources != nil {
-		// Declared only when something backs it. `subscribe` and `listChanged` are false and say so:
-		// a run's artifacts are published when the run finishes and dropped when it is evicted, and
-		// this server sends no notification for either — a client re-lists.
+		// Declared only with a provider. No change notifications are sent; clients re-list.
 		caps["resources"] = map[string]any{"subscribe": false, "listChanged": false}
 	}
 	return okResp(id, map[string]any{
-		"protocolVersion": want, // ECHOED, not "our latest"
+		"protocolVersion": want, // echoed
 		"capabilities":    caps,
 		"serverInfo":      s.Info,
 		"instructions":    s.Instructions,
@@ -679,14 +584,9 @@ type listToolsParams struct {
 	Cursor string `json:"cursor,omitempty"`
 }
 
-// toolsPage decodes and validates a `tools/list` request and returns the page it names. It is split
-// out from listTools because admission STEP 5 must apply the SAME check before the era latch — an
-// admission gate that disagreed with its handler about what is valid would latch on requests the
-// server then refuses.
-//
-// A cursor is HONORED, not ignored: an unrecognized cursor is -32602 (the spec's requirement), and a
-// page boundary produces a nextCursor the client can follow. With the default PageSize of 0 the whole
-// list comes back with no nextCursor.
+// toolsPage decodes a `tools/list` request and returns the page it names; admission step 5 runs the
+// same check before the latch. An unrecognized cursor is -32602. With PageSize 0 the whole list is
+// returned without nextCursor.
 func (s *Server) toolsPage(id json.RawMessage, params json.RawMessage) (map[string]any, *rpcResponse) {
 	var p listToolsParams
 	if len(params) > 0 {
@@ -730,8 +630,7 @@ func (s *Server) listTools(env *RequestEnv, id json.RawMessage, params json.RawM
 	return okResp(id, s.result(env, out))
 }
 
-// cursorPrefix keeps a cursor OPAQUE-looking and lets an obviously foreign cursor be rejected rather than
-// decoded into a plausible offset.
+// cursorPrefix lets a foreign cursor be rejected rather than decoded into a plausible offset.
 const cursorPrefix = "tools:"
 
 func encodeCursor(n int) string {
@@ -773,15 +672,11 @@ func (s *Server) setLevel(id json.RawMessage, params json.RawMessage) *rpcRespon
 	return okResp(id, map[string]any{})
 }
 
-// log emits `notifications/message` when the level is at or above the client's selected minimum.
+// log emits `notifications/message` when level is at or above the client's selected minimum.
 //
-// SUNSET-PATH (MCP26-SUNSET). THE WHOLE `notifications/message` PATH IS
-// DELETED OUTRIGHT at legacy removal, not un-gated: `Server.log`, `Call.Log`'s body, `setLevel` and
-// `setLevelParams`, the session `level` field, and the `Level` vocabulary in mcp.go (the eight
-// constants, `levelRank`, `ValidLevel`, `LevelNames`). There is no modern path to collapse into —
-// `server/utilities/logging` is deprecated in `2026-07-28`, its named stdio migration is stderr, and
-// this transport already writes diagnostics there. Applications currently calling `Call.Log` lose a
-// no-op, not a channel.
+// SUNSET-PATH (MCP26-SUNSET): the whole `notifications/message` path is deleted at legacy removal:
+// Server.log, the body of Call.Log, setLevel, setLevelParams, the session level field, and the Level
+// vocabulary in mcp.go.
 func (s *Server) log(f Framer, level Level, logger string, data any) {
 	s.mu.Lock()
 	min := s.level
@@ -805,17 +700,14 @@ func (s *Server) log(f Framer, level Level, logger string, data any) {
 
 // --- tools/call ---
 
-// callToolParams is the `tools/call` params this transport reads. `_meta` is NOT parsed here: it is
-// the request's protocol context, it is the same object on every method under the modern era, and it
-// is read once by envFor so there is one parse of one shape rather than a per-method copy.
+// callToolParams is the `tools/call` params this transport reads. `_meta` is read once, by envFor.
 type callToolParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-// toolCallParams decodes and validates a `tools/call` request. Split out for the same reason
-// toolsPage is: admission STEP 5 runs it before the era latch, so a call naming a tool this server
-// does not have never selects the process's era.
+// toolCallParams decodes and validates a `tools/call` request. Admission step 5 runs it before the
+// latch, so a call naming an unknown tool never selects the era.
 func (s *Server) toolCallParams(id json.RawMessage, params json.RawMessage) (*callToolParams, *rpcResponse) {
 	var p callToolParams
 	if len(params) > 0 {
@@ -827,9 +719,7 @@ func (s *Server) toolCallParams(id json.RawMessage, params json.RawMessage) (*ca
 		return nil, errResp(id, CodeInvalidParams, "invalid params: tools/call requires a tool `name`")
 	}
 	if _, ok := s.handlers[p.Name]; !ok {
-		// A tool WITHHELD by a launch decision gets its own answer. It is still absent from
-		// tools/list; this only stops the refusal from telling a caller it was confused when in
-		// fact it was ungranted.
+		// A tool withheld by a launch decision returns its reason instead of "unknown tool".
 		if why := s.WithheldTools[p.Name]; why != "" {
 			return nil, errResp(id, CodeInvalidParams, fmt.Sprintf("tool %q is not available on this server: %s", p.Name, why))
 		}
@@ -844,11 +734,8 @@ func (s *Server) callTool(ctx context.Context, f Framer, env *RequestEnv, req rp
 		return refusal
 	}
 	h := s.handlers[p.Name]
-	// THE PROTOCOL CONTEXT IS BUILT ONCE PER REQUEST AND CARRIED. Everything downstream — the progress
-	// token, the era that decides whether logging is emitted at all, and the resolver every path in
-	// this call is judged against — reads it from the Call instead of reaching back into the Server.
-	// A modern call arrives with its env already built (and already validated, and already latched);
-	// a legacy one builds it from session state here.
+	// The protocol context is built once per request and carried on the Call. A modern call arrives
+	// with it already built and validated; a legacy call builds it from session state here.
 	if env == nil {
 		var r *rpcResponse
 		if env, r = s.envFor(req.Method, req.Params); r != nil {
@@ -858,22 +745,16 @@ func (s *Server) callTool(ctx context.Context, f Framer, env *RequestEnv, req rp
 	}
 	c := &Call{Name: p.Name, Arguments: p.Arguments, srv: s, f: f, env: env}
 	res, err := h(ctx, c)
-	// THE TASK BRANCH, checked before anything else about the handler's return. A handler that
-	// answered with a task handle returns `nil, nil` — there is no CallToolResult to send, because
-	// the point of a `CreateTaskResult` is that the result does not exist yet.
-	//
-	// A protocol error still wins: a handler that both marked a task and failed has produced no run
-	// to hand back a handle to, and reporting the failure is the only honest answer.
+	// A handler that answered with a task handle returns nil, nil. A returned error still wins,
+	// since there is then no run to hand back.
 	if id := c.taskHandle(); id != "" && err == nil {
 		return s.createTaskResponse(req.ID, env, id)
 	}
 	if err != nil {
-		var re *RequestError
-		if errors.As(err, &re) {
+		if re, ok := errors.AsType[*RequestError](err); ok {
 			return errResp(req.ID, re.Code, re.Message, re.Data)
 		}
-		// Anything else is a DOMAIN failure: it rides a successful response carrying IsError, so the
-		// model sees it and can react.
+		// Any other error is a domain failure, returned as an IsError result.
 		return okResp(req.ID, s.result(env, ErrorResult(err.Error(), nil)))
 	}
 	if res == nil {
@@ -885,10 +766,7 @@ func (s *Server) callTool(ctx context.Context, f Framer, env *RequestEnv, req rp
 	if res.Content == nil {
 		res.Content = []Content{}
 	}
-	// `isError` rides `resultType: "complete"`: a domain halt is a COMPLETED request whose tool failed,
-	// which is what server/tools says ("They are reported in tool results with `isError: true`", under a
-	// heading distinguishing them from protocol errors returned as JSON-RPC errors). It reads wrong to a
-	// human and it is what the specification asks for.
+	// An IsError result still uses `resultType: "complete"`: the request completed and its tool failed.
 	return okResp(req.ID, s.result(env, res))
 }
 
@@ -899,16 +777,11 @@ type cancelledParams struct {
 	Reason    string          `json:"reason,omitempty"`
 }
 
-// handleCancelled cancels the in-flight call with the given request id. The cancellation is RECORDED even
-// when the call has already finished dispatching, so the response is suppressed rather than racing out.
+// handleCancelled cancels the in-flight call with the given request id. The cancellation is recorded
+// even when the call has already finished, so its response is suppressed.
 //
-// IT CANNOT CANCEL A TASK, and that is a requirement rather than a limitation. The tasks extension,
-// verbatim (verified 2026-08-04): "The `notifications/cancelled` notification **MUST NOT** be used
-// for task cancellation." The rule holds here BY CONSTRUCTION rather than by a special case: once a
-// `CreateTaskResult` has been returned, the originating `tools/call` is complete, its id has already
-// left `s.inflight`, and the lookup below finds nothing to cancel — so a `notifications/cancelled`
-// naming it cancels nothing and, critically, never reaches the run's own context (which the task
-// projects and which only `tasks/cancel` may signal).
+// It cannot cancel a task, as the tasks extension requires: once a CreateTaskResult is returned, the
+// originating call is no longer in flight, so only `tasks/cancel` reaches the run.
 func (s *Server) handleCancelled(params json.RawMessage) {
 	var p cancelledParams
 	if json.Unmarshal(params, &p) != nil || len(p.RequestID) == 0 {
@@ -956,18 +829,9 @@ func (s *Server) write(f Framer, resp *rpcResponse) {
 	}
 	b, err := json.Marshal(resp)
 	if err != nil {
-		// A RESULT THAT WILL NOT MARSHAL STILL OWES THE CALLER A RESPONSE.
-		//
-		// Returning silently here would mean the client receives NOTHING for a request it
-		// has an id outstanding for, blocking until its own timeout — a request that hangs is a
-		// strictly worse failure than one that errors, because there is nothing to diagnose from.
-		//
-		// The path is reachable through the era envelope: `eraResult.MarshalJSON` returns a real
-		// error for a payload that collides with a field the envelope owns. Two
-		// writers of one field is a programming error and must stay loud (the envelope keeps
-		// erroring), but "loud" has to mean an error the caller can see.
-		//
-		// A notification has no id and therefore no caller to answer; those still drop.
+		// A result that will not marshal still owes the caller a response, or the client waits for its
+		// own timeout. eraResult.MarshalJSON fails when a payload collides with a field it owns.
+		// Messages without an id have no caller and are dropped.
 		if len(resp.ID) == 0 || resp.Error != nil {
 			s.Diagnosticf("mcp: a response could not be marshalled and was dropped: %v", err)
 			return
@@ -998,8 +862,7 @@ func (s *Server) notify(f Framer, method string, params any) {
 	s.wmu.Unlock()
 }
 
-// Diagnosticf writes a SERVER-side diagnostic line to Diagnostics (never to the protocol stream). It is
-// the only logging path a server should use for anything that must not be a client notification.
+// Diagnosticf writes a server-side diagnostic line to Diagnostics, never to the protocol stream.
 func (s *Server) Diagnosticf(format string, args ...any) {
 	if s.Diagnostics == nil {
 		return

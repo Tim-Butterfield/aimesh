@@ -7,21 +7,17 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// knownDevinBrands is the explicit set of leading brand tokens accepted as the start of
-// a Devin display model name (observed in the Devin CLI's accepted-model list). It exists
-// so an ambiguous partial name like "Opus 4.8" is REJECTED rather than silently prefixed
-// with "Claude". This is an explicit, tested table — not an inference.
+// knownDevinBrands are the leading brand tokens accepted at the start of a Devin display model name,
+// so an ambiguous partial name such as "Opus 4.8" is rejected rather than prefixed with "Claude".
 var knownDevinBrands = map[string]bool{
 	"claude": true, "gpt": true, "gemini": true, "deepseek": true,
 	"glm": true, "kimi": true, "swe": true, "adaptive": true,
 }
 
-// RenderDevinModelArg converts a Devin IDE/Cascade **display** model name plus a separate
-// effort level into the single name-bound `--model` slug the Devin CLI expects: lowercase,
-// spaces and periods replaced with hyphens, repeated hyphens collapsed, trimmed, with the
-// normalized effort appended as the final segment. The display name MUST begin with a
-// recognized brand token (Claude / GPT / Gemini / …); a partial name such as "Opus 4.8"
-// is rejected (a provider prefix is never auto-added).
+// RenderDevinModelArg converts a Devin display model name plus a separate effort level into the
+// `--model` slug the Devin CLI expects: lowercase, spaces and periods replaced with hyphens, repeated
+// hyphens collapsed, with the normalized effort appended. The display name must begin with a known brand
+// token (Claude, GPT, Gemini, ...); a partial name such as "Opus 4.8" is rejected.
 //
 //	"Claude Opus 4.8" + "medium"          -> "claude-opus-4-8-medium"
 //	"GPT-5.4"         + "Medium Thinking" -> "gpt-5-4-medium"

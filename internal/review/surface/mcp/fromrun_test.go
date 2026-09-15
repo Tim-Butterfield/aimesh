@@ -1,24 +1,15 @@
 package mcp_test
 
-// FROM-RUN, RESOLVED FROM DISK — the MCP half of the surface-parity invariant, proven against a real
-// run.Manager, a real workspace, a real decision-set artifact and a real live write.
+// These tests resolve review_remediate {fromRun} from disk against a real run.Manager, workspace,
+// decision-set artifact and live write. The in-memory run registry is bounded and dies with the
+// process, so a handle naming a run this server produced also resolves from the run's directory, as
+// it does on ACP.
 //
-// WHAT THESE HOLD. The in-memory run registry is bounded by count and TTL and dies with the process,
-// so `review_remediate {fromRun}` also resolves a handle from the run's own directory: a handle naming
-// a run this server really did produce, whose decision set is recorded there, applies — the same
-// answer ACP gives for the same handle, from the same file.
+// A restart is staged as two mcp.Server values over one run.Manager: the first reports and the
+// second, which never saw the run, remediates.
 //
-// HOW A RESTART IS STAGED. A restarted server is a NEW registry over the SAME artifact directory, so
-// each test drives two `mcp.Server` values over one `run.Manager`: the first reports, the second
-// remediates. Nothing is deleted and no clock is moved — the second server simply never saw the run,
-// which is exactly what a restarted one has not.
-//
-// The durable-handle assertion in `report` is what makes the disk path reachable: the run id a client
-// is handed must name the directory the decision set is recorded in.
-//
-// Two tests are guards — `_AHandleThisAgentDidNotProduceIsRefused` and `_AWriteRunIsNotAFromRunSource`.
-// They hold that the reader gives no way to point a governed write at an arbitrary directory, and no
-// way to apply a run that never adjudicated anything.
+// Two tests are guards: a handle cannot point a governed write at an arbitrary directory, and a run
+// that adjudicated nothing cannot be applied.
 
 import (
 	"context"
@@ -36,13 +27,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// silenceableReviewer is the reviewer lane, with a switch: it answers as the deterministic fake until
-// `silence()` is called, after which it approves with NO findings.
-//
-// That switch is the experiment. It makes "what a fresh panel would say now" differ from "what the
-// panel said in the report run", so a write that replays the STORED set and a write that re-derived
-// one produce visibly different outcomes. (It is the ACP suite's `switchingReviewer`; the two live in
-// different packages, and a shared copy would couple two surfaces' fixtures for four lines.)
+// silenceableReviewer answers as the deterministic fake until silence is called, then approves with
+// no findings. That makes a write replaying the stored set distinguishable from one that re-reviewed.
+// It mirrors the ACP suite's switchingReviewer.
 type silenceableReviewer struct {
 	valid  model.Adapter
 	empty  model.Adapter
@@ -53,10 +40,8 @@ func (s *silenceableReviewer) Name() string              { return "fake" }
 func (s *silenceableReviewer) Available() (bool, string) { return true, "ok" }
 func (s *silenceableReviewer) silence()                  { s.silent.Store(true) }
 
-// Evidence is the OPTIONAL identity capability the manager type-asserts on every lane's adapter. A
-// seat whose adapter cannot state its evidence tier is WEAK-IDENTITY, and a finding supported only by
-// weak-identity seats is quarantined — so a wrapper that forgot this would produce a run with
-// findings and no accepted set, and every assertion below would fail for an unrelated reason.
+// Evidence implements the optional identity capability. Without it a seat is weak-identity and its
+// findings are quarantined, leaving no accepted set.
 func (s *silenceableReviewer) Evidence() review.IdentityEvidence {
 	return review.EvidenceInvocationTag
 }
@@ -68,13 +53,12 @@ func (s *silenceableReviewer) Invoke(ctx context.Context, c model.Call) (model.R
 	return s.valid.Invoke(ctx, c)
 }
 
-// hostAdapter is the adapter name the author_remediator seat names. It is a built-in recipe so the
-// server's launch set can hold it (newServer launches it at a test-owned executable); the Manager maps
-// it to writingHost, so no real CLI is ever invoked.
+// hostAdapter is the adapter the author_remediator seat names. It is a built-in recipe so the launch
+// set can hold it; the manager maps it to writingHost, so no CLI runs.
 const hostAdapter = "claude-code"
 
-// fromRunPanel is the panel every report in this file composes: the fake reviewer, and writingHost as
-// the adjudicator.
+// fromRunPanel returns the panel every report here composes: the fake reviewer and writingHost as
+// adjudicator.
 func fromRunPanel() map[string]any {
 	return map[string]any{
 		"reviewers":         []any{map[string]any{"adapter": "fake", "model": "fake-model"}},
@@ -82,8 +66,8 @@ func fromRunPanel() map[string]any {
 	}
 }
 
-// writingHost is the author_remediator lane: it adjudicates the reviewer's finding as apply-worthy
-// and returns a real anchored edit, so an apply produces an observable change to a real file.
+// writingHost is the author_remediator seat: it accepts the reviewer's finding and returns an anchored
+// edit, so an apply changes a real file.
 type writingHost struct{}
 
 func (writingHost) Name() string              { return hostAdapter }
@@ -104,10 +88,8 @@ func (writingHost) Invoke(_ context.Context, c model.Call) (model.Result, error)
 	}
 }
 
-// fromRunFixture is a real, write-capable run.Manager over a real workspace. Everything the MCP
-// tests elsewhere in this package fake — the run directory, the decision-set artifact, the base-hash
-// pins — is genuine here, because the on-disk path is the thing under test and a fake that
-// "resolved" a handle would assert what it is meant to prove.
+// fromRunFixture is a write-capable run.Manager over a real workspace. The run directory, decision
+// set and base-hash pins are genuine, because the on-disk path is under test.
 type fromRunFixture struct {
 	mgr  *run.Manager
 	rv   *silenceableReviewer
@@ -126,8 +108,8 @@ func newFromRunFixture(t *testing.T) *fromRunFixture {
 		t.Fatal(err)
 	}
 
-	// The configuration a launch-configured server builds (app.loadLaunch): the built-in defaults, no
-	// profiles, and apply reachable on the agent surfaces because the server gates writes itself.
+	// The configuration a launch-configured server builds: built-in defaults, no profiles, and apply
+	// reachable on agent surfaces.
 	cfg := config.Default()
 	cfg.Adapters[hostAdapter] = config.Adapter{ModelIdentity: "invocation_tag"}
 	cfg.Surfaces.DefaultModeBySurface = map[string]string{"cli": "apply", "ci": "report", "acp": "apply", "mcp": "apply"}
@@ -146,8 +128,8 @@ func newFromRunFixture(t *testing.T) *fromRunFixture {
 	}
 }
 
-// server returns a NEW server over the fixture's manager. Calling it twice is how a restart is
-// staged: the second server has an empty run registry and the same artifact directory on disk.
+// server returns a new server over the fixture's manager. A second call stages a restart: an empty
+// registry over the same artifact directory.
 func (f *fromRunFixture) server(t *testing.T) *client {
 	t.Helper()
 	return serve(t, newServer(t, f.mgr, func(s *mcp.Server) {
@@ -155,7 +137,7 @@ func (f *fromRunFixture) server(t *testing.T) *client {
 	}))
 }
 
-// report runs one report turn and returns its runId — the only handle this surface ever hands out.
+// report runs one report and returns its runId.
 func (f *fromRunFixture) report(t *testing.T, c *client) string {
 	t.Helper()
 	res := c.tool(t, "review_report", map[string]any{"workspace": f.ws, "panel": fromRunPanel()})
@@ -166,9 +148,8 @@ func (f *fromRunFixture) report(t *testing.T, c *client) string {
 	if id == "" {
 		t.Fatalf("the report must return a runId: %+v", res.structured)
 	}
-	// THE HANDLE IS DURABLE, and this is what makes it so: the id a client is handed NAMES the run's
-	// own directory, so the decision set recorded there is findable from the only thing the client
-	// holds. Without this the fallback below could never fire for a real client.
+	// The run id names the run's directory, so the decision set is findable from the handle the client
+	// holds.
 	if _, err := os.Stat(filepath.Join(f.art, id, filepath.FromSlash(run.DecisionSetArtifact))); err != nil {
 		t.Fatalf("the runId a client is handed must name the run directory its decision set is recorded in: %v", err)
 	}
@@ -197,9 +178,8 @@ func (f *fromRunFixture) remediate(t *testing.T, c *client, fromRun string) tool
 	})
 }
 
-// TestMCPFromRun_AnEvictedHandleStillAppliesFromDisk is the parity defect itself. The run was
-// produced by this agent and recorded its decision set; only the in-memory registry entry is gone.
-// An ACP agent honours that handle, and now so does this one — from the same file.
+// A run this agent produced, whose registry entry is gone, still applies from its recorded decision
+// set.
 func TestMCPFromRun_AnEvictedHandleStillAppliesFromDisk(t *testing.T) {
 	f := newFromRunFixture(t)
 	sourceRun := f.report(t, f.server(t))
@@ -221,35 +201,28 @@ func TestMCPFromRun_AnEvictedHandleStillAppliesFromDisk(t *testing.T) {
 	if committed, _ := receipt["committed"].(bool); !committed {
 		t.Fatalf("apply must report a commit: %+v", receipt)
 	}
-	// The receipt names the run whose decisions were applied — two runs, two handles, neither
-	// standing in for the other.
+	// The receipt names the run whose decisions were applied.
 	if receipt["sourceRunId"] != sourceRun {
 		t.Errorf("receipt.sourceRunId = %v, want the source run %q", receipt["sourceRunId"], sourceRun)
 	}
 	if src, _ := res.structured["sourceRunId"].(string); src != sourceRun {
 		t.Errorf("sourceRunId = %q, want %q", src, sourceRun)
 	}
-	// And the pins the SOURCE run captured were the ones verified — not pins re-derived now, which
-	// would make a changed file look unchanged.
+	// The pins verified are the ones the source run captured.
 	if n, _ := receipt["baseHashesVerified"].(float64); n < 1 {
 		t.Errorf("baseHashesVerified = %v, want the source run's pins to have been checked", receipt["baseHashesVerified"])
 	}
 }
 
-// TestMCPFromRun_TheAppliedSetIsTheInspectedSet is the property the whole `fromRun` form exists for,
-// asserted on the path that now also reaches disk: the write applies the set a human READ, never one
-// re-derived at write time.
-//
-// The report turn raises one accepted finding. The panel is then SILENCED and a control turn proves
-// a fresh adjudication would now produce nothing at all. The apply — on a server that never saw the
-// source run — still writes, because what it applies came off the source run's own record.
+// The write applies the set that was read, not one re-derived at write time. After the report, the
+// panel is silenced and a control run produces nothing; the apply, on a server that never saw the
+// source run, still writes.
 func TestMCPFromRun_TheAppliedSetIsTheInspectedSet(t *testing.T) {
 	f := newFromRunFixture(t)
 	first := f.server(t)
 	sourceRun := f.report(t, first)
 
-	// THE CONTROL. Once silenced, a fresh run produces no accepted set, so the assertion below
-	// cannot pass by a re-review happening to agree.
+	// The control: a fresh run now produces no accepted set.
 	f.rv.silence()
 	control := c2Structured(t, first, f.ws)
 	if n, _ := control["findings"].([]any); len(n) != 0 {
@@ -274,10 +247,8 @@ func c2Structured(t *testing.T, c *client, ws string) map[string]any {
 	return res.structured
 }
 
-// TestMCPFromRun_AStaleTreeHaltsRatherThanWrites. A stored decision set describes a workspace; if
-// that workspace has moved on, the set describes something that no longer exists. The pins the SOURCE
-// run captured are re-verified before the write window opens, so the refusal costs a round trip
-// rather than a run — and the human's edit survives.
+// The source run's pins are re-verified before the write window opens, so a changed tree halts and
+// the human's edit survives.
 func TestMCPFromRun_AStaleTreeHaltsRatherThanWrites(t *testing.T) {
 	f := newFromRunFixture(t)
 	sourceRun := f.report(t, f.server(t))
@@ -301,21 +272,17 @@ func TestMCPFromRun_AStaleTreeHaltsRatherThanWrites(t *testing.T) {
 	if got := f.body(t); got != human {
 		t.Fatalf("the human's edit was overwritten:\nwant: %q\ngot:  %q", human, got)
 	}
-	// The refusal is RECORDED: a receipt exists on every path, and it says nothing was committed.
+	// The refusal is recorded: a receipt exists and says nothing was committed.
 	receipt, _ := res.structured["receipt"].(map[string]any)
 	if committed, _ := receipt["committed"].(bool); committed {
 		t.Fatalf("a halted write must record no commit: %+v", receipt)
 	}
 }
 
-// TestMCPFromRun_ASecondApplyAfterARestartHalts is the RESTART SEAM, asserted rather than assumed.
-//
-// In-process, a second `review_remediate {fromRun: X}` returns the ORIGINAL receipt — the source-run
-// guard, which lives in the registry (proved by TestRemediate_FromRunAppliesTheAcceptedSetAndIsIdempotent).
-// That guard does not survive a restart, and this is what takes its place: the first apply changed
-// the very files the stored set pins, so the second call HALTS on stale pins having written nothing.
-// Both are refusals to double-write; a client must be able to tell them apart, so the codes differ
-// and neither is dressed up as the other.
+// In-process, a second remediation of the same run returns the original receipt through the
+// registry's source-run guard. After a restart the guard is gone, but the first apply changed the
+// pinned files, so the second call halts on stale pins without writing. The two outcomes carry
+// different codes.
 func TestMCPFromRun_ASecondApplyAfterARestartHalts(t *testing.T) {
 	f := newFromRunFixture(t)
 	sourceRun := f.report(t, f.server(t))
@@ -337,12 +304,8 @@ func TestMCPFromRun_ASecondApplyAfterARestartHalts(t *testing.T) {
 	}
 }
 
-// TestMCPFromRun_AHandleThisAgentDidNotProduceIsRefused. The handle arrives from a peer, so it is
-// VERIFIED against this agent's own artifact directory rather than trusted — and every way of failing
-// answers alike, so a peer gains no existence oracle over paths outside it.
-//
-// This guard is the one that matters most: it holds that the reader gives no way to point a governed
-// write at an arbitrary directory.
+// The handle is verified against the workspace's run-record locations, and every failure answers
+// alike, so a governed write cannot be pointed at an arbitrary directory.
 func TestMCPFromRun_AHandleThisAgentDidNotProduceIsRefused(t *testing.T) {
 	f := newFromRunFixture(t)
 	f.report(t, f.server(t)) // a real run exists, so the artifact directory is populated
@@ -375,10 +338,8 @@ func TestMCPFromRun_AHandleThisAgentDidNotProduceIsRefused(t *testing.T) {
 	}
 }
 
-// TestMCPFromRun_AnInlineRunIsStillRefusedByNameFromDisk. The refusal ladder must not change SHAPE
-// just because the answer now comes from disk: an inline run's content was materialized into a
-// directory this server has since deleted, and the caller learns exactly that — with the same
-// reasonCode the registry path reports — rather than an obscure failure on a vanished path.
+// An inline run is refused from disk with the same reason code as from the registry, since its
+// materialized directory has been deleted.
 func TestMCPFromRun_AnInlineRunIsStillRefusedByNameFromDisk(t *testing.T) {
 	f := newFromRunFixture(t)
 	c := f.server(t)
@@ -401,9 +362,7 @@ func TestMCPFromRun_AnInlineRunIsStillRefusedByNameFromDisk(t *testing.T) {
 	}
 }
 
-// TestMCPFromRun_AWriteRunIsNotAFromRunSource. A patch/apply run has already applied its own accepted
-// set; offering it as a source would be a second application of decisions nobody re-read. It records
-// no decision set, so it resolves to nothing — the same answer ACP gives.
+// A patch or apply run records no decision set, so it resolves to nothing, as on ACP.
 func TestMCPFromRun_AWriteRunIsNotAFromRunSource(t *testing.T) {
 	f := newFromRunFixture(t)
 	sourceRun := f.report(t, f.server(t))

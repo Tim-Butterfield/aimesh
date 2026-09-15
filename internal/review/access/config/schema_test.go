@@ -10,19 +10,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
 )
 
-// docs/schema/config.schema.json is a REFERENCE declaration: nothing loads it at runtime, and the
-// typed strict decoder in this package is what a running binary enforces. That is exactly why it
-// needs a test. A declaration nothing checks drifts, and this one had: `surfaces` and `defaults`
-// were typed only as `object` (so half the write-authority policy was undescribed), `schemaVersion`
-// and `lanes` were marked `required` when the decoder requires neither, and the `runtime` enum
-// forbade a value the decoder accepts.
-//
-// The contract these tests hold is two-sided, because a schema can lie in both directions:
-//
-//   - it must ACCEPT everything the decoder accepts (the shipped seed, the example profiles, a
-//     partial layer that names one key), or it tells a reader their valid config is invalid;
-//   - it must REFUSE what the decoder refuses (an unknown key, and specifically the two inert keys
-//     that were removed), or it invites a config the loader will reject.
+// docs/schema/config.schema.json is not loaded at runtime; the strict decoder is what the binary
+// enforces. These tests keep the two in agreement in both directions: the schema must accept what
+// the decoder accepts (the seed, the example profiles, a partial layer) and refuse what it refuses
+// (unknown and inert keys).
 
 // repoRoot walks up from the test's package directory to the directory holding docs/schema.
 func repoRoot(t *testing.T) string {
@@ -31,7 +22,7 @@ func repoRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("cwd: %v", err)
 	}
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		if _, err := os.Stat(filepath.Join(dir, "docs", "schema")); err == nil {
 			return dir
 		}

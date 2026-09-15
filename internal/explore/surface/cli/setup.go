@@ -15,32 +15,23 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// This file is exploremesh's HEADLESS configuration surface (`setup`) — the CLI path to everything the
-// config-only web workbench can do: record/clear a shell adapter's binary path, detect/add/remove a
-// user-defined ACP adapter, and create / delete a profile — so a headless install has a supported
-// configuration path that is not hand-editing YAML.
+// This file implements `aimesh explore setup`: record or clear a shell adapter's binary path, detect, add
+// or remove a user-defined ACP adapter, and create or delete a profile. Every write goes through the
+// manager, which validates it; this file only parses flags and renders results.
 //
-// Every write goes through the SAME governed manager seams the workbench uses (ConfigureAdapterPath /
-// RemoveAdapter / DetectACP / SaveACP / RemoveACP / SaveProfile / DeleteProfile), so
-// this surface can neither bypass a validation rule nor drift from the UI: it renders, it does not decide.
-//
-// NO --scope FLAG (unlike `reviewmesh setup`): exploremesh's manager owns its write targets — adapter
-// and ACP entries always go to the USER-scope shared ~/.aimesh/adapters.yaml (the single seam adapter
-// locations live in, shared with reviewmesh), and profiles go to profile.DefaultProfilesPath (project
-// scope inside a repo, else the user scope). There is nothing for a scope flag to select.
+// There is no --scope flag. Adapter and ACP entries go to the user-scope shared ~/.aimesh/adapters.yaml,
+// and profiles to profile.DefaultProfilesPath (the project scope inside a repository, else the user scope).
 
-// argList collects a repeatable --acp-arg (order preserved). ACP launch args are passed one flag at a
-// time rather than comma-split: an argument may legitimately contain a comma, and a mangled launch line
-// fails looking like a broken CLI rather than a broken flag.
+// argList collects a repeatable --acp-arg in order. Arguments are not comma-split, because a launch
+// argument may contain a comma.
 type argList []string
 
 func (a *argList) String() string     { return strings.Join(*a, " ") }
 func (a *argList) Set(v string) error { *a = append(*a, v); return nil }
 
-// runSetup parses the setup surface, enforces EXACTLY ONE action, and dispatches it to a manager seam.
-// Flag/shape problems are usage errors (exit 2, before any config is touched); a refused or failed write
-// exits on the REFUSAL'S OWN CLASS from the shared taxonomy (a rejected profile/adapter is a config
-// fault, an unreachable ACP binary an adapter fault), exactly as the equivalent `reviewmesh setup` does.
+// runSetup parses the setup flags, requires exactly one action, and runs it through the manager. Flag
+// problems exit with a usage error before any configuration is read; a refused write exits with the
+// refusal's own fault class.
 func runSetup(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -60,23 +51,20 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	var canonicalizerSpecs slotSpecs
 	fs.Var(&canonicalizerSpecs, "canonicalizer", "with --profile: a canonicalizer identity as adapter=<n>,model=<m>[,effort=<e>] (repeatable; supply exactly 2 or none). Two INDEPENDENT identities propose the canonicalization; omitted, the host derives them from the collator + the panel's preference order")
 	defaultMode := fs.String("default-mode", "", "with --profile: the mode a run uses when --mode is omitted (known modes: "+strings.Join(mode.Names(), ", ")+")")
-	// There is deliberately NO --set-default / --set-default-profile: as in reviewmesh, a no-flag run
-	// always binds to the profile named `default` — save the panel you want as `default` instead.
+	// There is no flag to choose the default profile: a run without flags uses the profile named `default`.
 	deleteProfile := fs.String("delete-profile", "", "delete this profile (requires --yes; refused for the default profile and for the last remaining one)")
 	yes := fs.Bool("yes", false, "confirm --delete-profile non-interactively")
 	if err := fs.Parse(args); err != nil {
 		return int(fault.Usage)
 	}
 
-	// --path names no action by itself; say what it is missing rather than falling through to the generic
-	// "nothing to do" (a bare `setup --path /x` is almost always a forgotten --adapter).
+	// --path alone names no action; say which flag is missing.
 	if *binPath != "" && *adapter == "" && *acpAction == "" {
 		fmt.Fprintln(stderr, "aimesh explore setup: --path requires --adapter (or --acp detect|add)")
 		return int(fault.Usage)
 	}
 
-	// EXACTLY ONE action per invocation. Setup writes config; a call that quietly did two things (or
-	// nothing) is the kind of surface that makes a user unsure what state they are now in.
+	// Exactly one action per invocation, so the resulting configuration state is unambiguous.
 	actions := 0
 	for _, selected := range []bool{
 		*adapter != "", *removeAdapter != "", *acpAction != "",
@@ -89,14 +77,14 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	switch {
 	case actions == 0:
 		fmt.Fprintln(stderr, "aimesh explore setup: nothing to do — name an action: --adapter/--path, --remove-adapter, --acp detect|add|remove, --profile or --delete-profile")
-		fs.PrintDefaults() // the flags go with the guidance: a bare `setup` is someone looking for the surface
+		fs.PrintDefaults()
 		return int(fault.Usage)
 	case actions > 1:
 		fmt.Fprintln(stderr, "aimesh explore setup: name exactly ONE action per invocation")
 		return int(fault.Usage)
 	}
 
-	// Per-action shape guards, all BEFORE any config is read or written.
+	// Per-action flag checks, before any configuration is read or written.
 	switch {
 	case *adapter != "" && *binPath == "":
 		fmt.Fprintf(stderr, "aimesh explore setup: --adapter requires --path (e.g. aimesh explore setup --adapter %s --path /full/path/to/binary)\n", *adapter)
@@ -133,7 +121,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		return codeOf(err)
 	}
 
-	// Every seam returns the same (messages, error) pair, so one renderer covers all of them.
+	// Every manager write returns (messages, error), so one renderer covers them all.
 	render := reporter(stdout, stderr)
 	switch {
 	case *adapter != "":
@@ -149,8 +137,8 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// setupManager binds a manager to the config a no-flag run resolves for this folder: the SAME
-// resolveSource path `explore`/`doctor`/`ui`/`list` use, so setup edits exactly what a run reads.
+// setupManager returns a manager for the configuration a run without flags resolves in this directory,
+// through the same resolveSource that run, doctor and list use.
 func setupManager() (*manager.Manager, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -163,13 +151,8 @@ func setupManager() (*manager.Manager, error) {
 	return manager.New(cwd, r)
 }
 
-// runSetupACP drives the user-defined ACP adapter flow over the manager's governed seams. There is no
-// fixed ACP catalog: the user points the generic ACP driver at an ACP-capable CLI, the launch args are
-// auto-detected and confirmed by a REAL handshake, and the instance lands in the shared adapters.yaml.
-//
-// detect and add LAUNCH THE REAL CLI (that is the only way to know whether it speaks ACP), which is why
-// they are explicit verbs a user opts into rather than something any other command does implicitly. Both
-// are bounded by the manager's own probe timeout plus the acpagent startup watchdog.
+// runSetupACP runs an ACP adapter action. detect and add launch the real CLI to confirm it speaks ACP,
+// bounded by the manager's probe timeout, so no other command does this implicitly.
 func runSetupACP(mgr *manager.Manager, action, name, title, binPath string, args []string, stdout, stderr io.Writer) int {
 	switch action {
 	case "detect":
@@ -180,9 +163,8 @@ func runSetupACP(mgr *manager.Manager, action, name, title, binPath string, args
 		}
 		fmt.Fprintf(stdout, "ACP probe: %s\n", binPath)
 		if !res.OK {
-			// A failed probe is reported as an ADAPTER fault (exit 4 — a script must be able to branch on
-			// it) WITHOUT declaring the CLI unusable: mid-login and folder-trust are the common causes, and
-			// both are fixed in that CLI, not here. `aimesh review setup --acp detect` exits the same way.
+			// A failed probe exits with an adapter fault (4). Login and folder trust, the usual causes, are
+			// fixed in the CLI itself.
 			fmt.Fprintf(stdout, "  handshake: FAILED — %s\n", res.Detail)
 			fmt.Fprintln(stdout, "  next step: complete the CLI's own login / folder-trust setup, then re-run detect (or `setup --acp add` anyway and re-save later).")
 			return int(fault.Adapter)
@@ -195,31 +177,25 @@ func runSetupACP(mgr *manager.Manager, action, name, title, binPath string, args
 		if res.SuggestedTitle != "" {
 			fmt.Fprintf(stdout, "  suggested title: %s\n", res.SuggestedTitle)
 		}
-		fmt.Fprintf(stdout, "  save it: exploremesh setup --acp add --path %s\n", binPath)
+		fmt.Fprintf(stdout, "  save it: aimesh explore setup --acp add --path %s\n", binPath)
 		return int(fault.OK)
 	case "add":
-		// A handshake failure does NOT block the save (the manager warns instead), so a CLI that is
-		// mid-login can still be recorded and re-saved later to capture its model.
+		// A failed handshake still saves, with a warning (see manager.SaveACP).
 		return reporter(stdout, stderr)(mgr.SaveACP(name, title, binPath, args))
 	default: // "remove" (validated by the caller)
 		return reporter(stdout, stderr)(mgr.RemoveACP(name))
 	}
 }
 
-// runSetupProfile creates or replaces a named profile from the same STRUCTURED `adapter=,model=[,effort=]`
-// specs `explore --explorer/--collator/--canonicalizer` accept. The specs are parsed (and the >=2-explorer /
-// collator-present / 0-or-2-canonicalizer pre-conditions checked) before the manager is asked to write; the
-// deeper roster rules — unique triples, non-empty fields, a known default mode — are the manager's and
-// profile.Save's, so a bad profile is refused with nothing written. To make a panel the one a no-flag
-// run binds to, save it as the profile named `default` (the runtime default is fixed, as in reviewmesh).
-//
-// A save is WHOLE (see manager.SaveProfile): omitting --canonicalizer writes a profile with none, which is
-// the honest reading of "create or replace this profile from these specs".
+// runSetupProfile creates or replaces a named profile from the `adapter=,model=[,effort=]` specs that
+// `explore --explorer/--collator/--canonicalizer` accept. The specs are parsed here; the roster rules are
+// checked by the manager, and a bad profile writes nothing. The profile is replaced whole, so omitting
+// --canonicalizer saves a profile with none.
 func runSetupProfile(mgr *manager.Manager, name string, explorerSpecs []string, collatorSpec string, canonicalizerSpecs []string, defaultMode string, stdout, stderr io.Writer) int {
 	r, err := buildAdHocRoster(explorerSpecs, collatorSpec)
 	if err != nil {
 		fmt.Fprintf(stderr, "aimesh explore setup: --profile %s: %v\n", name, err)
-		return codeOf(err) // the spec grammar's own errors carry fault.Usage → exit 2
+		return codeOf(err)
 	}
 	cs, cerr := buildCanonicalizers(canonicalizerSpecs)
 	if cerr != nil {
@@ -232,15 +208,9 @@ func runSetupProfile(mgr *manager.Manager, name string, explorerSpecs []string, 
 	}))
 }
 
-// reporter returns the renderer for a manager seam's (messages, error) outcome: its messages on success,
-// or the failure on stderr. It is a closure so a seam call can be passed straight through
-// (render(mgr.X(...))) — Go only permits that when the call's results are the whole argument list.
-//
-// A *BlockedError (an adapter still referenced by the roster) additionally LISTS the blocking slots, so
-// the user is told what to reconfigure rather than only that the removal was refused.
-//
-// The exit code always comes from the ERROR (codeOf), never from a literal here: the manager already
-// classified every refusal it can produce, so this renderer stays a renderer.
+// reporter returns a renderer for a manager write's (messages, error) result, so a call can be passed
+// straight through as render(mgr.X(...)). It prints the messages on success, or the error on stderr,
+// listing the blocking slots of a *BlockedError. The exit code comes from the error's fault class.
 func reporter(stdout, stderr io.Writer) func([]string, error) int {
 	return func(msgs []string, err error) int {
 		if err != nil {

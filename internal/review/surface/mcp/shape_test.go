@@ -7,14 +7,11 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// TestDryRun_TheShapeReachesTheWire: a dry run's SHAPE reaches an MCP caller, as it does on the CLI.
-//
-// Without it a caller would receive `status: "planned"` with an empty finding set and nothing else,
-// which is indistinguishable from a review that found nothing. A dry run whose disclosure does not
-// arrive has cost the caller a round trip to learn nothing.
+// A dry run's shape reaches an MCP caller, as on the CLI; without it a planned status and empty
+// findings would look like a review that found nothing.
 func TestDryRun_TheShapeReachesTheWire(t *testing.T) {
 	ws := workspaceFixture(t)
-	// The manager's own dry-run stop is proven in the run package; what this pins is the PROJECTION — an outcome carrying a shape reaching the wire with it.
+	// The manager's dry-run stop is tested in the run package; this covers the projection.
 	planned := &review.RunOutcome{
 		Status: "planned",
 		Shape: &review.RunShape{
@@ -39,24 +36,22 @@ func TestDryRun_TheShapeReachesTheWire(t *testing.T) {
 	if !ok {
 		t.Fatalf("no shape on a dry run — the caller paid a round trip and learned nothing: %v", keysOf(res.structured))
 	}
-	// The numbers that make the call worth making.
+	// The fields that make a dry run useful.
 	for _, k := range []string{"seats", "minModelCalls", "maxModelCalls", "payload"} {
 		if _, present := shape[k]; !present {
 			t.Errorf("shape carries no %q", k)
 		}
 	}
-	// A RANGE, not a number: a review iterates until adjudication converges.
+	// A range, since a review iterates until adjudication converges.
 	lo, hi := shape["minModelCalls"], shape["maxModelCalls"]
 	if lo == nil || hi == nil {
 		t.Error("the call bounds must both be present — one end of a range is not a price")
 	}
-	// And the empty finding set must be readable as "nothing was looked at".
+	// The empty findings mean nothing was looked at.
 	if f, _ := res.structured["findings"].([]any); len(f) != 0 {
 		t.Errorf("a dry run reported %d finding(s) — it convenes nobody", len(f))
 	}
-	// EGRESS reaches the wire too. It was added to the shape today for the CLI; a caller deciding
-	// whether to spend needs to know who receives the code just as much as what it costs, and on
-	// this surface that caller is a model with no other way to find out.
+	// Egress reaches the wire, so a calling model can see who would receive the content.
 	eg, ok := shape["egress"].([]any)
 	if !ok || len(eg) == 0 {
 		t.Fatalf("the shape carries no egress: %v", shape["egress"])
@@ -67,8 +62,7 @@ func TestDryRun_TheShapeReachesTheWire(t *testing.T) {
 	}
 }
 
-// TestDryRun_ARealRunCarriesNoShape keeps the signal meaningful: the key's PRESENCE is what says
-// "this was planned, not performed", so a real run must not carry one.
+// A real run carries no shape; the key's presence means planned, not performed.
 func TestDryRun_ARealRunCarriesNoShape(t *testing.T) {
 	ws := workspaceFixture(t)
 	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} }))

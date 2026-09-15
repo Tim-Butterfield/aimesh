@@ -1,11 +1,8 @@
-// Package roster is exploremesh's configured explorer/collator set plus its
-// parse/validate/plan + persistence. It is the app-side "grammar" analogous to reviewmesh's
-// profiles/lanes — exploremesh owns it; meshcore never learns it. Persistence goes through
-// meshcore/config's domain-free store (strict decode + atomic write).
+// Package roster defines an exploration panel (explorers, a collator and optional canonicalizers), its
+// validation, the executable Plan built from it, and loading a roster file.
 package roster
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -13,67 +10,46 @@ import (
 
 	mcfg "github.com/Tim-Butterfield/aimesh/meshcore/config"
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
-	"gopkg.in/yaml.v3"
 
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// Explorer is one configured explorer — a distinct (adapter, model, effort) triple.
+// Explorer is one explorer identity: adapter, model and effort.
 type Explorer struct {
 	Adapter string `json:"adapter"`
 	Model   string `json:"model"`
 	Effort  string `json:"effort,omitempty"`
 }
 
-// Identity returns the attribution key used throughout the pipeline + collator output.
+// Identity returns the explorer's attribution key.
 func (e Explorer) Identity() schema.ExplorerIdentity {
 	return schema.ExplorerIdentity{Adapter: e.Adapter, Model: e.Model, Effort: e.Effort}
 }
 
-// triple is the uniqueness key: the FULL (adapter, model, effort). Explorers differing only in
-// effort are NOT duplicates (a different reasoning depth is a genuine vantage); an identical triple
-// re-runs the same weights at the same depth and adds no independent signal, so it is rejected.
+// triple returns the explorer's uniqueness key. Explorers that differ only in effort are distinct.
 func (e Explorer) triple() string { return e.Adapter + "\x00" + e.Model + "\x00" + e.Effort }
 
-// AttributionOrdered and PreferenceOrdered are the SAME selected explorer set carried in the two
-// DIFFERENT orders a run needs, given distinct names so that reaching for the wrong one is a compile
-// error rather than something a reviewer has to notice.
+// AttributionOrdered and PreferenceOrdered hold the same selected explorers in the two orders a run needs.
+// Separate types make using the wrong order a compile error.
 //
-//   - AttributionOrdered is sorted by identity triple. It is the order envelope IDs, panel freezing and
-//     every recorded artifact are built from, so a recording is reproducible and comparable across runs.
-//     It is DELIBERATELY decoupled from what the author ranked: reordering the full explorer list must
-//     not change the envelope IDs of an unchanged selected set.
-//   - PreferenceOrdered is the author's own ranking (the profile's slice order). It is what SelectTopN
-//     selects the top-N from, and it is the ONLY order a SELECTION with consequences may read.
-//
-// The distinction is load-bearing: canonicalizer-b — half of the dual merge-agreement governance rule —
-// is derived from the preference order, because deriving it from the attribution order would make the
-// second independent judgment whichever explorer happened to sort first alphabetically. An attribution
-// order must never be used as if it were a preference order.
+//   - AttributionOrdered is sorted by identity. Envelope ids and recorded artifacts use it, so reordering a
+//     profile does not change the ids of an unchanged selection.
+//   - PreferenceOrdered is the profile's own order. Selections with consequences, such as choosing
+//     canonicalizer b, must use it; attribution order would choose alphabetically.
 type (
 	AttributionOrdered []Explorer
 	PreferenceOrdered  []Explorer
 )
 
-// ValidateCanonicalizers enforces the CANONICALIZER SPEC rule shared by every surface: a
-// request supplies either NO canonicalizers (the host derives them) or EXACTLY TWO (the dual rule's two
-// independent judgments). Anything else is refused with a teaching error, because:
-//
-//   - ONE entry is ambiguous about which slot it fills. Slot `a` defaults to the collator's identity and
-//     slot `b` is the independent second opinion; a partial spec silently decides that for the user.
-//   - MORE than two has no meaning: the merge-agreement rule (canon.DualRuleVersion) is defined over
-//     exactly two proposals.
-//   - TWO IDENTICAL identities halts for the same reason the derived path halts — a second proposal from
-//     the same weights is not an independent judgment, and accepting it would manufacture exactly the
-//     corroboration the dual rule exists to prevent.
-//
-// Effort is NOT part of the independence test: two efforts of one model are the same weights, and the
-// derived path compares (adapter, model) for the same reason.
+// ValidateCanonicalizers accepts either no canonicalizers, so the host derives them, or exactly two with
+// different adapter and model. One entry does not say which slot it fills, the merge-agreement rule is
+// defined over exactly two proposals, and two proposals from the same model are not independent. Effort
+// is ignored in the independence test.
 func ValidateCanonicalizers(cs []Explorer) error {
 	switch len(cs) {
 	case 0:
 		return nil
-	case 2: // the only accepted explicit shape
+	case 2:
 	case 1:
 		return fault.New(fault.Config, fmt.Sprintf(
 			"canonicalizers: got 1 entry — supply either 0 (the host derives both: slot a is the collator's identity, slot b the first explorer by PREFERENCE order that differs from it) or exactly 2 (the dual merge-agreement rule is defined over two independent proposals). One entry does not say which slot it fills (got adapter=%q model=%q)",
@@ -95,8 +71,7 @@ func ValidateCanonicalizers(cs []Explorer) error {
 	return nil
 }
 
-// Collator is exploremesh's single collating model. It MAY reuse an explorer's model
-// (collation is a different function).
+// Collator is the model that collates a run. It may use the same model as an explorer.
 type Collator struct {
 	Adapter string `json:"adapter"`
 	Model   string `json:"model"`
@@ -108,28 +83,22 @@ func (c Collator) Identity() schema.ExplorerIdentity {
 	return schema.ExplorerIdentity{Adapter: c.Adapter, Model: c.Model, Effort: c.Effort}
 }
 
-// Roster is the full configured set: 2+ unique explorers, exactly one collator, and OPTIONALLY the two
-// explicit canonicalizer identities.
+// Roster is a configured panel: two or more unique explorers, one collator and optional canonicalizers.
 type Roster struct {
 	Explorers []Explorer `json:"explorers"`
 	Collator  Collator   `json:"collator"`
-	// Canonicalizers names the two identities that propose the canonicalization. It is
-	// EITHER empty (the host derives them) or exactly two — see ValidateCanonicalizers. It is a separate
-	// slot list rather than a flag on an explorer because canonicalization is a DISTINCT role whose
-	// identity is decoupled from both the collator and the panel: a canonicalizer need not be an
-	// explorer, and an explorer is not automatically fit to canonicalize.
+	// Canonicalizers is empty, so the host derives them, or exactly two identities (see
+	// ValidateCanonicalizers). A canonicalizer need not be an explorer.
 	Canonicalizers []Explorer `json:"canonicalizers,omitempty"`
 }
 
-// IsZero reports a completely UNCONFIGURED roster (no explorers, zero collator) — the shape the
-// shipped unconfigured `default` profile resolves to. Distinct from invalid: an unconfigured roster
-// is a valid saved state that simply cannot run yet.
+// IsZero reports whether the roster is entirely unconfigured, which is valid to save but cannot run.
 func (r Roster) IsZero() bool {
 	return len(r.Explorers) == 0 && len(r.Canonicalizers) == 0 && r.Collator == (Collator{})
 }
 
-// Validate enforces the roster rules: minimum 2 explorers, no duplicate (adapter,model,effort)
-// triple, non-empty adapter+model on every explorer and the collator.
+// Validate checks for at least two explorers, no duplicate identities, a non-empty adapter and model on
+// every seat, and valid canonicalizers.
 func (r Roster) Validate() error {
 	if len(r.Explorers) < 2 {
 		return fault.New(fault.Config, fmt.Sprintf("roster: need at least 2 explorers, have %d", len(r.Explorers)))
@@ -153,25 +122,19 @@ func (r Roster) Validate() error {
 	return nil
 }
 
-// Plan is the validated, executable roster the pipeline consumes, after Validate has passed. It carries
-// the SAME selected explorer set in BOTH orders — see AttributionOrdered / PreferenceOrdered — plus the
-// collator and any explicit canonicalizer identities.
+// Plan is the validated panel a run executes: the selected explorers in both orders, the collator and
+// any explicit canonicalizers.
 type Plan struct {
-	// Explorers is the selected set in ATTRIBUTION order. Everything RECORDED about a run is built from
-	// it (envelope IDs, the frozen panel, the dispatch order).
+	// Explorers is the selection in attribution order, used for everything recorded about the run.
 	Explorers AttributionOrdered
-	// Preferred is the SAME set in the author's PREFERENCE order. Every SELECTION with consequences
-	// reads it — today that is the derivation of canonicalizer-b.
+	// Preferred is the same selection in preference order, used to derive canonicalizer b.
 	Preferred PreferenceOrdered
 	Collator  Collator
-	// Canonicalizers are the EXPLICIT canonicalizer identities carried from the roster/profile (empty
-	// when the host is to derive them). Validated by ValidateCanonicalizers before it reaches here.
+	// Canonicalizers are the explicit canonicalizers, or empty when the host derives them.
 	Canonicalizers []Explorer
 }
 
-// SameSet reports whether the plan's two orders are permutations of one another — the invariant that
-// makes them safely interchangeable as a SET while remaining distinct as ORDERS. A Plan whose orders
-// diverged would mean a selection and its attribution disagreed about who is even on the panel.
+// SameSet reports whether Explorers and Preferred contain the same explorers.
 func (p Plan) SameSet() bool {
 	if len(p.Explorers) != len(p.Preferred) {
 		return false
@@ -191,25 +154,14 @@ func (p Plan) SameSet() bool {
 	return true
 }
 
-// Plan validates the roster and returns the executable plan with ALL explorers in a STABLE attribution
-// order (sorted by identity triple) so envelope ordering + attribution are reproducible across runs. It is
-// SelectTopN over the whole roster.
+// Plan validates the roster and returns a plan with every explorer. It is SelectTopN over the whole roster.
 func (r Roster) Plan() (Plan, error) {
 	return r.SelectTopN(len(r.Explorers))
 }
 
-// SelectTopN validates the roster and returns the executable plan for the TOP-N explorers by PREFERENCE
-// (the authored slice order), then canonicalizes the SELECTED subset into a STABLE ATTRIBUTION
-// order (sorted by identity triple). Preference (selection) and attribution (envelope ordering) are thus
-// DECOUPLED: reordering the full explorer list never changes the envelope IDs of an UNCHANGED selected set,
-// because the plan's order depends only on WHICH explorers were selected, not on their preference order.
-//
-// BOTH orders are returned (Plan.Explorers / Plan.Preferred), because decoupling them is not the same as
-// discarding one. A later stage that must SELECT (the dual path's canonicalizer-b) needs the preference
-// order, which the attribution order cannot stand in for.
-//
-// n must be in [2, len(Explorers)]: n<2 is rejected (a panel needs 2+ explorers) and n greater than the
-// roster size is a clear out-of-range error — the count is NEVER clamped (requested = executed).
+// SelectTopN validates the roster and returns a plan for the first n explorers in preference order. The
+// selection is also sorted into attribution order, so its envelope ids do not depend on preference order.
+// n must be between 2 and the number of explorers; it is never clamped.
 func (r Roster) SelectTopN(n int) (Plan, error) {
 	if err := r.Validate(); err != nil {
 		return Plan{}, err
@@ -221,12 +173,9 @@ func (r Roster) SelectTopN(n int) (Plan, error) {
 		return Plan{}, fault.New(fault.Usage, fmt.Sprintf("count %d exceeds the %d explorer(s) available — the count is never clamped (requested = executed); lower --count or add explorers", n, len(r.Explorers)))
 	}
 	preferred := make(PreferenceOrdered, n)
-	copy(preferred, r.Explorers[:n]) // top-N by PREFERENCE (authored order) — RETAINED, not discarded
+	copy(preferred, r.Explorers[:n])
 	selected := make(AttributionOrdered, n)
 	copy(selected, preferred)
-	// Canonicalize ATTRIBUTION order independently of preference so the selected set's envelope IDs are stable.
-	// Both orders are carried: they are the same SET, and losing the preference order would force
-	// a selection (canonicalizer-b) to read an alphabetical ordering it has no business reading.
 	sort.Slice(selected, func(i, j int) bool { return selected[i].triple() < selected[j].triple() })
 	return Plan{
 		Explorers: selected, Preferred: preferred, Collator: r.Collator,
@@ -234,8 +183,8 @@ func (r Roster) SelectTopN(n int) (Plan, error) {
 	}, nil
 }
 
-// Decode strict-decodes roster bytes (YAML or JSON by extension) into the typed Roster, using
-// meshcore/config's domain-free decode plumbing. It does NOT run Validate (callers decide when).
+// Decode strictly decodes roster data, as YAML or JSON according to path's extension. It does not call
+// Validate.
 func Decode(path string, b []byte) (Roster, error) {
 	var r Roster
 	if mcfg.IsYAML(path) {
@@ -251,7 +200,7 @@ func Decode(path string, b []byte) (Roster, error) {
 	return r, nil
 }
 
-// Load reads + strict-decodes + validates the roster at path.
+// Load reads, decodes and validates the roster file at path.
 func Load(path string) (Roster, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -265,26 +214,4 @@ func Load(path string) (Roster, error) {
 		return Roster{}, verr
 	}
 	return r, nil
-}
-
-// Save validates the roster and writes it atomically as YAML (camelCase keys via json tags) through
-// meshcore/config's atomic writer. It refuses to persist an invalid roster.
-func Save(path string, r Roster) error {
-	if err := r.Validate(); err != nil {
-		return err
-	}
-	// Route through the json tags so on-disk keys match the decode schema (YAML is a JSON superset).
-	jb, err := json.Marshal(r)
-	if err != nil {
-		return fault.Wrap(fault.Internal, "marshal roster", err)
-	}
-	var v any
-	if err := json.Unmarshal(jb, &v); err != nil {
-		return fault.Wrap(fault.Internal, "marshal roster", err)
-	}
-	yb, err := yaml.Marshal(v)
-	if err != nil {
-		return fault.Wrap(fault.Internal, "marshal YAML roster", err)
-	}
-	return mcfg.WriteFileAtomic(path, yb)
 }

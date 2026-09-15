@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
 	"strings"
 	"sync"
@@ -329,9 +330,7 @@ func TestSubprocess_ModernEraTranscriptOverTheRealBinary(t *testing.T) {
 }
 
 func mergeMeta(base map[string]any, extra map[string]any) map[string]any {
-	for k, v := range extra {
-		base[k] = v
-	}
+	maps.Copy(base, extra)
 	return base
 }
 

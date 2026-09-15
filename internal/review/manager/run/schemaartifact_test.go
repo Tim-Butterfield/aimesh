@@ -47,7 +47,7 @@ func repoRootFromPackage(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("cwd: %v", err)
 	}
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		if _, serr := os.Stat(filepath.Join(dir, "docs", "schema")); serr == nil {
 			return dir
 		}

@@ -1,65 +1,50 @@
 package canon
 
-// This file is the BINDING, HOST-ADJUDICATED CONFIRMATION ROUND.
+// This file implements the confirmation round, in which the panel can contest the provisional partition
+// and a host rule, not the canonicalizer, resolves the dispute.
 //
-// The merge ledger records the partition; it does not VALIDATE it. Validation
-// requires the panel that produced the nominations to be able to CONTEST the partition, and it requires the
-// dispute to be resolved by something other than the party being complained about:
-//
-//   - The canonicalizer emits PROVISIONAL clusters. They are shown to every explorer WITH ATTRIBUTION
-//     (blindness is already spent after round 1 — hiding attribution here would only reduce auditability)
-//     in a PERSISTED, RANDOMIZED presentation order, so cluster position cannot smuggle in a preference.
-//   - Explorers reply with TYPED challenges (wrong_merge | wrong_split | label_bias | missing_item |
-//     injected_item) naming the exact target and a reason. Free-form objections are not accepted: an
-//     untyped complaint cannot be mechanically adjudicated, which is how "governance" quietly becomes
-//     "the collator decided".
-//   - A VERSIONED HOST RULE resolves them — NOT the canonicalizer, which must never review complaints about
-//     itself. Rule v1 is deliberately mechanical and conservative: ANY single wrong_merge flag splits the
-//     merge, and no challenge can ever CREATE a merge or ADD an item (both would manufacture corroboration
-//     out of one explorer's assertion). The resolution is a NEW append-only ledger revision, chained to the
-//     revision it supersedes — never an in-place edit; the provisional revision is retained.
-//   - A dispute the rule cannot settle in the safe direction (a refused merge, or a merge that cannot be
-//     split because its members are the identical raw string) leaves a CONTESTED MAPPING. A count over a
-//     contested mapping must then be computed over BOTH plausible partitions and emitted as a range with the
-//     definitive `corroborated`/`ranked` label WITHHELD (internal/govern does this).
+//   - Provisional clusters are shown to every explorer with attribution, in a seeded random order.
+//   - Explorers reply with typed challenges (wrong_merge, wrong_split, label_bias, missing_item,
+//     injected_item), each naming a target and a reason. Untyped objections are not accepted because they
+//     cannot be resolved mechanically.
+//   - Rule v1 is conservative: any wrong_merge splits the merge, and no challenge can create a merge or
+//     add an item. The result is a new ledger revision chained to the provisional one, which is kept.
+//   - A dispute the rule cannot settle safely becomes a contested mapping; package govern then reports
+//     dependent counts as ranges with the definitive label withheld.
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// HostConfirmationRuleVersion is the VERSIONED host adjudication rule. It is persisted with
-// every resolution and on the resulting revision, so a partition revision can always be re-derived from the
-// provisional partition + the recorded challenges by the exact rule version that produced it.
+// HostConfirmationRuleVersion identifies the host rule that resolves challenges. It is recorded on every
+// resolution and on the resulting revision.
 const HostConfirmationRuleVersion = "host-confirmation-rule@v1"
 
-// ChallengeType is the CLOSED set of typed challenges an explorer may raise against the provisional
-// partition. The set is closed because each type maps to a specific mechanical host action.
+// ChallengeType is a kind of challenge against the provisional partition. The set is closed because each
+// type maps to a specific host action.
 type ChallengeType string
 
+// Challenge types.
 const (
-	// ChallengeWrongMerge: "you put these in ONE entity and they are DIFFERENT things." Rule v1: ANY single
-	// flag splits the merge — one explorer noticing a conflation is enough, because splitting is safe.
+	// ChallengeWrongMerge says an entity groups different things. Any single one splits the entity.
 	ChallengeWrongMerge ChallengeType = "wrong_merge"
-	// ChallengeWrongSplit: "these two entities are the SAME thing." Rule v1 NEVER merges on it (a merge on
-	// one explorer's assertion manufactures corroboration); it is recorded and leaves the mapping CONTESTED.
+	// ChallengeWrongSplit says two entities are the same. It never merges them; the mapping is contested.
 	ChallengeWrongSplit ChallengeType = "wrong_split"
-	// ChallengeLabelBias: "the label given to this entity prejudices it." Recorded; labels carry no count, so
-	// rule v1 changes no mapping — the biased label travels with the entity for the human to see.
+	// ChallengeLabelBias says an entity's label is prejudicial. It is recorded; no mapping changes.
 	ChallengeLabelBias ChallengeType = "label_bias"
-	// ChallengeMissingItem: "a candidate I nominated is not here." Recorded. Rule v1 never ADDS an item: the
-	// surjectivity gate already guarantees every blind round-1 nomination is present in exactly one entity, so
-	// a missing item is either a labeling complaint or a gate violation (which is an error, not a challenge).
+	// ChallengeMissingItem says a nomination is absent. It is recorded; the surjectivity gate already
+	// guarantees every nomination appears exactly once.
 	ChallengeMissingItem ChallengeType = "missing_item"
-	// ChallengeInjectedItem: "this entity contains something nobody nominated." Recorded. The surjectivity
-	// gate makes true injection impossible (every canonical ID is reachable from >=1 recorded nomination), so
-	// the resolution states that and points at the attributed rows.
+	// ChallengeInjectedItem says an entity contains something nobody nominated. It is recorded; the
+	// surjectivity gate already guarantees every entity is backed by a nomination.
 	ChallengeInjectedItem ChallengeType = "injected_item"
 )
 
@@ -83,20 +68,18 @@ type Challenge struct {
 	// CanonicalID is the challenged entity. Required for wrong_merge / wrong_split / label_bias /
 	// injected_item; optional for missing_item (the item is by definition not in an entity).
 	CanonicalID string `json:"canonicalId,omitempty"`
-	// OtherCanonicalID is the SECOND entity of a wrong_split ("this and that are the same thing").
+	// OtherCanonicalID is the second entity of a wrong_split.
 	OtherCanonicalID string `json:"otherCanonicalId,omitempty"`
-	// RawNomination names the specific raw text at issue (the conflated member, the missing item, …).
+	// RawNomination is the raw text at issue, if any.
 	RawNomination string `json:"rawNomination,omitempty"`
-	// Reason is the explorer's stated reason — model prose, recorded verbatim and never parsed for meaning.
+	// Reason is the explorer's stated reason, recorded verbatim.
 	Reason string `json:"reason"`
-	// By is the challenging explorer's full identity (host-stamped from the verified call, never model-supplied).
+	// By is the challenger's identity, set by the host from the call, never by the model.
 	By schema.ExplorerIdentity `json:"by"`
 }
 
-// Validate checks a challenge is well-formed against the provisional partition it targets: a known type, a
-// resolvable target entity where the type requires one, and a non-empty reason. An unresolvable target is
-// rejected rather than silently dropped — a challenge naming an entity that does not exist is a protocol
-// failure worth surfacing, not a no-op.
+// Validate checks that the challenge has a known type, a non-empty reason, and target entities in known
+// where its type requires them.
 func (c Challenge) Validate(known map[string]bool) error {
 	if !c.Type.Valid() {
 		return fmt.Errorf("challenge: unknown type %q (known: %v)", c.Type, ChallengeTypes())
@@ -127,21 +110,16 @@ func (c Challenge) Validate(known map[string]bool) error {
 	return nil
 }
 
-// Presentation is the PERSISTED, RANDOMIZED order in which the provisional entities were shown to the
-// explorers ("candidate order persisted + randomized"). The permutation is derived
-// DETERMINISTICALLY from a host seed rather than from wall-clock randomness: it must be uncorrelated with
-// nomination/cluster order (so position cannot encode the canonicalizer's preference) while staying exactly
-// reproducible from persisted artifacts. It is an ordering, not a secret.
+// Presentation is the order in which entities were shown to explorers. The order is derived from a seed,
+// so it is uncorrelated with the canonicalizer's cluster order yet reproducible from persisted data.
 type Presentation struct {
 	Order       []string `json:"order"`
 	Seed        string   `json:"seed"`
 	RuleVersion string   `json:"ruleVersion"`
 }
 
-// Present computes the randomized presentation order for a provisional partition. seedInput is the host's
-// seed material (the pipeline uses the payload hash + the partition revision hash — both already persisted,
-// so the order is re-derivable); entities are ordered by SHA-256(seed + canonicalID), which decorrelates the
-// order from the canonicalizer's own cluster order.
+// Present orders res's entities by SHA-256 of seedInput and the canonical ID. The pipeline seeds it with
+// the payload hash and partition revision hash.
 func Present(res Result, seedInput string) Presentation {
 	type keyed struct {
 		id  string
@@ -166,11 +144,9 @@ func Present(res Result, seedInput string) Presentation {
 	return Presentation{Order: order, Seed: hex.EncodeToString(seedSum[:]), RuleVersion: HostConfirmationRuleVersion}
 }
 
-// ConfirmationPrompt renders the confirmation-round instruction for ONE explorer: the provisional entities in
-// the persisted randomized order WITH attribution, the closed challenge vocabulary, the exact JSON field
-// names, and "output ONLY JSON, no fences" (the hard-won lesson from the Map/Catalog contracts — a prompt
-// that does not spell out the field names gets improvised ones). The bytes are identical for every explorer
-// in the round, so one content hash describes what the whole panel was shown.
+// ConfirmationPrompt renders the confirmation-round prompt: the provisional entities in presentation order
+// with attribution, the challenge types, and the exact JSON response shape. It is identical for every
+// explorer.
 func ConfirmationPrompt(res Result, pres Presentation) (string, error) {
 	byID := map[string]Cluster{}
 	for _, c := range res.Clusters {
@@ -237,11 +213,8 @@ type challengeWire struct {
 	} `json:"challenges"`
 }
 
-// ParseChallenges decodes one explorer's confirmation response into typed challenges, stamping the HOST's
-// verified identity for the challenger (`by` is never taken from the model's own output — a model must not be
-// able to attribute a challenge to a different explorer). Each challenge is validated against the presented
-// entity set; the first invalid one is an error, so a malformed confirmation response is visible rather than
-// silently thinned.
+// ParseChallenges decodes an explorer's confirmation response into challenges attributed to by, which comes
+// from the host rather than the model. It returns an error for the first invalid challenge.
 func ParseChallenges(raw []byte, by schema.ExplorerIdentity, known map[string]bool) ([]Challenge, error) {
 	obj, _, xerr := schema.ExtractJSONObject(raw)
 	if xerr != nil {
@@ -266,25 +239,22 @@ func ParseChallenges(raw []byte, by schema.ExplorerIdentity, known map[string]bo
 	return out, nil
 }
 
-// Resolution actions applied by HostConfirmationRuleVersion. Each is a HOST decision, recorded with the rule
-// version that produced it.
+// Resolution actions applied by HostConfirmationRuleVersion.
 const (
-	// ActionSplit: the challenged merge was split into one entity per distinct raw nomination text.
+	// ActionSplit means the entity was split into one entity per distinct raw nomination.
 	ActionSplit = "split"
-	// ActionRecordedNoSplitPossible: a wrong_merge on an entity whose members are the IDENTICAL raw string —
-	// there is nothing mechanical left to split, so the dispute is recorded and the mapping stays CONTESTED.
+	// ActionRecordedNoSplitPossible means a wrong_merge targeted identical raw strings; the mapping is
+	// contested.
 	ActionRecordedNoSplitPossible = "recorded_no_split_possible"
-	// ActionRecordedNoMerge: a wrong_split is NEVER applied (merging on one explorer's assertion would
-	// manufacture corroboration); it is recorded and the mapping stays CONTESTED.
+	// ActionRecordedNoMerge means a wrong_split was recorded without merging; the mapping is contested.
 	ActionRecordedNoMerge = "recorded_no_merge"
-	// ActionRecordedLabelOnly: a label_bias changes no mapping (labels carry no count); recorded on the entity.
+	// ActionRecordedLabelOnly means a label_bias was recorded; no mapping changed.
 	ActionRecordedLabelOnly = "recorded_label_only"
-	// ActionRecordedNoInjection: a missing_item/injected_item cannot change the partition — the surjectivity
-	// gate already guarantees every nomination is present exactly once and every entity is nomination-backed.
+	// ActionRecordedNoInjection means a missing_item or injected_item was recorded; the partition is unchanged.
 	ActionRecordedNoInjection = "recorded_no_injection"
 )
 
-// Resolution is the host's decision on ONE challenge, with the rule version that decided it.
+// Resolution is the host's decision on one challenge.
 type Resolution struct {
 	Challenge   Challenge `json:"challenge"`
 	Action      string    `json:"action"`
@@ -292,77 +262,63 @@ type Resolution struct {
 	RuleVersion string    `json:"ruleVersion"`
 }
 
-// ContestedDirection says which way the ALTERNATIVE partition differs from the held one.
+// ContestedDirection says how the alternative partition differs from the held one.
 type ContestedDirection string
 
 const (
-	// DirectionAlternativeJoins: the held partition keeps the entities SEPARATE; the alternative would treat
-	// them as ONE (a refused wrong_split, or a merge only one canonicalizer proposed).
+	// DirectionAlternativeJoins means the alternative would join entities the held partition keeps separate.
 	DirectionAlternativeJoins ContestedDirection = "alternative_joins"
-	// DirectionAlternativeSeparates: the held partition keeps them TOGETHER; the alternative would split them
-	// (a wrong_merge the rule could not split mechanically).
+	// DirectionAlternativeSeparates means the alternative would split an entity the held partition keeps
+	// together.
 	DirectionAlternativeSeparates ContestedDirection = "alternative_separates"
 )
 
-// ContestedSource records what made a mapping contested — a dual-canonicalizer disagreement or a specific
-// unresolved challenge type.
+// ContestedSource records what made a mapping contested.
 type ContestedSource string
 
+// Contested sources.
 const (
 	SourceDualDisagreement    ContestedSource = "dual_canonicalizer_disagreement"
 	SourceWrongSplitChallenge ContestedSource = "wrong_split_challenge"
 	SourceUnsplittableMerge   ContestedSource = "unsplittable_wrong_merge"
 )
 
-// Contribution is one nomination's attribution inside an alternative entity: which explorer nominated it and
-// from which envelope. The pair is kept TOGETHER (rather than as two parallel lists) so a count can filter
-// contributions to the blind round-1 baseline by envelope ref and still know whose support it is keeping.
+// Contribution attributes one nomination in an alternative entity to its explorer and envelope.
 type Contribution struct {
 	SourceExplorer schema.ExplorerIdentity `json:"sourceExplorer"`
 	EnvelopeRef    string                  `json:"envelopeRef"`
 }
 
-// AlternativeEntity describes ONE entity of the ALTERNATIVE partition over the affected nominations: its
-// label, the raw nominations it contains, and — the part a count needs — the attributed contributions behind
-// it. Carrying the contributions means a dependent count can be evaluated over the alternative WITHOUT
-// re-running canonicalization, which is what makes emitting a sensitivity range cheap enough to always do.
+// AlternativeEntity is one entity of the alternative partition, with the contributions needed to count it
+// without re-running canonicalization.
 type AlternativeEntity struct {
 	Label          string         `json:"label"`
 	RawNominations []string       `json:"rawNominations"`
 	Contributions  []Contribution `json:"contributions"`
 }
 
-// ContestedMapping is a mapping the confirmation round could NOT settle. It names BOTH plausible
-// partitions of the affected nominations so any dependent count can be computed over both and emitted as a
-// range — with the definitive `corroborated`/`ranked` label WITHHELD.
+// ContestedMapping is a dispute the confirmation round could not settle. It describes both plausible
+// partitions so dependent counts can be reported as ranges.
 type ContestedMapping struct {
-	// HeldCanonicalIDs are the entity IDs the HELD (recorded, conservative) partition uses.
+	// HeldCanonicalIDs are the entity ids in the held partition.
 	HeldCanonicalIDs []string `json:"heldCanonicalIds"`
-	// AlternativeEntities are the entities the ALTERNATIVE partition would form over the same nominations.
+	// AlternativeEntities are the entities the alternative partition would form.
 	AlternativeEntities []AlternativeEntity `json:"alternativeEntities"`
 	Direction           ContestedDirection  `json:"direction"`
 	Source              ContestedSource     `json:"source"`
 	Reason              string              `json:"reason"`
-	// RaisedBy attributes the dispute: the challenging explorer(s), or the canonicalizer whose merge was refused.
+	// RaisedBy lists the challenging explorers, if any.
 	RaisedBy    []schema.ExplorerIdentity `json:"raisedBy,omitempty"`
 	RuleVersion string                    `json:"ruleVersion"`
 }
 
-// Affects reports whether a claim about canonicalID must be treated as CONDITIONAL under this contested
-// mapping — i.e. whether the two plausible partitions can disagree about that entity's support.
+// Affects reports whether canonicalID is one of the mapping's held entities.
 func (m ContestedMapping) Affects(canonicalID string) bool {
-	for _, id := range m.HeldCanonicalIDs {
-		if id == canonicalID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.HeldCanonicalIDs, canonicalID)
 }
 
-// Confirmation is the full record of one binding confirmation round: what was shown and in which
-// order, every typed challenge received, the host's versioned resolution of each, the NEW ledger revision the
-// resolutions produced, the hash of the revision it supersedes (retained, never edited), and every mapping
-// that remains CONTESTED.
+// Confirmation is the record of a confirmation round: presentation order, challenges, resolutions, the new
+// ledger revision, the prior revision's hash and any remaining contested mappings.
 type Confirmation struct {
 	Presentation      Presentation       `json:"presentation"`
 	Challenges        []Challenge        `json:"challenges"`
@@ -373,23 +329,18 @@ type Confirmation struct {
 	RuleVersion       string             `json:"ruleVersion"`
 }
 
-// Settled reports whether the confirmed partition carries NO contested mapping — the precondition for a
-// dependent count to be labeled definitively (otherwise the label is withheld and a range is emitted).
+// Settled reports whether no mapping remains contested.
 func (c Confirmation) Settled() bool { return len(c.Contested) == 0 }
 
-// Confirm applies HostConfirmationRuleVersion to the typed challenges over a PROVISIONAL partition and
-// returns the confirmed revision. The canonicalizer is NOT consulted — it must not adjudicate
-// complaints about its own partition. prov must carry its Nominations (the pipeline sets them on the governed
-// paths) because a revision re-partitions the SAME nominations rather than re-deriving them.
+// Confirm applies HostConfirmationRuleVersion to the challenges against the provisional partition prov and
+// returns the confirmed revision. prov must carry its Nominations, which the revision re-partitions.
 //
-// Rule v1, in order:
-//  1. every wrong_merge flag (>=1 is enough) SPLITS its entity into one entity per distinct raw nomination
-//     text; an entity whose members are the identical raw string cannot be split mechanically and becomes a
-//     CONTESTED mapping instead;
-//  2. wrong_split is never applied — recorded, and the mapping becomes CONTESTED;
-//  3. label_bias / missing_item / injected_item change no mapping and are recorded;
-//  4. every merge the DUAL agreement already refused is carried forward as a CONTESTED mapping, because the
-//     held partition may be undercounting exactly there.
+// Rule v1:
+//  1. each wrong_merge target is split into one entity per distinct raw nomination; an entity of identical
+//     strings cannot be split and becomes contested;
+//  2. wrong_split is recorded and the mapping becomes contested;
+//  3. label_bias, missing_item and injected_item are recorded without changing any mapping;
+//  4. merges the dual agreement refused are carried forward as contested mappings.
 func Confirm(prov Result, pres Presentation, challenges []Challenge) (Confirmation, error) {
 	if len(prov.Nominations) == 0 {
 		return Confirmation{}, fmt.Errorf("confirm: the provisional result carries no nominations — a confirmation revision must re-partition the exact nominations the provisional partition was computed over")
@@ -407,7 +358,6 @@ func Confirm(prov Result, pres Presentation, challenges []Challenge) (Confirmati
 		Presentation: pres, Challenges: append([]Challenge(nil), challenges...),
 		PriorRevisionHash: prov.PartitionRevisionHash, RuleVersion: HostConfirmationRuleVersion,
 	}
-	// splitTargets collects the entities rule 1 must split (a set: N flags on one entity is still one split).
 	splitTargets := map[string]bool{}
 	for _, ch := range challenges {
 		if err := ch.Validate(known); err != nil {
@@ -437,7 +387,7 @@ func Confirm(prov Result, pres Presentation, challenges []Challenge) (Confirmati
 		}
 	}
 
-	// Rule 1: apply the splits, building the NEW partition over the same nominations.
+	// Rule 1.
 	next, splitDetail, unsplittable := applySplits(prov, assign, splitTargets)
 	for id := range splitTargets {
 		if unsplittable[id] {
@@ -458,8 +408,7 @@ func Confirm(prov Result, pres Presentation, challenges []Challenge) (Confirmati
 		}
 	}
 
-	// Rule 4: a merge the dual agreement already refused keeps the held partition potentially UNDERCOUNTING
-	// there, so it stays contested through the confirmation round.
+	// Rule 4: the held partition may undercount where the dual agreement refused a merge.
 	if prov.Ledger != nil {
 		for _, cm := range prov.Ledger.Contested() {
 			out.Contested = append(out.Contested, joinContested(prov, assign, cm.SplitInto, SourceDualDisagreement,
@@ -468,8 +417,7 @@ func Confirm(prov Result, pres Presentation, challenges []Challenge) (Confirmati
 		}
 	}
 
-	// Build the NEW append-only revision. The provisional ledger object is untouched; this revision chains to
-	// its head hash, so the successor relationship is verifiable and the superseded revision is retained.
+	// The new revision chains to the provisional ledger's head hash; the provisional ledger is unchanged.
 	revision := prov.Ledger.Revision() + 1
 	led, err := buildLedger(prov.Nominations, next, revision, prov.PartitionRevisionHash, func(r *LedgerRow) {
 		r.DecidedByCall = "host:" + HostConfirmationRuleVersion
@@ -493,10 +441,8 @@ func Confirm(prov Result, pres Presentation, challenges []Challenge) (Confirmati
 	return out, nil
 }
 
-// assignmentOf rebuilds "nomination index → held canonical ID" for a recorded partition by matching each
-// nomination to the cluster member carrying the same raw text + envelope ref. It fails closed: a nomination
-// that matches no member, or matches members in two different entities, means the recorded partition and the
-// recorded nominations disagree — never something to guess around.
+// assignmentOf returns the held canonical ID of each nomination in res, matching on raw text and envelope
+// ref. It returns an error if a nomination matches no member or members of two entities.
 func assignmentOf(res Result) ([]string, error) {
 	byKey := map[string]string{}
 	for _, c := range res.Clusters {
@@ -519,14 +465,11 @@ func assignmentOf(res Result) ([]string, error) {
 	return out, nil
 }
 
-// applySplits builds the next partition: every entity in splitTargets is broken into one entity per DISTINCT
-// raw nomination text (the only mechanical, judgment-free split available to the host — identical strings from
-// different explorers stay together because that is string identity, not entity resolution), and every other
-// entity is carried through unchanged. It returns the new clusters, a per-entity human detail for the
-// resolution record, and the set of targets that could not be split at all.
+// applySplits builds the next partition. Each entity in splitTargets is split into one entity per distinct
+// raw nomination; identical strings stay together. Other entities are unchanged. It returns the clusters, a
+// description of each split, and the targets that could not be split.
 func applySplits(prov Result, assign []string, splitTargets map[string]bool) (next []ProposedCluster, detail map[string]string, unsplittable map[string]bool) {
 	detail, unsplittable = map[string]string{}, map[string]bool{}
-	// Group nomination indices by held entity, preserving first-appearance order of both entities and members.
 	var order []string
 	members := map[string][]int{}
 	for i, id := range assign {
@@ -541,7 +484,6 @@ func applySplits(prov Result, assign []string, splitTargets map[string]bool) (ne
 			next = append(next, ProposedCluster{CanonicalID: id, Name: nameOf(prov, id), Members: idxs})
 			continue
 		}
-		// Split by exact raw text, first-appearance order.
 		var rawOrder []string
 		byRaw := map[string][]int{}
 		for _, i := range idxs {
@@ -569,7 +511,7 @@ func applySplits(prov Result, assign []string, splitTargets map[string]bool) (ne
 	return next, detail, unsplittable
 }
 
-// nameOf returns a recorded entity's label ("" if absent).
+// nameOf returns an entity's label, or canonicalID if the entity is not found.
 func nameOf(res Result, canonicalID string) string {
 	for _, c := range res.Clusters {
 		if c.CanonicalID == canonicalID {
@@ -579,9 +521,8 @@ func nameOf(res Result, canonicalID string) string {
 	return canonicalID
 }
 
-// joinContested builds a contested mapping whose ALTERNATIVE partition JOINS the named held entities into one
-// (a refused wrong_split, or a merge one canonicalizer proposed). The alternative's single entity carries the
-// union of the affected nominations' sources — what a dependent count needs to evaluate the other branch.
+// joinContested builds a contested mapping whose alternative joins heldIDs into one entity carrying all of
+// their contributions.
 func joinContested(prov Result, assign []string, heldIDs []string, src ContestedSource, reason string, raisedBy []schema.ExplorerIdentity) ContestedMapping {
 	want := map[string]bool{}
 	for _, id := range heldIDs {
@@ -603,11 +544,8 @@ func joinContested(prov Result, assign []string, heldIDs []string, src Contested
 	}
 }
 
-// separateContested builds a contested mapping whose ALTERNATIVE partition SEPARATES one held entity — the
-// unsplittable wrong_merge case, where the members are the identical raw string so the only alternative the
-// host can describe is one entity PER SOURCE (i.e. no corroboration at all). That is deliberately the
-// pessimistic branch: it is the count the challenge implies, and emitting it as the range's low end is how a
-// count stays honest about a dispute the rule could not settle.
+// separateContested builds a contested mapping for an unsplittable wrong_merge. The alternative gives each
+// source its own entity, which is the pessimistic low end of the resulting range.
 func separateContested(prov Result, assign []string, heldID, reason string, raisedBy []schema.ExplorerIdentity) ContestedMapping {
 	var order []schema.ExplorerIdentity
 	bySource := map[schema.ExplorerIdentity]*AlternativeEntity{}
@@ -636,7 +574,7 @@ func separateContested(prov Result, assign []string, heldID, reason string, rais
 	}
 }
 
-// challengesFor returns the challenges of type t against canonicalID (in arrival order).
+// challengesFor returns the challenges of type t against canonicalID, in arrival order.
 func challengesFor(chs []Challenge, t ChallengeType, canonicalID string) []Challenge {
 	var out []Challenge
 	for _, c := range chs {
@@ -647,7 +585,7 @@ func challengesFor(chs []Challenge, t ChallengeType, canonicalID string) []Chall
 	return out
 }
 
-// challengeReasons joins the stated reasons of the matching challenges (recorded prose, never interpreted).
+// challengeReasons joins the reasons of the matching challenges with " | ".
 func challengeReasons(chs []Challenge, t ChallengeType, canonicalID string) string {
 	var rs []string
 	for _, c := range challengesFor(chs, t, canonicalID) {

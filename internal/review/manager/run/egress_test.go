@@ -63,11 +63,9 @@ func TestEgress_FullyLocalIsRecognisable(t *testing.T) {
 	}
 }
 
-// TestEgress_UnknownIsReportedAndCountsAsLeaving is the load-bearing one.
-//
-// A user-defined ACP instance points at a binary the OPERATOR chose, so this tool cannot say where it
-// sends anything. Omitting the row would read as "nothing goes there", and treating unknown as local
-// would answer the offline question wrongly in the unsafe direction.
+// TestEgress_UnknownIsReportedAndCountsAsLeaving checks a user-defined ACP instance, whose binary the
+// operator chose, so its destination is unknown. It is reported and counted as leaving the machine:
+// omitting it or treating it as local would answer the offline question wrongly.
 func TestEgress_UnknownIsReportedAndCountsAsLeaving(t *testing.T) {
 	rows := shapeEgress([]review.ShapeSeat{
 		{SeatID: "reviewer", Adapter: "some-user-defined-acp-instance"},
@@ -84,7 +82,7 @@ func TestEgress_UnknownIsReportedAndCountsAsLeaving(t *testing.T) {
 	if !EgressLeavesTheMachine(rows) {
 		t.Error("an unknown destination must count as leaving the machine")
 	}
-	// The label has to tell the operator that THEY are the one who knows.
+	// The label tells the operator that they are the one who knows.
 	if !strings.Contains(rows[0].Destination, "you pointed it") {
 		t.Errorf("the unknown label does not say who knows: %q", rows[0].Destination)
 	}

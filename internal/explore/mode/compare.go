@@ -1,29 +1,18 @@
 package mode
 
-// This file is the COMPARE mode — one of the two FIXED-SPACE modes, and
-// the clean counterexample to everything the emergent-space modes have to do:
+// This file implements the Compare mode, a fixed-space mode:
 //
-//	declare          the USER fixes the option set and the criteria (with direction + role) up front
-//	round 1 (BLIND)  every explorer evaluates the SAME options against the SAME criteria
-//	HOST             the matrix, the per-cell agreement, the filter gate, the Pareto frontier — all host
-//	collate          the collator writes NARRATIVE about a result it cannot change
+//	declare          the user fixes the options and criteria
+//	round 1 (blind)  every explorer evaluates the same options against the same criteria
+//	host             computes the matrix, per-cell agreement, filter gate and Pareto frontier
+//	collate          the collator adds narrative
 //
-// ONE round. NO canonicalizer. NO confirmation round. Not as a simplification, but because there is nothing
-// for them to do: the option set was handed to the explorers, so recognizing "Postgres" as the option named
-// "Postgres" is a string comparison, not the entity-resolution judgment that must stay visible and
-// contestable. Running a canonicalizer here would manufacture a contestable partition where none exists —
-// and then a confirmation round to adjudicate disputes about it — which is a governance ceremony over an
-// invented problem. The whole value of Compare in the model is that it shows what host-deterministic
-// governance looks like when the space really is fixed.
+// There is one round and no canonicalization: the options are declared, so matching them is a string
+// comparison rather than entity resolution.
 //
-// Three things the output refuses to do, all of them part of the mode's contract:
-//
-//   - It never averages a disagreed cell into one score. Every attributed value stays on the cell, the
-//     split is labeled, and the definitive label is WITHHELD. A cell where two explorers said 2 and 9 is
-//     the most informative thing in a comparison, and the mean of 5.5 is a number nobody believes.
-//   - It never emits a scalar ranking the user did not license with weights. It says so, in the result.
-//   - It never emits a partitionRevisionHash. There is no partition; the field carries the sentence saying
-//     so instead of an empty string that would imply one.
+// The output never averages a disagreed cell (every value stays on the cell and the cell is labeled
+// split), never ranks without user-declared weights, and states in place of a partition hash that there is
+// no partition.
 
 import (
 	"encoding/json"
@@ -34,51 +23,41 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// --- the terminal output ---
-
-// CompareOutput is the FIXED, exploremesh-owned terminal output of the Compare mode: the consolidated
-// options×criteria matrix with per-cell agreement, the host-computed Pareto frontier, the filter-gate
-// exclusions, the explicit missing evidence, and the optional weighted ranking. It lives in this package
-// rather than internal/schema because it embeds host-computed govern values, and govern sits above schema
-// in the import graph.
+// CompareOutput is the Compare mode's output: the options×criteria matrix with per-cell agreement, the
+// Pareto frontier, filter exclusions, missing evidence and an optional weighted ranking. It is defined here
+// rather than in package schema because it uses govern types.
 type CompareOutput struct {
-	// Space + SpaceNote are the honest rendering of what this result IS (host-authored, persisted with the
-	// value): a FIXED-space comparison over a declared universe, with no entity resolution behind it.
+	// Space and SpaceNote state that this is a fixed-space comparison with no entity resolution.
 	Space     string `json:"space"`
 	SpaceNote string `json:"spaceNote"`
-	// PartitionRevisionHash carries govern.FixedSpaceNoPartition — the statement that there is no partition,
-	// rather than an empty field that would imply a blank one (say what is reconstructable).
+	// PartitionRevisionHash holds govern.FixedSpaceNoPartition.
 	PartitionRevisionHash string                    `json:"partitionRevisionHash"`
 	Options               []string                  `json:"options"`
 	Criteria              []schema.CompareCriterion `json:"criteria"`
-	// Cells is the consolidated matrix — every declared cell, with EVERY attributed value the panel gave it.
+	// Cells holds every declared cell with every attributed value.
 	Cells []govern.CompareCell `json:"cells"`
-	// Pareto is the HOST-computed non-dominated set over the scored dimensions, after the filter gate.
+	// Pareto is the non-dominated set over the scored criteria, after the filter gate.
 	Pareto           []govern.ParetoEntry        `json:"pareto"`
 	Dominated        []govern.DominatedOption    `json:"dominated,omitempty"`
 	ExcludedByFilter []govern.ExcludedOption     `json:"excludedByFilter,omitempty"`
 	Incomparable     []govern.IncomparableOption `json:"incomparable,omitempty"`
-	// MissingEvidence is the host's per-cell "nobody could judge this"; ReportedMissingEvidence carries the
-	// explorers' own words about it.
+	// MissingEvidence lists cells no explorer could judge; ReportedMissingEvidence holds the explorers' notes.
 	MissingEvidence         []govern.MissingEvidence      `json:"missingEvidence,omitempty"`
 	ReportedMissingEvidence []govern.AttributedNote       `json:"reportedMissingEvidence,omitempty"`
 	Unrecognized            []govern.AttributedEvaluation `json:"unrecognized,omitempty"`
-	// ScalarRanking is present ONLY when the user weighted every scored criterion; otherwise it is nil and
-	// RankingWithheld states why in the result itself, where a reader will actually see it.
+	// ScalarRanking is set only when every scored criterion has a weight; otherwise RankingWithheld says why.
 	ScalarRanking   []govern.ScalarEntry `json:"scalarRanking,omitempty"`
 	RankingWithheld string               `json:"rankingWithheld,omitempty"`
-	// Rules are the versioned HOST rules every derived value above was computed under.
+	// Rules are the rule versions the values were computed under.
 	Rules CompareRules `json:"rules"`
-	// PanelSize / Respondents are the participation facts behind the per-cell denominators.
+	// PanelSize and Respondents are the per-cell denominators.
 	PanelSize   int `json:"panelSize"`
 	Respondents int `json:"respondents"`
-	// CollatorNarrative is the quarantined MODEL PROSE namespace — the collator's reading of the
-	// matrix lives here and nowhere else.
+	// CollatorNarrative holds the collator's prose.
 	CollatorNarrative []govern.Narrative `json:"collatorNarrative,omitempty"`
 }
 
-// CompareRules names the versioned host rules a comparison was computed under, persisted with the value so
-// a result read later is interpretable under the rules that produced it.
+// CompareRules records the rule versions a comparison was computed under.
 type CompareRules struct {
 	RulesVersion    string `json:"rulesVersion"`
 	CellPointRule   string `json:"cellPointRule"`
@@ -88,9 +67,7 @@ type CompareRules struct {
 	GovernanceRules string `json:"governanceRulesVersion"`
 }
 
-// Summary returns the one-line human summary. It leads with the frontier and the DISAGREED CELL COUNT, and
-// it never says "the best option is" — a Pareto set is a set, and a comparison with no declared weights has
-// no winner to name.
+// Summary returns a one-line summary of the frontier, disagreements and ranking status. It names no winner.
 func (o CompareOutput) Summary() string {
 	disagreed := 0
 	for _, c := range o.Cells {
@@ -107,10 +84,8 @@ func (o CompareOutput) Summary() string {
 		len(o.Incomparable), disagreed, len(o.MissingEvidence), ranking)
 }
 
-// Validate checks the comparison is usable: the declared space is present and the honest space rendering
-// survived. A matrix with no cells is NOT an error — a panel that could judge nothing is a real outcome,
-// reported as missing evidence — but a result that lost its "this is a fixed-space comparison with no
-// partition" statement could be read as an emergent-space count, which it is not.
+// Validate requires the declared options and criteria and the fixed-space note. An empty matrix is valid and
+// is reported as missing evidence.
 func (o CompareOutput) Validate() error {
 	if len(o.Options) == 0 || len(o.Criteria) == 0 {
 		return fmt.Errorf("compare output carries no declared option set or criteria")
@@ -121,16 +96,11 @@ func (o CompareOutput) Validate() error {
 	return nil
 }
 
-// --- the fixed-space contract ---
-
-// compareCollator is the Compare mode's FixedSpaceContract: the host arithmetic, the narrative-only
-// collator prompt, and the terminal view assembly.
+// compareCollator is the Compare mode's FixedSpaceContract.
 type compareCollator struct{}
 
-// Aggregate is the HOST step: it lifts every explorer's evaluations out of the immutable blind round-1
-// envelopes and hands them to govern.BuildMatrix, which computes the cells, the per-cell agreement, the
-// claims, the filter gate, the frontier and the optional weighted ranking. Nothing is computed here that
-// govern does not compute — this function's whole job is projection + attribution.
+// Aggregate extracts the attributed evaluations and notes from the blind round-1 envelopes and builds the
+// matrix with govern.BuildMatrix.
 func (compareCollator) Aggregate(in FixedSpaceInput) (FixedSpaceView, error) {
 	var evals []govern.AttributedEvaluation
 	var notes []govern.AttributedNote
@@ -158,8 +128,7 @@ func (compareCollator) Aggregate(in FixedSpaceInput) (FixedSpaceView, error) {
 	return FixedSpaceView{Value: matrix, Claims: matrix.Claims}, nil
 }
 
-// compareNarrativeWire is the SHAPE the collator is asked for: prose fields only. There is deliberately no
-// numeric field in it, so a collator that tried to return a corrected score would have nowhere to put it.
+// compareNarrativeWire is the collator's response shape. It has no numeric fields.
 type compareNarrativeWire struct {
 	Reading           string   `json:"reading"`
 	DisagreementNotes []string `json:"disagreementNotes"`
@@ -167,9 +136,8 @@ type compareNarrativeWire struct {
 	Cautions          []string `json:"cautions"`
 }
 
-// CollatorPrompt shows the collator the finished matrix and asks for narrative. The matrix is rendered as
-// JSON (the host's own bytes) so the collator reads exactly what the result carries, and the instruction
-// names the two things a reader most needs explained: the SPLIT cells and the missing evidence.
+// CollatorPrompt shows the collator the matrix as JSON and asks for narrative about split cells and missing
+// evidence.
 func (compareCollator) CollatorPrompt(in FixedSpaceInput, view FixedSpaceView) (string, error) {
 	matrix, ok := view.Value.(govern.CompareMatrix)
 	if !ok {
@@ -208,10 +176,8 @@ func (compareCollator) CollatorPrompt(in FixedSpaceInput, view FixedSpaceView) (
 	return s.String(), nil
 }
 
-// ParseNarrative reads the collator's output into the quarantined narrative namespace. An unparseable body
-// is NOT an error: in a fixed-space mode the collator contributes prose only — every number is already
-// computed — so a stumbling narrator degrades the PROSE, never the result. The failure is recorded as a
-// host note in the same namespace, so the absence of narrative is visible rather than silent.
+// ParseNarrative converts the collator's output into narrative. Unusable output yields a host note rather
+// than an error, since the result is already computed.
 func (compareCollator) ParseNarrative(raw []byte, by schema.ExplorerIdentity) ([]govern.Narrative, error) {
 	return fixedSpaceNarrative(raw, by, func(obj []byte) ([]string, error) {
 		var w compareNarrativeWire
@@ -241,8 +207,7 @@ func (compareCollator) ParseNarrative(raw []byte, by schema.ExplorerIdentity) ([
 	})
 }
 
-// Collate assembles the CompareOutput as a deterministic VIEW over the host matrix. Every number in it came
-// from govern.BuildMatrix; this function copies and labels, and computes nothing.
+// Collate builds the CompareOutput from the host matrix and narrative.
 func (compareCollator) Collate(in FixedSpaceInput, view FixedSpaceView, narrative []govern.Narrative) (ModeOutput, error) {
 	matrix, ok := view.Value.(govern.CompareMatrix)
 	if !ok {
@@ -281,10 +246,8 @@ func (compareCollator) Collate(in FixedSpaceInput, view FixedSpaceView, narrativ
 	return out, nil
 }
 
-// fixedSpaceNarrative is the shared narrative-parsing helper for both fixed-space modes: extract the single
-// JSON object, hand it to the mode's own field reader, and turn the resulting prose into attributed
-// Narrative entries. An extraction/decode failure yields ONE host note saying so — never an error (see
-// ParseNarrative's comment), and never a fabricated narrative.
+// fixedSpaceNarrative extracts the collator's JSON object, reads its prose lines with read, and attributes
+// them to by. Any failure yields a single host note instead of an error.
 func fixedSpaceNarrative(raw []byte, by schema.ExplorerIdentity, read func([]byte) ([]string, error)) ([]govern.Narrative, error) {
 	fail := func(reason string) []govern.Narrative {
 		return []govern.Narrative{{
@@ -311,13 +274,6 @@ func fixedSpaceNarrative(raw []byte, by schema.ExplorerIdentity, read func([]byt
 }
 
 func init() {
-	// Compare. Formulation-free like every registered mode, ONE round, and —
-	// the whole point — no Canonicalization policy at all: the zero value means no canonicalizer and no
-	// confirmation round, which is correct here rather than merely cheap (see the file comment).
-	//
-	// Class is FIXED-space, and unlike the emergent modes that is not the conservative default but a claim
-	// the task input backs up: the key universe was handed to the explorers, so the degraded host register
-	// keyed on `optionsEvaluated` is a genuine comparison rather than covert entity resolution.
 	register(ModeSpec{
 		Name:               Compare,
 		FormulationFree:    true,

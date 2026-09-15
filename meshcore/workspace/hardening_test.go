@@ -23,11 +23,10 @@ func hardlink(t *testing.T, target, link string) {
 	}
 }
 
-// --- F2: a denied ROOT is a refusal, not a self-exception ---
+// --- a denied root is a refusal ---
 
-// TestCopy_RefusesDeniedRoot pins that a protected directory handed in as the review
-// target is refused outright. Judging only its CHILDREN by their own names ("production",
-// "staging") is exactly how the contents of a `.env` directory reach a model.
+// TestCopy_RefusesDeniedRoot pins that a secret directory given as the copy target is refused, since
+// judging only its children by their own names would expose its contents.
 func TestCopy_RefusesDeniedRoot(t *testing.T) {
 	base := t.TempDir()
 	live := filepath.Join(base, ".env")
@@ -49,47 +48,38 @@ func TestCopy_RefusesDeniedRoot(t *testing.T) {
 }
 
 // TestCollectSnippets_RefusesDeniedRoot pins the same rule at the prompt-assembly layer:
-// with the root itself denied, NO content may come back — not the root, not its children.
+// with the root itself denied, no content may come back.
 func TestCollectSnippets_RefusesDeniedRoot(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, ".env")
 	writeFile(t, filepath.Join(root, "production"), "SECRET=prod\n")
 
-	if snips := CollectSnippets(root); len(snips) != 0 {
-		t.Errorf("CollectSnippets on a denied root returned %d snippets: %+v", len(snips), snips)
-	}
-	got, err := CollectSnippetsChecked(root)
+	got, caveats, err := CollectSnippetsWithCaveats(root)
 	if err == nil {
-		t.Fatal("CollectSnippetsChecked on a denied root must refuse")
+		t.Fatal("collection from a denied root must refuse")
 	}
-	if len(got) != 0 {
-		t.Errorf("a refusal must return no content, got %+v", got)
+	if len(got) != 0 || len(caveats) != 0 {
+		t.Errorf("a refusal must return no content: %+v / %+v", got, caveats)
 	}
 	if r := ReasonOf(err); r != ReasonRootDenied {
 		t.Errorf("reason = %q, want %q", r, ReasonRootDenied)
 	}
 }
 
-// --- H1: an excluded/protected ANCESTOR is lost when the root is chosen beneath it ---
+// --- a protected ancestor still protects a root chosen beneath it ---
 
-// protectedRoots are the shapes an operator can name to strip the copy-exclusion rule by
-// choosing a root INSIDE a protected directory. `.vscode/mcp.json` is the lead case: it
-// routinely carries MCP server env vars (API keys) and is read-ALLOWED, so the read
-// denylist (which catches `.env`/`.ssh`) never fires for it.
-//
-// `.aimesh` is deliberately NOT here — see TestCopy_AimeshRunsAreReadable.
+// protectedRoots are protected directories a root could be chosen inside. `.vscode/mcp.json` can carry
+// API keys and is readable, so the read denylist never catches it. `.aimesh` is not listed; see
+// TestCopy_AimeshRunsAreReadable.
 var protectedRoots = []string{".vscode", ".git", ".claude", ".cursor"}
 
-// TestCopy_RefusesRootInsideProtectedAncestor is the H1 blocker proof. It needs no race at
-// all: exclusion is judged on components RELATIVE to the workspace root, so naming a
-// DESCENDANT of an excluded directory as the root makes its contents ordinary relative
-// files and walks them into a model prompt.
+// TestCopy_RefusesRootInsideProtectedAncestor pins that a root inside a protected directory is refused.
+// Exclusion is judged relative to the root, so otherwise its contents would become ordinary files.
 func TestCopy_RefusesRootInsideProtectedAncestor(t *testing.T) {
 	for _, dir := range protectedRoots {
 		t.Run(dir, func(t *testing.T) {
 			base := t.TempDir()
-			// The root is a DESCENDANT of the protected directory — its own basename
-			// ("workspace") is entirely innocent, which is the whole point.
+			// The root sits inside the protected directory under an innocuous name.
 			root := filepath.Join(base, dir, "workspace")
 			writeFile(t, filepath.Join(root, "mcp.json"), `{"servers":{"x":{"env":{"API_KEY":"sk-SECRET"}}}}`)
 
@@ -105,7 +95,7 @@ func TestCopy_RefusesRootInsideProtectedAncestor(t *testing.T) {
 			if h != nil {
 				t.Error("a refused Copy must not return a handle")
 			}
-			// The protected directory ITSELF is refused with the same typed reason.
+			// The protected directory itself is refused with the same typed reason.
 			if got := ReasonOf(mustFailCopy(t, ws, filepath.Join(base, dir))); got != ReasonExcludedAncestor {
 				t.Errorf("reason for the protected dir itself = %q, want %q", got, ReasonExcludedAncestor)
 			}
@@ -113,17 +103,8 @@ func TestCopy_RefusesRootInsideProtectedAncestor(t *testing.T) {
 	}
 }
 
-// TestCopy_AimeshRunsAreReadable is the deliberate exception, and it is about USABILITY.
-//
-// `.aimesh/{review,explore}/runs/**` is where every run artifact lands. Reading a previous run is
-// ordinary work — some review and exploration modes exist to do exactly that — so refusing any
-// root beneath `.aimesh` made this tool's own output unreachable, and required a flag to do a
-// thing that should never have needed one.
-//
-// Two properties keep that safe, and both are asserted here: `.aimesh` is still WRITE-denied, so
-// nothing model-authored edits the config that lives beside the runs; and it is still EXCLUDED
-// from a walk, so reviewing a PROJECT does not drag its run artifacts into the payload. Naming a
-// run directory and walking past one are different acts, and only the second needed refusing.
+// TestCopy_AimeshRunsAreReadable pins that a run directory under `.aimesh` can be a copy target, while
+// `.aimesh` stays write-denied and excluded from walks of the project above it.
 func TestCopy_AimeshRunsAreReadable(t *testing.T) {
 	base := t.TempDir()
 	runDir := filepath.Join(base, ".aimesh", "explore", "runs", "20260101-120000-abc")
@@ -136,11 +117,11 @@ func TestCopy_AimeshRunsAreReadable(t *testing.T) {
 	}
 	ws.Cleanup(h)
 
-	// STILL WRITE-DENIED. The runs are readable; the state is not writable.
+	// Still write-denied.
 	if rule := scope.DeniedWrite(filepath.Join(runDir, "result.json")); rule == "" {
 		t.Error(".aimesh became WRITABLE — only the root refusal was meant to go")
 	}
-	// STILL EXCLUDED FROM A WALK. Reviewing the project above it must not collect the artifacts.
+	// Still excluded from a walk of the project above it.
 	writeFile(t, filepath.Join(base, "main.go"), "package main\n")
 	snips, _, cerr := CollectSnippetsWithCaveats(base)
 	if cerr != nil {
@@ -170,9 +151,6 @@ func TestCollectSnippets_RefusesRootInsideProtectedAncestor(t *testing.T) {
 	if len(got) != 0 || len(caveats) != 0 {
 		t.Errorf("a refusal must return no content: %+v / %+v", got, caveats)
 	}
-	for _, s := range CollectSnippets(root) {
-		t.Errorf("the legacy entry point must fail closed; got %q: %q", s.Path, s.Content)
-	}
 }
 
 // TestCopy_RefusesRootAliasedBySymlinkIntoProtectedDir pins that the ancestor rule is not a
@@ -189,19 +167,16 @@ func TestCopy_RefusesRootAliasedBySymlinkIntoProtectedDir(t *testing.T) {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
 	ws := New(t.TempDir())
-	// A symlinked TARGET is refused as a reparse point before the ancestor rule is reached;
-	// what must not happen is that the alias makes the protected ancestor invisible. Point
-	// at a path THROUGH the alias so the target itself is an ordinary directory.
+	// A symlinked target is refused as a reparse point before the ancestor rule is reached, so
+	// point at a path through the alias; the target itself is then an ordinary directory.
 	writeFile(t, filepath.Join(real, "sub", "x.json"), "{}\n")
 	if err := ReasonOf(mustFailCopy(t, ws, filepath.Join(alias, "sub"))); err != ReasonExcludedAncestor {
 		t.Errorf("reason = %q, want %q", err, ReasonExcludedAncestor)
 	}
 }
 
-// TestCopy_AllowsRootUnderGenericExcludedAncestor is the false-refusal guard for H1. The
-// ancestor rule covers only names that are protected BY CONTENT; the generic build/artifact
-// names must keep working, or every root under `/tmp` (and every `.../build/myrepo`
-// checkout) becomes unreviewable — an outage, not a confinement layer.
+// TestCopy_AllowsRootUnderGenericExcludedAncestor guards against false refusals: generic build and
+// artifact names are not protected ancestors, so a repository under `tmp` or `build` still works.
 func TestCopy_AllowsRootUnderGenericExcludedAncestor(t *testing.T) {
 	for _, dir := range []string{"tmp", "build", "dist", "node_modules", "vendor", "coverage", ".cache"} {
 		t.Run(dir, func(t *testing.T) {
@@ -230,13 +205,10 @@ func mustFailCopy(t *testing.T, ws *Access, target string) error {
 	return err
 }
 
-// --- H2: os.Root hardens interior traversal, not BOUNDARY selection ---
+// --- os.Root hardens interior traversal, not boundary selection ---
 
-// TestCopy_RefusesRootSwappedAfterCheck pins the identity binding. Every containment check
-// runs against a PATH; the boundary is opened from that same path afterwards. Swap the
-// approved directory for a symlink to an attacker tree in between and os.Root then confines
-// every interior read faithfully — to the attacker's tree. The window is entered
-// deterministically through the package's test seam rather than raced.
+// TestCopy_RefusesRootSwappedAfterCheck pins the identity binding: a root swapped for a symlink between
+// the checks and the open is refused. The window is entered through the test seam rather than raced.
 func TestCopy_RefusesRootSwappedAfterCheck(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows")
@@ -280,7 +252,7 @@ func TestCopy_RefusesRootSwappedAfterCheck(t *testing.T) {
 }
 
 // TestCollect_RefusesRootSwappedAfterCheck pins the same binding at the prompt layer: the
-// swap decides which tree is READ into a model prompt.
+// swap decides which tree is read into a model prompt.
 func TestCollect_RefusesRootSwappedAfterCheck(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows")
@@ -317,7 +289,7 @@ func TestCollect_RefusesRootSwappedAfterCheck(t *testing.T) {
 	}
 }
 
-// --- F3: client/IDE execution config is excluded from the COPY, not only write-denied ---
+// --- client and IDE configuration is excluded from the copy, not only write-denied ---
 
 // TestCopy_ExcludesAgentAndIDEConfig pins that agent/IDE configuration never enters the
 // isolated copy. A file that is copied is a file that can be shown to a model, proposed
@@ -356,16 +328,10 @@ func TestCopy_ExcludesAgentAndIDEConfig(t *testing.T) {
 	}
 }
 
-// --- F6/H4: a hardlink defeats basename-based exclusion — refuse the FILE, not the RUN ---
+// --- a hardlink defeats name-based exclusion: refuse the file, not the run ---
 
-// TestCopy_SkipsHardlinkedFileWithCaveat pins the H4 policy. A regular in-root file with an
-// innocuous name and more than one link is never copied — the OTHER name may be
-// `~/.ssh/id_rsa`, and every name-based rule in this package is blind to it. But it is
-// refused as a FILE, not as a RUN: any ordinary Unix tree with two legitimate names for a
-// file (a `cp -al` tree, a dedup store, a hardlinked fixture) would otherwise kill the
-// whole review, and a writer inside a trusted tree could force that halt at will.
-//
-// The exclusion is never SILENT: it is recorded as a Caveat the caller can surface.
+// TestCopy_SkipsHardlinkedFileWithCaveat pins that a hardlinked file, whose other name may be a secret,
+// is withheld with a recorded caveat rather than copied or failing the whole copy.
 func TestCopy_SkipsHardlinkedFileWithCaveat(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "main.go"), "package main\n")
@@ -393,10 +359,8 @@ func TestCopy_SkipsHardlinkedFileWithCaveat(t *testing.T) {
 	}
 }
 
-// TestCopy_RefusesHardlinkedSingleFileTarget pins the OTHER side of the H4 boundary: when
-// the hardlinked file is the EXPLICIT target of the operation, the hard refusal stays.
-// Withholding it would leave nothing to review, so a caveat would be a success return over
-// an empty copy — the silent-omission shape this package refuses everywhere else.
+// TestCopy_RefusesHardlinkedSingleFileTarget pins that a hardlinked file given as the target is refused
+// outright, since withholding it would leave nothing to copy.
 func TestCopy_RefusesHardlinkedSingleFileTarget(t *testing.T) {
 	live := t.TempDir()
 	secret := filepath.Join(t.TempDir(), "id_rsa")
@@ -440,27 +404,17 @@ func TestCollectSnippets_SkipsHardlinkedFileWithCaveat(t *testing.T) {
 	if len(caveats) != 1 || caveats[0].Path != "notes.txt" || caveats[0].Reason != ReasonHardlink {
 		t.Errorf("caveats = %+v, want notes.txt / %s", caveats, ReasonHardlink)
 	}
-	// The legacy entry points keep working and simply do not carry the caveat.
-	if snips := CollectSnippets(root); len(snips) != 1 {
-		t.Errorf("CollectSnippets = %+v, want just main.go", snips)
-	}
 }
 
-// --- H7: NTFS alternate-data-stream aliasing ---
+// --- NTFS alternate-data-stream aliasing ---
 
-// TestExclusion_NTFSStreamAliasing pins that on NTFS a stream suffix cannot alias a
-// component past the exclusion set: `.git::$DATA` and `.vscode:x:$DATA` resolve to the real
-// `.git` / `.vscode`, while an exact lookup of the untrimmed component matches no rule.
-//
-// The trim is Windows-only and this test states BOTH platforms' expectations, because
-// applying it on unix would be a LOOSENING there: `:` is an ordinary filename character, so
-// a real file named `report:.pem` would stop matching the key-material rule.
+// TestExclusion_NTFSStreamAliasing pins that on NTFS a stream suffix cannot alias a component past the
+// exclusion set (`.git::$DATA` resolves to `.git`), and that the trim does not apply elsewhere, where
+// `:` is an ordinary filename character.
 func TestExclusion_NTFSStreamAliasing(t *testing.T) {
 	aliased := []string{`.git::$DATA/config`, `.vscode:x:$DATA/mcp.json`, `a/.claude::$DATA/settings.json`}
 
-	// Both platforms' expectations are exercised on EVERY platform by toggling the gate;
-	// asserting only the host's semantics would make this test vacuous off Windows, where
-	// it happens to be developed.
+	// Both platforms' expectations are exercised on every platform by toggling the gate.
 	t.Run("windows semantics", func(t *testing.T) {
 		defer restoreStreamAliasing(streamAliasing)
 		streamAliasing = true
@@ -499,14 +453,10 @@ func TestExclusion_NTFSStreamAliasing(t *testing.T) {
 
 func restoreStreamAliasing(v bool) { streamAliasing = v }
 
-// --- F5: root-relative traversal (os.Root), not path-string re-opening ---
+// --- root-relative traversal (os.Root), not path-string re-opening ---
 
-// TestCommit_RefusesSymlinkedLiveDirectory is the deterministic escape proof. The live
-// tree contains a PRE-PLANTED symlink `sub` pointing outside it — the same shape a
-// component swapped between check and use produces, with the window held open so the
-// outcome is observable rather than timing-dependent. Re-opening `live/sub/x.txt` by
-// STRING creates the parent through the link and writes outside the workspace; a
-// root-relative write refuses to leave the root.
+// TestCommit_RefusesSymlinkedLiveDirectory pins that a commit cannot write through a pre-planted symlink
+// `sub` pointing outside the live tree; a root-relative write refuses to leave the root.
 func TestCommit_RefusesSymlinkedLiveDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows; the junction equivalent is in TestWindows_FilesystemSafety")
@@ -538,10 +488,8 @@ func TestCommit_RefusesSymlinkedLiveDirectory(t *testing.T) {
 	}
 }
 
-// TestCommit_RefusesSymlinkedDestination pins that a live destination that is itself a
-// symlink is a REFUSAL, not a silent skip. The previous code recognized the reparse point
-// and `continue`d, returning success while quietly dropping the file — the caller then
-// recorded a clean apply for a remediation that never landed.
+// TestCommit_RefusesSymlinkedDestination pins that a live destination that is a symlink is refused, not
+// silently skipped.
 func TestCommit_RefusesSymlinkedDestination(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows")
@@ -569,23 +517,14 @@ func TestCommit_RefusesSymlinkedDestination(t *testing.T) {
 	}
 }
 
-// --- the reparse guard, made OBSERVABLE (test-strength sweep) ---
+// --- the reparse guard's typed refusals ---
 //
-// A test-strength sweep found that `isReparse` could be neutered wholesale — every guard in
-// this package turned off — and the suite stayed green. Not because symlinks then escaped:
-// each site has a deeper POSIX gate (an `os.Root` boundary, a no-follow open, an IsRegular
-// filter) that refuses anyway. But "refused somewhere, for some reason" is not the contract.
-// The reparse guard's job is to refuse with a DIAGNOSABLE, typed answer — and on Windows,
-// where a junction/mount point carries the reparse ATTRIBUTE without the symlink mode bit,
-// `hasReparseAttr` is the ONLY thing that recognizes it at all.
-//
-// The two tests below therefore assert the IDENTITY of the refusal, not merely its existence.
-// Both fail when `isReparse` is neutered.
+// On POSIX, deeper checks (os.Root, no-follow opens, the IsRegular filter) would refuse symlinks anyway,
+// so these tests assert the reparse refusal itself. On Windows, hasReparseAttr is the only check that
+// recognizes a junction.
 
-// TestCopy_SymlinkTargetIsRefusedAsAReparsePoint pins that a symlink handed in as the review
-// TARGET is refused by the reparse rule itself, naming what it is. Without that guard the
-// copy proceeds until a deeper no-follow open fails, and the operator is told "copy failed"
-// about a path that is simply a link.
+// TestCopy_SymlinkTargetIsRefusedAsAReparsePoint pins that a symlink given as the copy target is refused
+// by the reparse rule, naming what it is.
 func TestCopy_SymlinkTargetIsRefusedAsAReparsePoint(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows")
@@ -607,10 +546,8 @@ func TestCopy_SymlinkTargetIsRefusedAsAReparsePoint(t *testing.T) {
 	}
 }
 
-// TestCommit_SymlinkedDestinationCarriesTheTypedReparseReason pins the machine code on the
-// write path. A commit refusal is classified by a caller (reviewmesh maps ReasonReparse to
-// "the live destination is no longer what the review judged"), so a refusal that arrives
-// with a different reason — or with none — is a different outcome even though both fail.
+// TestCommit_SymlinkedDestinationCarriesTheTypedReparseReason pins the machine reason on the write
+// path, since callers classify commit refusals by it.
 func TestCommit_SymlinkedDestinationCarriesTheTypedReparseReason(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows")
@@ -642,18 +579,9 @@ func TestCommit_SymlinkedDestinationCarriesTheTypedReparseReason(t *testing.T) {
 	}
 }
 
-// TestCopy_SkipsAReparseAttributeEntryThatLooksLikeAnOrdinaryFile is the Windows JUNCTION
-// case, simulated on any platform.
-//
-// It exists because the sweep showed the copy walk's `isReparse` guard could be deleted with
-// the suite still green: a POSIX symlink is caught one line later by the `IsRegular` filter,
-// so on unix the guard is redundant and no test could tell. A Windows junction is the case
-// where it is NOT redundant — it carries the reparse ATTRIBUTE without the symlink mode bit,
-// so it presents to every other check in this package as an ordinary entry, and following it
-// copies content from outside the workspace into the tree a model is pointed at.
-//
-// Substituting `reparseAttr` produces exactly that entry: a plain regular file the attribute
-// probe reports as a reparse point. Deleting the guard makes this test copy it.
+// TestCopy_SkipsAReparseAttributeEntryThatLooksLikeAnOrdinaryFile simulates a Windows junction on any
+// platform: an ordinary file that the reparse-attribute check flags. Without the copy walk's isReparse
+// guard, this test copies it.
 func TestCopy_SkipsAReparseAttributeEntryThatLooksLikeAnOrdinaryFile(t *testing.T) {
 	prev := reparseAttr
 	t.Cleanup(func() { reparseAttr = prev })
@@ -679,9 +607,8 @@ func TestCopy_SkipsAReparseAttributeEntryThatLooksLikeAnOrdinaryFile(t *testing.
 	}
 }
 
-// TestApplyEdit_RefusesSymlinkInCopy pins that an edit is applied through a root handle on
-// the COPY. A contained reviewer can plant a symlink in its own copy; reading and writing
-// that path by STRING follows it straight out of the temp area and edits the real file.
+// TestApplyEdit_RefusesSymlinkInCopy pins that an edit goes through a root handle on the copy, so a
+// symlink planted in the copy cannot redirect the edit to a file outside it.
 func TestApplyEdit_RefusesSymlinkInCopy(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows")
@@ -708,12 +635,10 @@ func TestApplyEdit_RefusesSymlinkInCopy(t *testing.T) {
 	}
 }
 
-// --- F7: Commit is transactional ---
+// --- commit rollback ---
 
-// TestCommit_RollsBackEarlierWritesOnFailure pins that a mid-sequence failure leaves the
-// live tree exactly as it was. Authorization being all-before-write does not help here:
-// the WRITES are sequential, and the second destination cannot be written (it is a
-// non-empty directory), so the first must be put back.
+// TestCommit_RollsBackEarlierWritesOnFailure pins that a mid-sequence failure leaves the live tree as it
+// was: the second destination cannot be written (it is a non-empty directory), so the first is restored.
 func TestCommit_RollsBackEarlierWritesOnFailure(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "a.txt"), "ORIGINAL A\n")
@@ -740,7 +665,7 @@ func TestCommit_RollsBackEarlierWritesOnFailure(t *testing.T) {
 }
 
 // TestCommit_RollsBackNewFileOnFailure pins the other rollback direction: a destination
-// that did NOT exist before the commit must not survive it.
+// that did not exist before the commit must not survive it.
 func TestCommit_RollsBackNewFileOnFailure(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "b.txt", "occupied"), "in the way\n")
@@ -758,10 +683,8 @@ func TestCommit_RollsBackNewFileOnFailure(t *testing.T) {
 	}
 }
 
-// TestCommit_UnreadableStagedFileIsError pins that a staged file which cannot be read is
-// an ERROR. The previous code read staged files by STRING and silently `continue`d on
-// failure: a symlink planted in the copy was therefore FOLLOWED — the content of an
-// out-of-workspace file was read and committed into the live tree under the link's name.
+// TestCommit_UnreadableStagedFileIsError pins that a staged file that cannot be read, such as a symlink
+// planted in the copy, fails the commit instead of being followed or skipped.
 func TestCommit_UnreadableStagedFileIsError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs elevation on Windows")
@@ -782,8 +705,7 @@ func TestCommit_UnreadableStagedFileIsError(t *testing.T) {
 	if err == nil { // t.Error, not t.Fatal: the exfiltration assertion below is the real proof
 		t.Error("an unreadable/symlinked staged file must fail the commit, never be skipped")
 	}
-	// The REASON is pinned, not merely "an error": a caller classifies on the machine code
-	// and persists it in the audit record, so "some error happened" is not the contract.
+	// The reason is pinned, since callers classify on it and record it.
 	if got := ReasonOf(err); got != ReasonStagedUnreadable {
 		t.Errorf("reason = %q, want %q (err: %v)", got, ReasonStagedUnreadable, err)
 	}
@@ -795,7 +717,7 @@ func TestCommit_UnreadableStagedFileIsError(t *testing.T) {
 	}
 }
 
-// --- H3: an unreadable staged SUBTREE must not vanish silently ---
+// --- an unreadable staged subtree must not vanish silently ---
 
 // unreadableDir makes dir unlistable, or skips where that cannot be arranged.
 func unreadableDir(t *testing.T, dir string) {
@@ -812,10 +734,8 @@ func unreadableDir(t *testing.T, dir string) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 }
 
-// TestCommit_UnenumerableStagedDirectoryIsError pins H3. Round 1 made an unreadable staged
-// FILE an error, but ENUMERATION errors were still swallowed: every file beneath an
-// unreadable staged directory simply never entered the set, so Commit reported success
-// without ever having considered them — the half-applied outcome wearing a success return.
+// TestCommit_UnenumerableStagedDirectoryIsError pins that a staged directory that cannot be listed fails
+// the commit instead of silently dropping its files.
 func TestCommit_UnenumerableStagedDirectoryIsError(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "keep.txt"), "keep\n")
@@ -843,8 +763,8 @@ func TestCommit_UnenumerableStagedDirectoryIsError(t *testing.T) {
 }
 
 // TestDiscard_UnenumerableCopyIsBreach pins the same rule on the mutation-detection path:
-// a read-only copy whose subtree cannot be listed is a copy whose integrity cannot be
-// PROVEN, so it fails closed rather than reporting a clean discard.
+// a read-only copy whose subtree cannot be listed cannot be verified, so it fails closed rather
+// than reporting a clean discard.
 func TestDiscard_UnenumerableCopyIsBreach(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "a.txt"), "hello\n")
@@ -868,12 +788,10 @@ func TestDiscard_UnenumerableCopyIsBreach(t *testing.T) {
 	}
 }
 
-// --- H5: rollback is compensating — make its limits explicit and safer ---
+// --- concurrent changes to commit destinations ---
 
-// TestCommit_RefusesConcurrentlyCreatedDestination pins the case the old rollback got
-// exactly backwards: a destination that appears AFTER the pre-write inspection was recorded
-// as "did not exist" and then UNLINKED by the rollback — a commit destroying a file it
-// never inspected. It must refuse instead, and leave the other file's bytes alone.
+// TestCommit_RefusesConcurrentlyCreatedDestination pins that a destination created after inspection is
+// refused, rather than treated as absent and removed by the rollback.
 func TestCommit_RefusesConcurrentlyCreatedDestination(t *testing.T) {
 	live := t.TempDir()
 	copyDir := t.TempDir()
@@ -905,8 +823,8 @@ func TestCommit_RefusesConcurrentlyCreatedDestination(t *testing.T) {
 }
 
 // TestCommit_RefusesConcurrentlyReplacedDestination pins the other direction: a destination
-// REPLACED after its backup was read would otherwise be restored to stale bytes on a later
-// rollback. Identity (device+inode), not name, is what decides it is still the same file.
+// replaced after its backup was read would otherwise be restored to stale bytes on a later
+// rollback. Identity (device and inode), not name, decides it is still the same file.
 func TestCommit_RefusesConcurrentlyReplacedDestination(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "a.txt"), "ORIGINAL\n")
@@ -943,12 +861,9 @@ func TestCommit_RefusesConcurrentlyReplacedDestination(t *testing.T) {
 	}
 }
 
-// TestCommit_RefusesConcurrentlyRewrittenDestination is the case identity cannot see at all: the
-// file is rewritten IN PLACE, so device+inode are unchanged. It is also what a delete-and-recreate
-// looks like on a filesystem that recycles inode numbers (ext4 does, immediately), which is why the
-// replaced-destination test above passes on APFS and failed on a Linux CI runner until the commit
-// path started comparing the destination's bytes with its backup. This test reproduces that
-// failure on every filesystem.
+// TestCommit_RefusesConcurrentlyRewrittenDestination covers a destination rewritten in place, which
+// identity checks cannot see. A delete-and-recreate looks the same on filesystems that reuse inode
+// numbers (such as ext4), so this test reproduces that case on every filesystem.
 func TestCommit_RefusesConcurrentlyRewrittenDestination(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "a.txt"), "ORIGINAL\n")
@@ -980,9 +895,8 @@ func TestCommit_RefusesConcurrentlyRewrittenDestination(t *testing.T) {
 	}
 }
 
-// TestCommit_RollsBackCreatedParentDirs pins that a rolled-back commit leaves no DIRECTORY
-// it invented either. The old rollback restored/removed files only, so a failed commit left
-// a fresh directory tree behind — visible, committable, and not what the caller was told.
+// TestCommit_RollsBackCreatedParentDirs pins that a rolled-back commit removes the directories it
+// created.
 func TestCommit_RollsBackCreatedParentDirs(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "zz.txt", "occupied"), "in the way\n") // zz.txt is a dir
@@ -1005,9 +919,8 @@ func TestCommit_RollsBackCreatedParentDirs(t *testing.T) {
 	}
 }
 
-// TestCommit_ReplacesHardlinkedDestinationWithFreshFile pins the write side of F6: the
-// unlink before a write is REQUIRED, so committing over a name that is hardlinked to a
-// file outside the workspace replaces the NAME and never truncates the other name's file.
+// TestCommit_ReplacesHardlinkedDestinationWithFreshFile pins that committing over a name hardlinked to a
+// file outside the workspace replaces the name and never truncates the other file.
 func TestCommit_ReplacesHardlinkedDestinationWithFreshFile(t *testing.T) {
 	live := t.TempDir()
 	protected := filepath.Join(t.TempDir(), "id_rsa")
@@ -1033,9 +946,8 @@ func TestCommit_ReplacesHardlinkedDestinationWithFreshFile(t *testing.T) {
 	}
 }
 
-// TestCommit_RelativeLiveRootStillCommits guards the destination/authorization comparison
-// against a false refusal: a guard canonicalizes against the working directory, so a
-// RELATIVE live root (the shape `review .` produces) must still compare equal.
+// TestCommit_RelativeLiveRootStillCommits guards against a false refusal: the guard canonicalizes
+// against the working directory, so a relative live root such as "." must still compare equal.
 func TestCommit_RelativeLiveRootStillCommits(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "a.txt"), "ORIGINAL\n")
@@ -1062,8 +974,8 @@ func TestCommit_RelativeLiveRootStillCommits(t *testing.T) {
 	}
 }
 
-// TestCommit_NestedSecretPathRefused ties F1 to the write path end to end: a staged file
-// whose innocuous basename sits inside a `.env` directory is refused by the guard.
+// TestCommit_NestedSecretPathRefused pins end to end that a staged file with an innocuous name inside a
+// `.env` directory is refused by the write guard.
 func TestCommit_NestedSecretPathRefused(t *testing.T) {
 	live := t.TempDir()
 	res, err := scope.New(live)

@@ -33,9 +33,8 @@ func repoRootFromPackage(t *testing.T) string {
 	return ""
 }
 
-// `--dry-run` prints the shape and nothing that would imply a review happened. The forbidden
-// substring matters as much as the required ones: "findings=0" on a run that reviewed nothing reads
-// exactly like a clean tree.
+// --dry-run prints the shape and nothing implying a review happened; "findings=0" would read like a
+// clean tree.
 func TestCLIDryRun_PrintsTheShapeAndNeverAFindingsSummary(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, out, errs := run(t, "review", "--report", "--dry-run", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -52,11 +51,8 @@ func TestCLIDryRun_PrintsTheShapeAndNeverAFindingsSummary(t *testing.T) {
 	}
 }
 
-// The rendered disclosure says what the run would CARRY, not only what it would cost. Two runs
-// over different workspaces cost the same and look at entirely different things (measured
-// 2026-08-11, they printed byte-identical disclosures), so the payload is the only line that
-// distinguishes them — and the clipping qualifier is what keeps a bounded set from being read as a
-// whole workspace.
+// The disclosure says what the run would carry, which distinguishes runs over different workspaces
+// that cost the same.
 func TestCLIDryRun_DisclosesWhatTheRunWouldCarry(t *testing.T) {
 	hermeticReview(t, "valid")
 	ws := t.TempDir()
@@ -75,15 +71,14 @@ func TestCLIDryRun_DisclosesWhatTheRunWouldCarry(t *testing.T) {
 	if !strings.Contains(out, "run-shape.json") {
 		t.Errorf("the disclosure does not point at the full file list:\n%s", out)
 	}
-	// Nothing is clipped or truncated any more, so the disclosure must not hedge as though it
-	// might be: the payload is the whole workspace minus containment, and it says so.
+	// Nothing is clipped, so the disclosure must not hedge as if it were.
 	if strings.Contains(out, "cut the walk short") || strings.Contains(out, "truncated") {
 		t.Errorf("the disclosure hedges about a budget that does not exist:\n%s", out)
 	}
 }
 
-// `--dry-run --json` carries the shape and `status: "planned"`, so an automated caller can tell
-// "nothing was found" from "nothing was looked at" without parsing prose.
+// --dry-run --json carries the shape and status "planned", so a caller can tell "nothing found" from
+// "nothing looked at".
 func TestCLIDryRun_JSONProjectionCarriesTheShape(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, out, errs := run(t, "review", "--report", "--dry-run", "--json", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -111,8 +106,7 @@ func TestCLIDryRun_JSONProjectionCarriesTheShape(t *testing.T) {
 	}
 }
 
-// A real run carries NO shape. The key's absence is what makes its presence meaningful, so this is
-// the assertion that keeps the signal from decaying into noise.
+// A real run carries no shape.
 func TestCLIDryRun_ARealRunCarriesNoShape(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, out, errs := run(t, "review", "--report", "--json", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -131,10 +125,8 @@ func TestCLIDryRun_ARealRunCarriesNoShape(t *testing.T) {
 	}
 }
 
-// The dry run's projection validates against the PUBLISHED projection schema. That schema is
-// `additionalProperties: false` and its `status` is an enum, so both halves of this feature — the
-// new key and the new status — would silently make the schema a false description of what this
-// repo emits. This is the run whose whole audience is a machine deciding whether to spend.
+// The dry-run projection validates against the published schema, which forbids additional properties
+// and enumerates status.
 func TestCLIDryRun_ProjectionValidatesAgainstItsPublishedSchema(t *testing.T) {
 	hermeticReview(t, "valid")
 	root := repoRootFromPackage(t)
@@ -151,9 +143,7 @@ func TestCLIDryRun_ProjectionValidatesAgainstItsPublishedSchema(t *testing.T) {
 	}
 }
 
-// A findings gate over a dry run always passes, because a dry run always finds nothing. Refusing
-// the combination is the difference between a CI job that verifies code and one that verifies a
-// price list while reporting success.
+// A findings gate over a dry run would always pass, so the combination is refused.
 func TestCLIDryRun_RefusesAFindingsGateOverAReviewThatNeverRan(t *testing.T) {
 	hermeticReview(t, "valid")
 	for _, gate := range []string{"--fail-on-findings", "--ci"} {

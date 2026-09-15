@@ -1,6 +1,5 @@
-// Package review is the ReviewManager: it owns the review-and-remediate sequence
-// (CUC-1) for the Batch-1 fake workflow — resolve → preflight → contain → invoke
-// reviewer → verify identity → parse/adjudicate → report/patch/apply → audit.
+// Package run owns the review-and-remediate sequence: resolve, preflight, contain, invoke the
+// reviewers, verify identity, adjudicate, report/patch/apply, and record the audit trail.
 package run
 
 import (
@@ -10,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -51,186 +51,94 @@ type Request struct {
 	Workspace string
 	Mode      review.Mode
 	Surface   string
-	// RunID, when set, NAMES this run's directory — supplied by a surface that has to hand its
-	// caller a DURABLE HANDLE before the run exists.
-	//
-	// MCP is the one such surface, and the reason is its job shape: it answers with a run id the
-	// instant a run is ADMITTED, long before this function creates any directory, and that id is the
-	// only handle the caller ever receives (host paths are deliberately withheld on that wire). Two
-	// independently minted identifiers — one for the client, one for the directory — is precisely
-	// what left `review_remediate {fromRun}` unable to read its own on-disk decision set: the handle
-	// a client held named nothing on disk, so an evicted or pre-restart run could only be refused.
-	// One identifier closes that, and closes it without disclosing anything: the id stays opaque and
-	// the directory it names is still never spelled on the wire.
-	//
-	// It is SERVER-GENERATED, never caller-supplied, and it is validated as a single path element
-	// before it is joined to the artifact directory — see validateRunID. Empty (the CLI, ACP, and
-	// every test) generates one from the run's start time, exactly as before.
+	// RunID, when set, names this run's directory. MCP supplies it so the run id it returns at
+	// admission also names the on-disk record, which lets `review_remediate {fromRun}` read an evicted
+	// run's decision set without disclosing a path. It is server-generated, never caller-supplied, and
+	// validated as a single path element (see validateRunID). Empty generates an id from the start time.
 	RunID           string
 	Profile         string
 	AdapterOverride map[review.Role]string // per-lane --set role.adapter=NAME
 	ModelOverride   map[review.Role]string // per-lane --set role.model=NAME
-	// ReviewerPanel is an AD-HOC blind primary panel composed by the invocation (CLI
-	// `--reviewer`, an MCP or ACP call's panel). When present it REPLACES the selected profile's
-	// panel — it never merges with it. Every seat must name an adapter this process makes
-	// available; its model string is passed to that adapter verbatim. An unresolvable seat is a
-	// config error before any spend.
+	// ReviewerPanel is a blind primary panel composed by the invocation (CLI `--reviewer`, an MCP or
+	// ACP call's panel). When present it replaces the profile's panel rather than merging with it. Each
+	// seat must name an available adapter, and its model string is passed through verbatim.
 	ReviewerPanel []review.SeatSpec
 	// ComposedRoles are the single-slot role seats an MCP or ACP call composed. When non-nil the
 	// run resolves against those seats and ReviewerPanel alone, never a saved profile — see
 	// config.ResolveRequest.ComposedRoles.
 	ComposedRoles map[review.Role]review.SeatSpec
-	// MaxParallel bounds how many seats invoke their model CLI AT ONCE. 0 (the default) runs every
-	// seat in parallel; the panel size is then the only bound, which is the caller's own choice.
-	//
-	// It is stated PER INVOCATION rather than configured once, because the number it should be is a
-	// fact about the machine the CLIs run on — resident memory and process count for a cloud CLI,
-	// loaded weights for a local model — and about the caller's provider rate limits. A launch-time
-	// or compiled-in constant would be aimesh guessing on behalf of hardware it cannot see.
-	//
-	// It bounds PARALLELISM only, never membership: every requested seat still runs, so lowering it
-	// slows a review down without changing who reviewed or what was found.
+	// MaxParallel bounds how many seats invoke their model CLI at once; 0 runs every seat in
+	// parallel. It is per invocation because the right value depends on the caller's machine and
+	// provider rate limits. It bounds parallelism only: every seat still runs.
 	MaxParallel int
-	// Authority are the AUTHORITY / CONTEXT documents this review is judged AGAINST —
-	// requirements, design docs, specs. They are CONTEXT, never targets: never reviewed,
-	// never patched, never applied, and never placed in the containment copy (they are
-	// prompt-embedded, so the write layer cannot reach them by construction). Every surface
-	// supplies the same declaration and internal/engine/authority enforces the identical
-	// rules for all of them — root-scoped path reads, hash pinning, a fail-closed embedding
-	// budget (no silent truncation), the report-mode-only inline provenance split, and the
-	// quoted-evidence rendering that reaches every judging phase.
+	// Authority are the documents this review is judged against, such as requirements and specs.
+	// They are context, never targets: they are embedded in prompts and never placed in the
+	// containment copy, so no write can reach them. internal/review/engine/authority applies the same
+	// rules for every surface.
 	Authority []review.AuthorityDoc
-	// TrustedRoots are the OUT-OF-BAND trusted roots of a surface whose caller is NOT a
-	// human: the ACP surface's `--root` directories (or its launch cwd), established before
-	// any request arrived. When set, every REQUEST-supplied path this run reads — today the
-	// authority `path` documents — must resolve INSIDE them, so a request can only narrow
-	// the trusted set and never widen it.
-	//
-	// It is EMPTY on the CLI, where the human who typed the path is the consent, and it is
-	// deliberately not required to contain the workspace: an agent surface may review a
-	// directory IT materialized (ACP `inlineWorkspace`), which no human root covers. The
-	// surface that accepted the request validates the workspace itself, before any spend.
+	// TrustedRoots are the directories an agent surface's request may read from. When set, every
+	// request-supplied path this run reads (today, authority `path` documents) must resolve inside
+	// them, so a request can narrow but never widen them. It is empty on the CLI, where the user who
+	// typed the path is the consent. It need not contain the workspace, because an agent surface may
+	// review a directory it materialized (ACP `inlineWorkspace`) and validates the workspace itself.
 	TrustedRoots []string
-	// WorkspaceEphemeral marks a workspace THIS PROCESS materialized for the turn and deletes
-	// when the turn ends (the ACP `inlineWorkspace`). It is recorded on the run's decision set so
-	// that a later from-run write is refused by NAME — "that run reviewed content supplied over
-	// the wire, into a directory that no longer exists" — rather than failing obscurely on a
-	// vanished path. Only the surface that materialized the directory knows this, so only it can
-	// say so; a review is otherwise unaffected by it.
+	// WorkspaceEphemeral marks a workspace this process materialized for the turn and deletes
+	// afterwards (ACP `inlineWorkspace`). It is recorded on the decision set so a later fromRun write
+	// is refused by name rather than failing on a vanished path.
 	WorkspaceEphemeral bool
-	// Select, when non-nil, NARROWS this run's write set to the accepted findings whose
-	// HOST-COMPUTED fingerprint it names. nil applies everything the run's own
-	// adjudication authorizes; an EMPTY non-nil slice is a refusal, never "apply everything".
-	//
-	// It is meaningful only in a write mode. A `report` run writes nothing, so a selection on one
-	// names a filter over an empty set — every surface refuses it before any spend rather than
-	// accepting a parameter that could not have had an effect.
-	//
-	// WHAT IT MEANS ON A FULL CYCLE, precisely, because the answer differs from the MCP from-run
-	// form and the difference matters: this run performs its OWN adjudication and the selection
-	// filters THAT. A fingerprint is stable across runs (it is derived from the finding's kind,
-	// file and normalized location), so a selector taken from an earlier report run will match the
-	// same finding here IF this run's panel raises it again — and will land in `unmatched` if it
-	// does not. This is a narrowing of what this run decided; it is not a replay of what an
-	// earlier run decided. Only the MCP `review_remediate {fromRun}` form replays a stored set.
+	// Select, when non-nil, narrows the write set to accepted findings whose host-computed
+	// fingerprint it names; nil applies everything the adjudication authorizes, and an empty non-nil
+	// slice is a refusal. Surfaces refuse it on a report run. It filters this run's own adjudication:
+	// a fingerprint from an earlier run matches only if this run raises the same finding again, and
+	// lands in `unmatched` otherwise. Only `review_remediate {fromRun}` replays a stored decision set.
 	Select []string
-	// VerifyCommands are the PROJECT'S OWN build/test commands, run on the containment copy and
-	// RECORDED. Empty (the default) means nothing is executed at all.
-	//
-	// They come from the OPERATOR — never from a model, never from a finding — and they run in a copy
-	// of the operator's own project, so the threat model is exactly what it was: these are commands
-	// the user already runs on that tree. Nothing model-authored is ever executed; see verify.go for
-	// why the alternative (running seat-proposed reproducers) is refused pending a real sandbox.
-	//
-	// On a WRITE run (patch/apply) they run twice — before any edit and after every edit, both inside
-	// the copy and both before the commit window opens — and the report's `delta` is the answer. On a
-	// REPORT run there is no "after", so they run only when VerifyBaseline is set: a baseline alone is
-	// a real wall-clock cost for one fact, which is a choice an operator should make rather than
-	// inherit.
-	//
-	// THE RESULT NEVER GATES ANYTHING. A red suite does not invalidate a finding, does not stop a
-	// commit, and does not change an exit code.
+	// VerifyCommands are the project's own build/test commands, supplied by the operator and run on
+	// the containment copy; empty runs nothing, and nothing model-authored is ever executed (see
+	// verify.go). A write run runs them before and after its edits and reports the delta; a report
+	// run runs them only when VerifyBaseline is set. The result never gates anything: it does not
+	// invalidate a finding, stop a commit, or change an exit code.
 	VerifyCommands []string
-	// VerifyTimeout bounds ONE command (0 → DefaultVerifyTimeout). Per command rather than per pass,
-	// so the last command's budget does not depend on how long the first one took.
+	// VerifyTimeout bounds one command (0 means DefaultVerifyTimeout).
 	VerifyTimeout time.Duration
-	// VerifyBaseline opts a REPORT run into running the commands once. Ignored on a write run, which
-	// runs them because there is an "after" to compare against.
+	// VerifyBaseline runs the commands once on a report run. A write run ignores it.
 	VerifyBaseline bool
-	// AllowProtectedPaths waives the PROTECTED-CONFIG half of containment: it admits a workspace
-	// root that is, or sits inside, `.git`/`.claude`/`.vscode`/`.aimesh`/… and permits writes
-	// there. It exists because those are ordinary directories people own and legitimately ask a
-	// review to fix — `~/.claude/hooks` is someone's actual source tree — and refusing them is the
-	// tool overriding an explicit instruction about the user's own machine.
-	//
-	// IT DOES NOT TOUCH THE SECRET FAMILY. `.env*`, `.ssh`, `.aws`, key material and friends stay
-	// refused for reads and writes alike, because a read is what puts the bytes in a prompt and a
-	// prompt reaches a vendor: unlike an unwanted edit, that disclosure cannot be taken back. Root
-	// confinement is untouched too — this widens WHICH names are allowed inside a root, never the
-	// roots themselves.
-	//
-	// Operator act on every surface, for the reason above it: `.git/hooks/**` and `.vscode/mcp.json`
-	// execute code on someone's next command, so a caller that could grant itself this could arrange
-	// to run arbitrary code later.
+	// AllowProtectedPaths waives the protected-config half of containment: it admits a workspace root
+	// that is or sits inside `.git`, `.claude`, `.vscode` and similar trees, and permits writes there.
+	// It never admits secrets (`.env*`, `.ssh`, `.aws`, key material) for reads or writes, and never
+	// widens root confinement. It is an operator grant on every surface because files such as
+	// `.git/hooks/**` execute code later.
 	AllowProtectedPaths bool
-	// Scope narrows what reviewers are SHOWN — explicit paths, a time window, or a version-control
-	// baseline. The zero value shows everything, which is what every run did before scope existed.
-	// See scope.go, in particular why the VCS baselines are one resolver among several rather than
-	// the organising idea.
+	// Scope narrows which files reviewers are shown (explicit paths, a time window, or a
+	// version-control baseline); the zero value shows everything. See scope.go.
 	Scope Scope
-	// scopeFiles is Scope RESOLVED — the workspace-relative paths a reviewer may be shown. It is
-	// unexported and filled in by RunContext, once, against the live workspace: resolving it per
-	// pass would re-walk the tree for every seat and every attempt, and worse, a resolver that ran
-	// twice could disagree with itself if a file changed between them. nil means no narrowing.
+	// scopeFiles is Scope resolved once by RunContext against the live workspace, so every pass sees
+	// the same set; nil means no narrowing.
 	scopeFiles map[string]bool
-	// IncludeHostReview enables an optional report-only host self-review pass (the
-	// author_remediator contributes its own findings, source=author_self_review). Valid
-	// ONLY when the effective mode is report; rejected for patch/apply before any model call.
+	// IncludeHostReview adds a report-only host self-review pass whose findings carry
+	// source=author_self_review. It is rejected for patch and apply before any model call.
 	IncludeHostReview bool
-	// ValidateHostAdjudication enables an ACP-VALIDATION-ONLY readiness probe: after the normal cycle,
-	// if the configured author_remediator host lane made NO natural adjudication model call (the
-	// reviewer produced zero findings), run one synthetic host-adjudication call so ACP Validation
-	// proves the host adapter/model can run its role. Report-mode only; OFF for normal CLI/agent
-	// reviews (a real ACP client never sets it). NOT self-review (that is IncludeHostReview).
+	// ValidateHostAdjudication runs one synthetic host-adjudication call when the author_remediator
+	// made no natural adjudication call, proving the host adapter can run its role. It is a
+	// report-only readiness check, off for normal reviews, and distinct from IncludeHostReview.
 	ValidateHostAdjudication bool
-	// Trace is the caller's W3C trace context, when the surface that accepted the request carried
-	// one. nil (the zero value) records nothing, which is every CLI run and every legacy-era MCP
-	// request — the three keys are a `2026-07-28` `_meta` convention. It is CARRIED to the run
-	// record and never interpreted; see review.Trace.
+	// Trace is the caller's W3C trace context when the request carried one (a `2026-07-28` `_meta`
+	// convention). It is recorded on the run and never interpreted; nil records nothing.
 	Trace *review.Trace
-	// DryRun resolves everything and spends nothing: the plan, the panel, the authority
-	// documents and the static preflight all run exactly as they would on a real review, the
-	// same resolved-plan.json / config-effective.json / doctor.json are written, and the run
-	// then STOPS before the first model call and returns review.RunOutcome.Shape.
-	//
-	// THE STOP POINT IS THE POINT. It sits after the last configuration error that is knowable
-	// without spending — an unresolvable seat, a duplicate panel identity, a missing binary, an
-	// oversized authority document, a failed preflight — and before the containment copy is
-	// made or any adapter is invoked. So a dry run either hands back a shape or hands back the
-	// exact refusal the real run would have hit, at zero cost, which is what makes it worth
-	// typing before an expensive panel rather than a ceremony to skip.
-	//
-	// It is not a mode. Mode still governs what the run WOULD do (RunShape.Writes reports it),
-	// because "what would --apply cost" is precisely the question worth asking for free, and a
-	// dry run that silently became a report run could not answer it.
+	// DryRun resolves the plan, panel, authority documents and static preflight, writes the same
+	// resolved-plan.json, config-effective.json and doctor.json, then stops before the first model call
+	// and returns RunOutcome.Shape. The stop sits after the last configuration error knowable without
+	// spending, so a dry run returns either the shape or the refusal the real run would hit. It is not
+	// a mode: Mode still says what the run would do, so a dry run can price an apply.
 	DryRun bool
-	// VerifyReadiness asks EVERY configured agent, before the first seat is dispatched, whether it can
-	// actually do real work — a bounded one-token invocation in a throwaway directory, through the same
-	// path a run takes (see meshcore/model.DeepProber and verifyReadiness).
-	//
-	// It exists because `Available()` proves only that a binary exists. Login, folder trust and model
-	// validity all fail at INVOCATION time, so without this a panel pays for seat 1's full prompt and
-	// then discovers at seat 2 that a second CLI was blocked all along. Probing first turns that
-	// expensive discovery into a one-token one.
-	//
-	// IT SPENDS — one call per distinct adapter/model/effort — so it is opt-in, and a dry run PRICES it
-	// without performing it.
+	// VerifyReadiness asks every configured agent to answer a bounded one-token call in a throwaway
+	// directory before the first seat is dispatched (see meshcore/model.DeepProber). Available only
+	// proves a binary exists, while login, folder trust and model validity fail at invocation, so this
+	// avoids paying for one seat's full prompt before another seat fails. It spends one call per
+	// distinct adapter/model/effort, so it is opt-in; a dry run prices it without performing it.
 	VerifyReadiness bool
-	// OnEvent, if set, receives each audit event as it is logged — an optional, in-process
-	// progress sink a surface can use to stream progress. The Manager stays surface-agnostic
-	// (it only logs events); it never knows what the sink does. Must not block or panic, and
-	// must be SAFE FOR CONCURRENT CALLS: the blind reviewer panel emits from one goroutine per
-	// seat (the ACP sink serializes its frame writes for exactly this reason).
+	// OnEvent, if set, receives each audit event as it is logged, so a surface can stream progress.
+	// It must not block or panic, and must be safe for concurrent calls: panel seats emit from
+	// separate goroutines.
 	OnEvent func(audit.EventLine)
 }
 
@@ -246,20 +154,15 @@ func (m *Manager) Run(req Request) (review.RunOutcome, error) {
 	return m.RunContext(context.Background(), req)
 }
 
-// RunContext executes the review and returns the outcome. The context cancels an
-// in-flight run (CLI signal or ACP `cancel`) → a Class-cancellation halt. On a halt
-// it returns a *fault.Fault (whose code the CLI maps to an exit code); the outcome
-// still carries the run directory and any findings for the caller to render.
+// RunContext executes the review. Cancelling ctx halts an in-flight run. On a halt it returns a
+// *fault.Fault, and the outcome still carries the run directory and any findings.
 func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcome, error) {
-	// The one request field that becomes a FILESYSTEM NAME is checked before anything else happens
-	// — before the plan resolves, before an adapter is preflighted, and certainly before a directory
-	// is created from it. See validateRunID.
+	// RunID becomes a directory name, so validate it before anything else runs.
 	if rerr := validateRunID(req.RunID); rerr != nil {
 		return review.RunOutcome{}, rerr
 	}
-	// availability of every registered adapter, so the auto-detect fallback skips
-	// configured-but-missing adapters (it does not auto-select cloud adapters — only
-	// `fake` is in any default preference).
+	// Record each adapter's availability so resolution skips configured adapters whose binaries
+	// are missing.
 	available := make(map[string]bool, len(m.Adapters))
 	for name, a := range m.Adapters {
 		ok, _ := a.Available()
@@ -279,33 +182,25 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 		return review.RunOutcome{}, fault.New(fault.Config, "resolved plan has no reviewer lane").
 			WithReason("plan_missing_reviewer_lane")
 	}
-	// THE BLIND PRIMARY PANEL, resolved BEFORE any spend. Every seat must resolve, the panel
-	// must be 1..MaxReviewerSeats, and no two seats may share an identity — all config errors
-	// here, never a trimmed panel later (see config.ResolvePanel). A panel of one is the
-	// ordinary case and is exactly the historical single-reviewer run.
+	// Resolve the blind primary panel before any spend. An unresolvable seat, an out-of-range size or
+	// a duplicate identity is a config error; the panel is never trimmed (see config.ResolvePanel).
 	seats, perr := m.Cfg.ResolvePanel(resolveReq)
 	if perr != nil {
 		return review.RunOutcome{}, perr
 	}
-	// includeHostReview is report-only: reject it for patch/apply on the EFFECTIVE mode,
-	// before any audit/model work begins (a usage/config error, exit 3). The CLI also
-	// rejects it early on the requested mode; this is the authoritative server-side guard
-	// (a surface/config-set mode can only be caught here).
+	// includeHostReview is report-only. Surfaces check the requested mode; this check uses the
+	// effective mode, which only resolution knows.
 	if req.IncludeHostReview && plan.Mode != review.ModeReport {
 		return review.RunOutcome{}, fault.New(fault.Config,
 			fmt.Sprintf("includeHostReview is only valid in report mode (effective mode is %q)", plan.Mode)).
 			WithReason("host_self_review_mode_invalid")
 	}
-	// Authority DECLARATION checks (pure, no I/O) run before any run/audit work, on the
-	// EFFECTIVE mode — this is the authoritative server-side guard for the provenance split
-	// (inline `content` authority is report-mode only). Surfaces run the same check to fail
-	// fast in their own error carrier; this one cannot be bypassed by any of them.
+	// Validate authority declarations on the effective mode (inline `content` is report-only).
+	// Surfaces run the same check earlier; this one cannot be bypassed.
 	if err := authority.Validate(req.Authority, plan.Mode); err != nil {
 		return review.RunOutcome{}, err
 	}
-	// Preflight EVERY lane's adapter: a resolved plan that selects any adapter that is
-	// not registered or whose binary is unavailable must fail clearly BEFORE any
-	// run/audit work begins (Class A / exit 4) — not just the reviewer lane.
+	// Preflight every lane's adapter, so a missing or unavailable binary fails before any run work.
 	checked := map[string]bool{}
 	preflightAdapter := func(name, label string) error {
 		if checked[name] {
@@ -330,17 +225,16 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 			return review.RunOutcome{}, aerr
 		}
 	}
-	// EVERY seat's adapter is preflighted too — a panel whose second seat names a missing binary
-	// must fail before any spend, not after the first seat has already been paid for.
+	// Preflight every seat's adapter too, so a later seat's missing binary fails before the first
+	// seat is paid for.
 	for i, s := range seats {
 		if aerr := preflightAdapter(s.Adapter, fmt.Sprintf("reviewer seat %d of %d", i+1, len(seats))); aerr != nil {
 			return review.RunOutcome{}, aerr
 		}
 	}
 
-	// SCOPE, resolved ONCE and BEFORE ANY SPEND. A selector that names nothing, or a version-control
-	// baseline in a tree that has none, refuses here — where it costs nothing — rather than after a
-	// panel has been paid for to review either everything or nothing.
+	// Resolve scope once, before any spend, so a selector that names nothing or a baseline in a tree
+	// without version control refuses for free.
 	var scopeSummary *ScopeSummary
 	if !req.Scope.Empty() {
 		selected, serr := req.Scope.Resolve(ctx, req.Workspace)
@@ -353,33 +247,22 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 	}
 
 	startedAt := m.now()
-	// A DURABLE HOME FOR THE ONLY UNDO THIS TREE WILL HAVE.
-	//
-	// An apply into a tree under no version control has exactly one way back: reverse-applying the
-	// run's own `patches/changes.patch`. And that tree is precisely the one whose run directory
-	// defaults to the OS TEMP directory, because localstate.RunDir falls back there when no `.aimesh/`
-	// exists. The least recoverable tree would otherwise keep its only recovery artifact in the most
-	// disposable place — so the state directory is created for it, before the run, and the whole
-	// record lands somewhere that survives a reboot.
-	//
-	// It is a no-op for every other tree, and a failure is not fatal: the run proceeds with its
-	// temp-directory artifacts.
+	// An apply into a tree without version control can only be undone with the run's
+	// patches/changes.patch, and that tree's run directory would otherwise default to the OS temp
+	// directory. EnsureDurableRunDir gives it a durable state directory; it is a no-op for other
+	// trees, and on failure the run keeps its temp-directory artifacts.
 	artifactDir := m.artifactDirFor(req.Workspace)
 	if durable, ok := EnsureDurableRunDir(ctx, req.Workspace, string(plan.Mode), artifactDir); ok {
 		artifactDir = durable
 	}
-	// req.RunID names the directory when a surface supplied one (MCP; see Request.RunID); empty
-	// generates the start-time id every other surface uses.
 	run, err := audit.NewRun(artifactDir, req.RunID, startedAt)
 	if err != nil {
 		return review.RunOutcome{}, fault.Wrap(fault.Internal, "create run dir", err)
 	}
-	run.OnEvent = req.OnEvent // optional in-process progress sink (surface-set; nil otherwise)
-	// Trace rides the outcome from the START, before anything can halt: a halted run is the one most
-	// worth correlating with the caller's own trace, and m.halt has no request in scope.
+	run.OnEvent = req.OnEvent
+	// Trace and the scope disclosure ride the outcome from the start, so a halted run can still be
+	// correlated and is not read as covering the whole tree.
 	outcome := review.RunOutcome{Mode: plan.Mode, Plan: plan, RunDir: run.Dir, RunID: run.ID, Status: "running", Trace: req.Trace}
-	// The scope disclosure rides the outcome from the START, before anything can halt — a halted
-	// narrowed run is exactly one someone would otherwise read as covering the whole tree.
 	if scopeSummary != nil {
 		outcome.Scope = scopeSummary
 		_ = run.WriteJSON("scope.json", scopeSummary)
@@ -394,16 +277,10 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 	_ = run.Event(startedAt, "info", "run_started", "review run started", map[string]any{"mode": plan.Mode, "workspace": req.Workspace})
 	_ = run.Event(m.now(), "info", "resolved_plan", "resolved role→adapter→model", planData(plan))
 
-	// Resolve the authority/context documents BEFORE any model call: read each root-scoped
-	// path through meshcore/scope, verify any expectedHash pin, and enforce the embedding
-	// budget FAIL-CLOSED (an oversized requireFull document halts naming its sizes — it is
-	// never silently truncated). The inclusion manifest that comes back is written to the run
-	// record and rides the outcome, so "which intent was this judged against" is a recorded
-	// fact rather than an implication.
-	//
-	// A surface whose caller is not a human supplies TrustedRoots; the ONE resolver built
-	// from them governs every request-supplied path this run reads, so a peer-declared
-	// authority path can only narrow the trusted set, never authorize itself.
+	// Resolve authority documents before any model call: read each root-scoped path, verify any
+	// expectedHash pin, and enforce the embedding budget without truncation. The inclusion manifest is
+	// recorded and rides the outcome. When TrustedRoots are set, one resolver built from them governs
+	// every request-supplied path.
 	var trust *scope.Resolver
 	if len(req.TrustedRoots) > 0 {
 		t, terr := scope.New(req.TrustedRoots...)
@@ -426,12 +303,9 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 			map[string]any{"documents": auth.SortedNames(), "count": len(auth.All())})
 	}
 
-	// preflight (CUC-2 static checks) before any review work begins
+	// Static preflight judges the plan resolved above, so role overrides and composed panels are
+	// checked as this run will invoke them.
 	_ = run.Event(m.now(), "info", "doctor_started", "static preflight", nil)
-	// The plan RESOLVED ABOVE is handed over, so readiness is judged against what this run will
-	// actually invoke. Re-deriving it from the profile made preflight refuse valid runs: a `--set`
-	// role override or a composed `--reviewer` panel is invisible to a bare config resolve, so a
-	// plan that had just resolved was halted for a lane the run was never going to use.
 	pre := doctor.Run(doctor.Input{
 		Config: m.Cfg, Adapters: m.Adapters, ArtifactDir: m.ArtifactDir,
 		Workspace: req.Workspace, Profile: req.Profile,
@@ -444,28 +318,16 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 			fault.New(fault.Config, "preflight failed: "+firstFailure(pre)).WithHalt("A").WithReason("preflight_failed"))
 	}
 
-	// Outer convergence cycle. Addressed-context feeds applied fingerprints forward
-	// so already-applied findings become already_addressed (not actionable); apply
-	// mode iterates until stable (no new edits) or the outer-cycle cap (halt, exit 7).
-	// (The inner per-reviewer stabilization loop is a documented hook for a later
-	// batch; Batch 2 runs one reviewer call per outer cycle.)
+	// Outer convergence cycle: applied fingerprints are fed forward so they become already_addressed,
+	// and apply mode iterates until no new edits are made or the outer-cycle cap halts the run.
 	maxOuter := 1
 	if m.Cfg.Review.MaxOuterCycles != nil && *m.Cfg.Review.MaxOuterCycles > 0 {
 		maxOuter = *m.Cfg.Review.MaxOuterCycles
 	}
-	// THE DRY-RUN STOP. Everything above resolved; nothing below is free. See Request.DryRun for
-	// why the boundary is here and not earlier (a shape nobody could act on) or later (a shape
-	// that already cost what it was meant to price).
+	// The dry-run stop: everything above was free and nothing below is. See Request.DryRun.
 	if req.DryRun {
-		// WORKSPACE ADMISSIBILITY, judged before the shape is reported. It is a pure path check
-		// (no copy, no read), so it costs nothing and belongs on the free side of the stop — and
-		// without it a dry run answers "here is your plan, 2..10 calls" for a root the very next
-		// step refuses outright, which is precisely the promise this flag makes and would break.
-		// The operator's waiver applies HERE TOO, or the dry run refuses a root the real run would
-		// accept — inverting the equivalence this check exists to hold. It was missed when the
-		// waiver landed: AdmitRootWith was added and this, its only caller, kept the strict form,
-		// so `--dry-run --allow-protected-paths` was refused while the same run without --dry-run
-		// went ahead. Driving the real binary is what caught it; no test paired the two flags.
+		// Workspace admissibility is a free path check, so it runs here; otherwise a dry run could
+		// price a root the real run refuses. It honours the protected-path waiver for the same reason.
 		if ref := workspace.AdmitRootWith(req.Workspace, req.AllowProtectedPaths); ref != nil {
 			return m.halt(run, &outcome, startedAt, "",
 				fault.Wrap(fault.Containment, "the workspace cannot be reviewed", ref).
@@ -484,11 +346,8 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 		return outcome, nil
 	}
 
-	// READINESS, before anything expensive. It sits just past the dry-run stop because it SPENDS: a
-	// dry run prices these calls (shapeOf counts one per target) and performs none of them. Everything
-	// above this line was free; this is the first thing that is not, and it is deliberately the
-	// cheapest possible way to find out that an agent cannot work — a one-token question asked of
-	// every configured agent at once, rather than a 900 KB prompt discovering it one seat at a time.
+	// Readiness probing spends, so it sits just past the dry-run stop (shapeOf prices it). It is the
+	// cheapest way to learn an agent cannot work before any full prompt is sent.
 	if req.VerifyReadiness {
 		if rerr := m.verifyReadiness(ctx, run, probeTargets(plan, seats)); rerr != nil {
 			return m.halt(run, &outcome, startedAt, "", rerr)
@@ -496,18 +355,11 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 	}
 
 	ws := workspace.New(m.TempBase)
-	// The two halves of the operator's protected-path waiver travel together: admitting the
-	// root without the write waiver would copy a tree nothing may edit, and the write waiver
-	// without root admission would never reach a file to edit.
+	// Both halves of the protected-path waiver travel together: root admission without the write
+	// waiver would copy a tree nothing may edit.
 	ws.AllowProtectedRoots = req.AllowProtectedPaths
-	// Root confinement for THIS run. The workspace path the caller was given by a human
-	// (a CLI argument, an agent-host session cwd) is the consent boundary, so it is the
-	// allowed root: every live write this run performs must land inside it and must not
-	// hit a protected path. One resolver, built here, is shared by every surface — the
-	// confinement rule cannot diverge per surface because no surface owns it.
-	//
-	// req.Workspace itself is deliberately NOT rewritten to its canonical form: the run
-	// record should quote the path the human actually gave.
+	// Root confinement: every live write must land inside the workspace and avoid protected paths.
+	// req.Workspace is not canonicalized, so the run record quotes the path as given.
 	confine, serr := scope.NewWith(scope.Options{AllowProtectedWrites: req.AllowProtectedPaths}, req.Workspace)
 	if serr != nil {
 		return m.halt(run, &outcome, startedAt, "",
@@ -516,13 +368,8 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 	ws.Guard = confine
 	addressed := map[string]review.DecisionState{} // fingerprint → state (for Judge)
 	addressedDesc := map[string]string{}           // fingerprint → readable line (for prompts)
-	// CROSS-RUN DISPOSITION MEMORY (opt-in; nil and inert by default — see dispositions.go).
-	// It is handed `addressedDesc` and NOT `addressed`: a remembered disposition becomes prompt
-	// text a reviewer may argue with, never an input to the suppression map the Judge reads.
-	// The REPORT-mode verification baseline, when the operator asked for one. It runs here — before
-	// the cycles — so it describes the tree the reviewers are about to be shown rather than whatever
-	// it looks like once the run is over. A write run does NOT reach this: its baseline is taken
-	// inside the write window, on the very copy the edits are derived from.
+	// The report-mode verification baseline runs before the cycles, so it describes the tree reviewers
+	// are shown. A write run takes its baseline inside the write window instead.
 	if plan.Mode == review.ModeReport {
 		outcome.Verification = m.reportBaseline(ctx, run, ws, req)
 	}
@@ -558,19 +405,16 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 		}
 	}
 
-	// ACP-VALIDATION readiness probe (report-mode only): if the configured, real (non-fake) host lane
-	// was never exercised by a NATURAL adjudication (zero reviewer findings → deterministic), run one
-	// synthetic host-adjudication call so validation proves the host adapter/model can run. Its output
-	// is discarded (never merged into `last`), so the real review result below is unaffected; a halt
-	// propagates. OFF for normal reviews; the flag is set only by the ACP validator.
+	// Report-only host readiness check: when the host lane made no natural adjudication call, run one
+	// synthetic call. Its output is discarded; a halt propagates.
 	if req.ValidateHostAdjudication && plan.Mode == review.ModeReport {
 		if herr := m.ensureHostAdjudicationExercised(ctx, run, ws, req, plan, auth, startedAt, &outcome); herr != nil {
 			return outcome, herr
 		}
 	}
 
-	// Final self-critique (dismissal-verification): re-check the host's own rejections and overturn any
-	// that were wrong, surfacing them report-only. Skipped for the ACP-validation probe (kept minimal).
+	// Final self-critique re-checks the host's own dismissals and surfaces overturned ones report-only.
+	// The host readiness check skips it.
 	if !req.ValidateHostAdjudication {
 		var scErr error
 		last, scErr = m.finalSelfCritique(ctx, run, ws, req, plan, auth, last, startedAt, &outcome)
@@ -579,22 +423,10 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 		}
 	}
 
-	// THE HOST ANNOTATION, applied once, over the FINAL set — after the merges, the report-only
-	// appends and the id renumbering, so every finding that reaches a caller is labelled and none
-	// is labelled twice.
-	// THE CITATION GROUNDING PASS, in the same place and for the same reason: once, over the final set,
-	// after the merges and the id renumbering. It executes nothing — it reads files this run already
-	// read — and it writes Decision.Grounding and nothing else. A finding whose citation did not
-	// resolve is labelled, never dropped or downgraded; see grounding.go for why that is not a
-	// softening but the only claim the host is entitled to make.
-	//
-	// It runs AFTER any write this cycle performed, so on an apply run the check describes the tree as
-	// it now stands. That is the honest ordering: a caller reading the result is looking at the tree
-	// they have, not the one that was reviewed, and the write path's own base-hash pins are what tie a
-	// decision back to what it judged.
-	// PANEL COMPOSITION, in the same place and on the same rule: once, over the final set, writing
-	// only labels. It qualifies what each agreement count was WORTH without changing a single count —
-	// see composition.go for why an adjusted figure would need a taxonomy the host cannot verify.
+	// The post-cycle passes run once over the final set, after merges and id renumbering, and write
+	// only labels: panel composition (composition.go), the dissent tally (dissent.go) and citation
+	// grounding (grounding.go). None drops, downgrades or reorders a finding. Grounding runs after any
+	// write, so on an apply run it describes the tree as it now stands.
 	if outcome.Composition = composeAgreement(seats, &last); outcome.Composition != nil && outcome.Composition.Independence == IndependenceSharedModel {
 		_ = run.Event(m.now(), "warn", "panel_shares_a_model", fmt.Sprintf(
 			"this panel's %d seat(s) run %d distinct model(s) (%s): where seats that share a model agree, their errors correlate, so the agreement is worth less than the count suggests. No count was adjusted",
@@ -604,10 +436,6 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 				"sharedModels": SharedModels(outcome.Composition.Seats),
 			})
 	}
-	// THE DISSENT TALLY, over labels the panel already wrote onto each decision. It is a count, not a
-	// pass: nothing is checked here, and nothing can be changed by it. It exists so a surface can say
-	// how much of this result the panel agreed on without walking every decision, and so a reader
-	// always gets the denominator.
 	if outcome.Dissent = DissentSummaryFor(&last); outcome.Dissent != nil && outcome.Dissent.Contested > 0 {
 		_ = run.Event(m.now(), "info", "panel_dissent", fmt.Sprintf(
 			"%d of %d panel finding(s) are contested: fewer of the seats that ran reported them than did not. A silent seat is not a seat that disagreed, and nothing was dropped, downgraded or reordered",
@@ -630,36 +458,28 @@ func (m *Manager) RunContext(ctx context.Context, req Request) (review.RunOutcom
 
 	_ = run.WriteJSON("decisions/host-adjudication.json", hostAdjudications(last))
 	outcome.Findings = last.Findings
-	// Decisions ride the outcome index-aligned with Findings, so a surface projection is
-	// built from the SAME adjudication result run-state and the summary are written from
-	// (no second source of truth for a finding's disposition).
+	// Decisions are index-aligned with Findings, so surface projections use the same adjudication
+	// result as run-state and the summary.
 	outcome.Decisions = last.Decisions
 	outcome.Status = "stable"
 	_ = run.WriteJSON("run-state.json", runState(run, outcome, startedAt, m.now()))
 	_ = run.WriteText("review-summary.md", summaryMarkdown(plan, last, req))
-	// THE DURABLE DECISION SET (report runs only). It is what makes "apply the set you inspected"
-	// expressible by a LATER, separate call on any surface, without an in-memory registry that dies
-	// with the process. See decisionset.go.
+	// Record the durable decision set (report runs only) so a later call on any surface can apply
+	// the set that was inspected. See decisionset.go.
 	m.recordDecisionSet(run, req, plan, outcome)
 	_ = run.Event(m.now(), "info", "run_completed", "review run completed", map[string]any{"status": outcome.Status})
 	return outcome, nil
 }
 
-// runCycle performs one outer cycle: the BLIND PRIMARY PANEL (every seat in parallel, each with
-// its own bounded stabilization loop) → host adjudication over the union of seat findings →
-// optional cross_check → optional verifier → mode handling. Returns the final adjudication +
-// edits applied; on a halt it writes halt artifacts and returns the error.
-//
-// Host adjudication does not begin until every seat has completed or halted — that ordering is
-// the blindness guarantee at cycle scale, mirroring the per-seat guarantee inside runSeat.
+// runCycle performs one outer cycle: the blind primary panel (seats in parallel, each with its own
+// bounded stabilization loop), host adjudication over the union of seat findings, the optional
+// cross_check and verifier lanes, then mode handling. It returns the final adjudication and the
+// number of edits applied. Host adjudication starts only after every seat has finished, which keeps
+// the panel blind.
 func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, plan review.RunPlan, seats []review.LaneResolution, auth authority.Set, addressed map[string]review.DecisionState, addressedDesc map[string]string, callID string, cycle int, startedAt time.Time, outcome *review.RunOutcome) (adjudication.Result, int, error) {
-	// THE REVIEWED ROOT'S IDENTITY, captured HERE — before any reviewer sees anything and before
-	// any model call — and re-verified by the write path at the end of this cycle. A pathname is
-	// not a repository: without this, the same string can be made to name a different tree during
-	// the minutes a panel takes, and the accepted set would be written into a tree nobody reviewed.
-	// It is captured per CYCLE, not per run, because a converging apply legitimately rewrites its
-	// targets between cycles (which changes a single-file target's inode) and the question this
-	// answers is "is this still the tree THIS cycle judged".
+	// Capture the reviewed root's identity before any reviewer sees it; the write path re-verifies
+	// it, so accepted edits never land in a different tree swapped in under the same path. It is per
+	// cycle because a converging apply legitimately rewrites targets between cycles.
 	identity, iderr := CaptureWorkspaceIdentity(req.Workspace)
 	if iderr != nil {
 		_, e := m.halt(run, outcome, startedAt, callID, fault.Wrap(fault.Config,
@@ -671,34 +491,25 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 	if m.Cfg.Review.MaxInnerIterations != nil && *m.Cfg.Review.MaxInnerIterations > 0 {
 		maxInner = *m.Cfg.Review.MaxInnerIterations
 	}
-	// The run-level round budget for THIS cycle's panel. It bounds the whole panel, not each
-	// seat, so N seats cannot multiply maxInnerIterations into an unbounded spend; the outer
-	// cycle cap bounds how many times a cycle's budget can be spent. A panel of one gets
-	// exactly maxInner rounds, i.e. today's inner loop unchanged.
+	// The round budget bounds the whole panel for this cycle, so N seats cannot multiply
+	// maxInnerIterations into unbounded spend.
 	budget, berr := newPanelBudget(m.Cfg.Review.MaxPanelRounds, maxInner, len(seats))
 	if berr != nil {
 		_, e := m.halt(run, outcome, startedAt, callID, berr)
 		return adjudication.Result{}, 0, e
 	}
-	// NOTE (intentional divergence from the methodology's "report = single-pass" rule): reviewmesh's
-	// inner loop does NOT apply edits between passes (edits happen once, in handleMode, after the loop).
-	// It is a union-of-findings ACCUMULATION loop — later passes carry a "previously reported this
-	// cycle, focus on NEW issues" context and surface ADDITIONAL findings, which are unioned. Running
-	// it in report mode therefore RAISES recall rather than wasting work, so report mode keeps the
-	// multi-pass loop on purpose. (The outer cycle is still single-pass for report — nothing commits.)
-	// SETTLED prior dispositions (applied in earlier outer cycles), as readable lines
-	// so the model can correlate them with the findings it sees (not opaque hashes).
+	// The inner loop applies no edits between passes: later passes are told what was already reported
+	// and asked for new issues, and findings are unioned, which raises recall even in report mode.
+	// addressedLines are dispositions settled in earlier outer cycles, as readable lines.
 	addressedLines := sortedValues(addressedDesc)
 
-	// `shown` is the union of files shown to ANY applyable lane (the panel + cross_check),
-	// gating apply-safety so the host only edits files a reviewer actually saw.
+	// shown is the union of files shown to any applyable lane (the panel and cross_check); only
+	// those files may be edited.
 	shown := map[string]bool{}
 
-	// ---- HOST SELF-REVIEW pass (optional, REPORT-ONLY): the author_remediator contributes
-	// its OWN independent findings (source=author_self_review) BEFORE the reviewer lanes. It
-	// runs read-only under the same containment/identity verification as any reviewer lane;
-	// its findings are adjudicated and surfaced in the report but NEVER applied (appended
-	// report-only after handleMode). Gated to report mode in RunContext.
+	// Optional report-only host self-review: the author_remediator contributes its own findings
+	// before the reviewer lanes, under the same containment and identity checks. They are reported
+	// and never applied.
 	var selfReviewAdj adjudication.Result
 	if req.IncludeHostReview {
 		if hostLane, ok := plan.Lanes[review.RoleAuthorRemediator]; ok {
@@ -723,7 +534,7 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 		}
 	}
 
-	// ---- BLIND PRIMARY PANEL: every seat, in parallel, each blind to the others ----
+	// Blind primary panel: every seat runs in parallel, blind to the others.
 	panel, perr := m.runPanel(ctx, run, ws, req, seats, auth, addressedLines, callID, maxInner, budget, startedAt, outcome)
 	if perr != nil {
 		return adjudication.Result{}, 0, perr
@@ -731,17 +542,15 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 	reviewerFindings := panel.findings
 	mergeShown(shown, panel.shown)
 
-	// Host adjudication over the UNION of seat findings (deterministic for the fake/default
-	// path; a single model-backed host call otherwise). It starts only now — after every seat
-	// has completed or halted — so no seat could have been influenced by it.
+	// Host adjudication over the union of seat findings, after every seat has finished.
 	finalAdj, herr := m.adjudicate(ctx, run, ws, req, plan, auth, reviewerFindings, addressed, addressedLines, callID+"-host", startedAt, outcome)
 	if herr != nil {
 		return adjudication.Result{}, 0, herr
 	}
-	// HOST-COMPUTED provenance + the weak-identity quarantine, over the DEDUPED set.
+	// Host-computed provenance and the weak-identity quarantine, over the deduplicated set.
 	attachPanelProvenance(&finalAdj, panel)
 
-	// ---- CROSS-CHECK lane (optional): find missed/disputed issues ----
+	// Optional cross_check lane: looks for missed or disputed issues.
 	if ccLane, ok := plan.Lanes[review.RoleCrossCheck]; ok {
 		ccAdapter, aerr := m.laneAdapter(ccLane)
 		if aerr != nil {
@@ -749,12 +558,8 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 			return adjudication.Result{}, 0, e
 		}
 		_ = run.Event(m.now(), "info", "cross_check_started", "cross-check lane", map[string]any{"adapter": ccLane.Adapter, "model": ccLane.Model})
-		// CROSS-CHECK INPUT WITH A PANEL: the informed lane sees the
-		// POST-ADJUDICATION decision set — one deduped, host-decided view — NOT N raw seat
-		// streams. Feeding it every seat's raw output would scale its prompt with the panel and
-		// re-expose the raw streams the seats were kept blind to. The set is bounded, and a
-		// truncation is surfaced as a caveat line in the prompt plus a recorded event: never
-		// silent.
+		// The cross-check sees the bounded post-adjudication set, not each seat's raw output, so its
+		// prompt does not scale with the panel. Truncation is stated in the prompt and recorded.
 		ccFindings, ccTruncated := boundedDescriptors(finalAdj.Findings, maxInformedLaneInputs)
 		ccDecisions := decisionLines(finalAdj)
 		if len(ccDecisions) > maxInformedLaneInputs {
@@ -781,14 +586,9 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 		_ = run.Event(m.now(), "info", "lane_skipped", "no cross_check lane configured", map[string]any{"lane": "cross_check"})
 	}
 
-	// ---- VERIFIER lane (optional): REPORT-ONLY this batch ----
-	// NOTE (intentional divergence): reviewmesh's verifier is an INDEPENDENT final-check lane, NOT the
-	// methodology's "iterating reviewer re-runs to catch cross-check regressions" (which is coupled to
-	// cross-check). So it is not gated on cross-check — a standalone verifier is a valid config.
-	// Regressions from applied edits are caught by reviewmesh's OUTER-cycle re-review (the primary
-	// reviewer re-running on the edited workspace); the verifier is an extra report-only opinion. Its
-	// findings are adjudicated and REPORTED but never applied/patched, so an apply run cannot loop on
-	// newly-introduced verifier edits.
+	// Optional verifier lane: an independent report-only final check, not gated on cross_check. Its
+	// findings are never applied, so an apply run cannot loop on them; regressions from applied edits
+	// are caught by the next outer cycle.
 	var verifierAdj adjudication.Result
 	if vLane, ok := plan.Lanes[review.RoleVerifier]; ok {
 		vAdapter, aerr := m.laneAdapter(vLane)
@@ -797,9 +597,7 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 			return adjudication.Result{}, 0, e
 		}
 		_ = run.Event(m.now(), "info", "verifier_started", "verifier lane", map[string]any{"adapter": vLane.Adapter, "model": vLane.Model})
-		// Same bounded, post-adjudication view the cross-check gets (see above): the verifier is
-		// an informed lane too, so a panel must not scale its prompt either, and a truncated
-		// view is stated in the prompt rather than implied.
+		// The verifier gets the same bounded post-adjudication view as the cross-check.
 		vFindings, vTruncated := boundedDescriptors(finalAdj.Findings, maxInformedLaneInputs)
 		vDecisions := decisionLines(finalAdj)
 		if len(vDecisions) > maxInformedLaneInputs {
@@ -824,20 +622,15 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 		_ = run.Event(m.now(), "info", "lane_skipped", "no verifier lane configured", map[string]any{"lane": "verifier"})
 	}
 
-	// ---- MODE handling over reviewer + cross_check decisions (host writes only) ----
+	// Mode handling over reviewer and cross_check decisions; only the host writes.
 	applied, merr := m.handleMode(ctx, run, req, plan, auth, &finalAdj, shown, identity, cycle, outcome)
 	if merr != nil {
 		_, e := m.halt(run, outcome, startedAt, callID, merr)
 		return adjudication.Result{}, 0, e
 	}
-	// Feed prior dispositions forward so the next outer cycle treats them as settled context
-	// (the reviewer prompt lists these under a disagreement-gated PRIOR DISPOSITIONS section).
-	// Carry not just APPLIED fixes but also INVALID rejections — otherwise a rejected finding is
-	// re-raised every cycle, crowding the output budget and starving NEW findings (the exact
-	// problem addressed-context exists to solve; methodology § Addressed-context construction).
-	// Rejections go into the prompt desc ONLY, never the `addressed` suppression map the Judge
-	// reads (adjudication.go): a reviewer that DISAGREES and re-raises must be re-adjudicated
-	// fresh, not auto-marked already-addressed.
+	// Feed applied fixes and rejections forward as settled context for the next outer cycle, so a
+	// rejected finding does not crowd out new ones. Rejections go only into the prompt lines, never
+	// the addressed map the Judge reads, so a reviewer that re-raises one gets a fresh adjudication.
 	for i, d := range finalAdj.Decisions {
 		fp := schema.Fingerprint(finalAdj.Findings[i])
 		switch d.State {
@@ -845,39 +638,27 @@ func (m *Manager) runCycle(ctx context.Context, run *audit.Run, ws *workspace.Ac
 			addressed[fp] = review.StateApplied
 			addressedDesc[fp] = "applied (fixed): " + findingDesc(finalAdj.Findings[i])
 		case review.StateInvalid, review.StateReportedInvalid:
-			// prompt context only — do NOT add to `addressed` (see note above)
+			// prompt context only; see above
 			if _, isApplied := addressed[fp]; !isApplied {
 				addressedDesc[fp] = "rejected as invalid: " + findingDesc(finalAdj.Findings[i]) + reasonSuffix(d.Reasoning)
 			}
 		}
 	}
 
-	// Append verifier findings as REPORT-ONLY to the final result (after handleMode, so
-	// they are surfaced in the report/run-state but never applied), then assign unique
-	// final ids so lane-supplied ids can't collide in the output/audit.
+	// Verifier and host self-review findings are appended report-only after handleMode, then every
+	// id is renumbered so lane-supplied ids cannot collide.
 	finalAdj = appendReportOnly(finalAdj, verifierAdj)
-	// Host self-review findings are surfaced report-only too (never applied), then all ids
-	// are renumbered so lane-supplied ids can't collide in the output/audit.
 	finalAdj = renumberIDs(appendReportOnly(finalAdj, selfReviewAdj))
-	// Re-run the write-path marking over the FINAL merged set: the verifier and host
-	// self-review findings are appended after handleMode, so without this pass an
-	// authority-only finding from one of those lanes would reach the projection unmarked.
-	// The marking is idempotent.
+	// Re-run the idempotent write-path marking so the findings appended above are marked too.
 	markApplyRefusals(auth, &finalAdj, shown)
-	// The apply-safety gate, carried on the outcome: a LATER remediation of this decision set (the
-	// MCP two-phase `review_remediate --fromRun`) must gate on the files THIS run showed, not on a
-	// set re-derived from whatever is on disk when it runs.
+	// A later fromRun remediation gates on the files this run showed, not on what is on disk then.
 	outcome.ShownFiles = sortedSet(shown)
 	return finalAdj, applied, nil
 }
 
-// markApplyRefusals applies the WRITE-PATH RULE to every decision: a finding whose support
-// cannot be traced to the workspace copy is marked NOT APPLYABLE, with a machine reason.
-//
-// It runs in EVERY mode — including report — because the marking is a governance FACT about
-// the finding, not a consequence of what this particular run was allowed to write: a report
-// run's projection must already tell a caller which findings a later apply run would refuse.
-// It is inert when no authority was declared, so a review without authority is unchanged.
+// markApplyRefusals marks every decision whose finding cannot be traced to the workspace copy as not
+// applyable, with a machine reason. It runs in every mode, so a report run already tells a caller
+// which findings an apply would refuse. It is inert when no authority was declared.
 func markApplyRefusals(auth authority.Set, adj *adjudication.Result, shown map[string]bool) {
 	if auth.Empty() {
 		return
@@ -893,8 +674,8 @@ func markApplyRefusals(auth authority.Set, adj *adjudication.Result, shown map[s
 	}
 }
 
-// laneAdapter returns the registered adapter for a resolved lane (preflight already
-// verified availability; this is the registry lookup).
+// laneAdapter returns the registered adapter for a resolved lane; preflight has already checked
+// availability.
 func (m *Manager) laneAdapter(lane review.LaneResolution) (model.Adapter, error) {
 	a, ok := m.Adapters[lane.Adapter]
 	if !ok {
@@ -910,15 +691,12 @@ func mergeShown(dst, src map[string]bool) {
 	}
 }
 
-// maxInformedLaneInputs bounds how many adjudicated findings/decisions an INFORMED lane
-// (cross_check, verifier) is shown. It exists because a panel scales the primary stage's output
-// with its seat count, and an unbounded prompt would grow with it. Truncation is never silent:
-// truncationCaveat goes into the prompt and a warn event goes into the audit record.
+// maxInformedLaneInputs bounds how many adjudicated findings or decisions an informed lane
+// (cross_check, verifier) is shown, so its prompt does not grow with the panel.
 const maxInformedLaneInputs = 200
 
-// truncationCaveat is the line appended to an informed lane's prompt context when the
-// adjudicated set was bounded — so the model is told its view is partial rather than assuming
-// it is complete.
+// truncationCaveat is appended to an informed lane's context when the adjudicated set was bounded,
+// so the model knows its view is partial.
 const truncationCaveat = "(NOTE: this list was TRUNCATED to the input bound — it is a PARTIAL view of the adjudicated set; do not treat an absence here as evidence that nothing was reported.)"
 
 // boundedDescriptors renders findings as context lines, capped at limit, reporting whether the
@@ -962,10 +740,9 @@ func decisionLines(adj adjudication.Result) []string {
 	return out
 }
 
-// mergeAdjResults unions `add` into `base` by fingerprint. A finding new to base is
-// appended with its decision. A finding base already decided is NOT silently
-// overwritten; if `add` disagrees on validity, a report-only disagreement finding is
-// appended so the dispute is auditable rather than mutating history.
+// mergeAdjResults unions add into base by fingerprint. A finding new to base is appended with its
+// decision. A finding base already decided is kept; if add disagrees on validity, a report-only
+// disagreement finding is appended instead.
 func mergeAdjResults(base, add adjudication.Result) adjudication.Result {
 	idx := map[string]int{}
 	for i := range base.Findings {
@@ -994,14 +771,7 @@ func mergeAdjResults(base, add adjudication.Result) adjudication.Result {
 	return base
 }
 
-// appendReportOnly appends verifier findings/decisions to the result as report-only
-// (states forced to reported_valid/reported_invalid, which Actionable never applies),
-// so they appear in the run result without ever being written. A verifier finding that
-// re-raises an already-decided fingerprint is NOT dropped: if it disagrees with the
-// host's earlier decision, a report-only disagreement finding is recorded (governance:
-// a later lane's objection is auditable, never silently lost or overwritten).
-// withSource returns a copy of fs with each finding's Source set to src (used to attribute
-// host self-review findings as author_self_review).
+// withSource returns a copy of fs with each finding's Source set to src.
 func withSource(fs []review.Finding, src string) []review.Finding {
 	out := make([]review.Finding, len(fs))
 	for i, f := range fs {
@@ -1011,6 +781,9 @@ func withSource(fs []review.Finding, src string) []review.Finding {
 	return out
 }
 
+// appendReportOnly appends add's findings to base as reported_valid or reported_invalid, states
+// Actionable never applies. A finding that re-raises a decided fingerprint with a different verdict
+// is recorded as a report-only disagreement rather than dropped.
 func appendReportOnly(base, add adjudication.Result) adjudication.Result {
 	idx := map[string]int{}
 	for i := range base.Findings {
@@ -1045,9 +818,8 @@ func appendReportOnly(base, add adjudication.Result) adjudication.Result {
 	return base
 }
 
-// renumberIDs assigns unique, aligned final ids (f1..fN) to every finding/decision in
-// the merged result, so lane-supplied ids that repeat across lanes can't collide in the
-// run output or audit. Fingerprint (not id) remains the stable identity.
+// renumberIDs assigns final ids f1..fN to every finding and its decision, so ids repeated across
+// lanes cannot collide. The fingerprint, not the id, is the stable identity.
 func renumberIDs(adj adjudication.Result) adjudication.Result {
 	for i := range adj.Findings {
 		id := fmt.Sprintf("f%d", i+1)
@@ -1070,9 +842,8 @@ func findingDesc(f review.Finding) string {
 	return f.Title + " (" + loc + ")"
 }
 
-// reasonSuffix renders a host's rejection reasoning as a short, single-line suffix so the
-// reviewer can see WHY a finding was rejected and decide whether it has grounds to disagree
-// (the disagreement gate is meaningless without the reason). Empty reasoning → no suffix.
+// reasonSuffix renders a host's rejection reasoning as a short single-line suffix, so a reviewer can
+// judge whether to disagree. Empty reasoning yields no suffix.
 func reasonSuffix(reasoning string) string {
 	r := strings.TrimSpace(strings.ReplaceAll(reasoning, "\n", " "))
 	if r == "" {
@@ -1093,37 +864,31 @@ func sortedValues(m map[string]string) []string {
 	return out
 }
 
-// passOutcome is one semantic pass's complete result, with every shared-state side effect
-// DEFERRED to the caller: the identity caveat, the failing-lane detail, and the halt-carrying
-// fault are returned rather than applied. That is what lets an identical pass run inside a
-// blind panel seat goroutine and inside the single-threaded cross_check/verifier lanes without
-// two implementations.
+// passOutcome is one semantic pass's result. Shared-state side effects (the identity caveat, the
+// lane failure and the halt fault) are returned rather than applied, so the same pass can run in a
+// panel seat goroutine or a single-threaded lane.
 type passOutcome struct {
 	result schema.ReviewerResult
 	shown  map[string]bool
 	caveat *review.IdentityCaveat
-	// identity is the identity TIER of the accepted attempt (verified | self_reported |
-	// unknown) — the provenance ledger's per-seat evidence strength.
+	// identity is the accepted attempt's identity tier (verified, self_reported or unknown).
 	identity string
-	// withheld lists the files a containment rule kept out of THIS pass's reviewed set. It is
-	// returned on the halt paths too: a file that was never shown is a fact about the run
-	// whether or not the run then succeeded.
+	// withheld lists files a containment rule kept out of this pass's reviewed set, including on
+	// halt paths.
 	withheld []review.WithheldFile
 	failure  *review.LaneFailure
 	err      error
 }
 
-// semanticPass runs one analysis call for a single-slot lane (cross_check / verifier / the host
-// self-review) and commits its side effects to the outcome, halting the run on failure. It is
-// the thin committing wrapper over runSemanticPass — the panel path calls runSemanticPass
-// directly and commits in seat order instead.
+// semanticPass runs runSemanticPass for a single-slot lane (cross_check, verifier or host
+// self-review) and commits its side effects to the outcome, halting the run on failure. The panel
+// calls runSemanticPass directly and commits in seat order.
 func (m *Manager) semanticPass(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, reviewerLane review.LaneResolution, adapter model.Adapter, role review.Role, phase review.Phase, auth authority.Set, addressedLines, reported, decisions []string, callID string, startedAt time.Time, outcome *review.RunOutcome) (schema.ReviewerResult, map[string]bool, error) {
 	po := m.runSemanticPass(ctx, run, ws, req, reviewerLane, adapter, role, phase, auth, addressedLines, reported, decisions, callID)
 	if po.failure != nil {
 		outcome.Failure = po.failure
 	}
-	// Committed BEFORE the halt branch: a halted run's record must still name the files that
-	// were withheld from the reviewers, not lose them because the run ended badly.
+	// Commit withheld files before the halt branch, so a halted run still records them.
 	outcome.Withheld = appendWithheld(outcome.Withheld, po.withheld...)
 	if po.err != nil {
 		_, e := m.halt(run, outcome, startedAt, callID, po.err)
@@ -1135,13 +900,10 @@ func (m *Manager) semanticPass(ctx context.Context, run *audit.Run, ws *workspac
 	return po.result, po.shown, nil
 }
 
-// runSemanticPass runs one analysis call for any review lane or panel seat (reviewer /
-// cross_check / verifier) with one corrective schema retry, and returns the parsed result plus
-// the files shown to that reviewer. A non-retriable failure (M5/cancel/F/A/E) or a final schema
-// failure (G) comes back as a halt-carrying fault in the returned passOutcome — this function
-// writes only its OWN call directory, never the run-level halt record or the RunOutcome, so N
-// seats can run it concurrently and the host still decides the halt deterministically. The lane
-// only analyzes — it never writes; the host remains the sole adjudicator/writer.
+// runSemanticPass runs one analysis call for a review lane or panel seat, with one corrective schema
+// retry, and returns the parsed result and the files shown. A non-retriable failure or a final schema
+// failure is returned as a halt fault. It writes only its own call directory, never the run-level
+// halt record or the outcome, so seats can run it concurrently. The lane never writes to the workspace.
 func (m *Manager) runSemanticPass(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, reviewerLane review.LaneResolution, adapter model.Adapter, role review.Role, phase review.Phase, auth authority.Set, addressedLines, reported, decisions []string, callID string) passOutcome {
 	callDir := run.CallDir(callID)
 	status := review.CallStatus{
@@ -1154,14 +916,10 @@ func (m *Manager) runSemanticPass(ctx context.Context, run *audit.Run, ws *works
 	var lastParseErr error
 	parsed := false
 	shown := map[string]bool{}
-	// pendingCaveat holds the accepted attempt's identity caveat (unknown/self-reported). It is
-	// committed to outcome.IdentityCaveats ONLY after that attempt parses schema-valid output, so a
-	// caveat always corresponds to a real, valid run (a malformed attempt then a verified retry leaves
-	// no stale caveat).
+	// pendingCaveat is the latest attempt's identity caveat; it is returned only once that attempt
+	// parses, so a malformed attempt followed by a verified retry leaves no stale caveat.
 	var pendingCaveat *review.IdentityCaveat
-	// withheld accumulates the containment caveats of every attempt (deduped), so a file that
-	// was never shown to this lane is a stated fact on the returned passOutcome rather than a
-	// gap only a file-list diff would reveal.
+	// withheld accumulates every attempt's containment caveats, deduplicated.
 	var withheld []review.WithheldFile
 	var lastCopy *workspace.Handle
 	defer func() { ws.Cleanup(lastCopy) }()
@@ -1177,23 +935,18 @@ func (m *Manager) runSemanticPass(ctx context.Context, run *audit.Run, ws *works
 		}
 		lastCopy = copyH
 		_ = run.Event(m.now(), "info", "containment_copy_created", "isolated reviewer copy created", map[string]any{"root": copyH.Root, "attempt": attempt})
-		// Files the COPY withheld (a hardlinked file is never copied). Recorded before the
-		// prompt is built, so the audit log says what was left out even if this attempt then
-		// halts.
+		// Files the copy withheld (for example, hardlinked files).
 		wh := withheldFrom(stageCopy, copyH.Caveats)
 
 		snippets, snipCaveats, cerr := workspace.CollectSnippetsWithCaveats(copyH.Root)
 		if cerr != nil {
-			// A containment refusal while assembling the prompt HALTS. The legacy collector
-			// failed closed by returning an empty set, which is indistinguishable in the audit
-			// record from "the workspace had nothing to show" — a refusal must be a recorded
-			// fact, not an absence.
+			// A containment refusal while assembling the prompt halts, so it is recorded rather
+			// than looking like an empty workspace.
 			m.eventWithheld(run, wh)
 			return passOutcome{withheld: appendWithheld(withheld, wh...), err: collectFault(cerr)}
 		}
-		// ...and files the COLLECTOR withheld. Both lists ride the passOutcome rather than
-		// being written to shared state here: this function runs inside a blind panel seat
-		// goroutine, so every outcome mutation is the caller's to commit in seat order.
+		// Files the collector withheld. Both lists are returned for the caller to commit, because
+		// this may run in a panel seat goroutine.
 		wh = appendWithheld(wh, withheldFrom(stageSnippets, snipCaveats)...)
 		m.eventWithheld(run, wh)
 		withheld = appendWithheld(withheld, wh...)
@@ -1203,8 +956,7 @@ func (m *Manager) runSemanticPass(ctx context.Context, run *audit.Run, ws *works
 			files[i] = reviewprompt.FileSnippet{Path: s.Path, Content: s.Content}
 			shown[s.Path] = true
 		}
-		// The analysis lanes see ALL authority (path + inline); the provenance split applies
-		// only to host adjudication, which uses auth.AdjudicatorBlock().
+		// Analysis lanes see all authority; only host adjudication applies the provenance split.
 		pin := reviewprompt.Input{Role: role, Phase: phase, Files: files, Addressed: addressedLines, Reported: reported, Decisions: decisions, RequestSelfReportIdentity: wantsSelfReport(adapter), Authority: auth.ReviewerBlock()}
 		if attempt > 1 {
 			pin.Corrective = true
@@ -1216,11 +968,8 @@ func (m *Manager) runSemanticPass(ctx context.Context, run *audit.Run, ws *works
 		call := model.Call{
 			Role: string(role), Phase: string(phase),
 			Model: reviewerLane.Model, ModelArg: reviewerLane.ModelArg, Effort: reviewerLane.Effort,
-			// CONTAINMENT: the lane's CLI runs IN the isolated copy (WorkDir → cmd.Dir), not in
-			// the orchestrator's cwd. An agentic reviewer CLI reads relative paths and "the
-			// current project" from wherever it was started, so leaving WorkDir empty pointed
-			// every reviewer at the real tree that invoked reviewmesh, regardless of what the
-			// prompt showed it. See docs/security.md for what this does NOT stop (absolute paths).
+			// The lane's CLI runs in the isolated copy, because agentic CLIs read relative paths from
+			// their working directory. See docs/security.md for what this does not stop.
 			CopyRoot: copyH.Root, WorkDir: copyH.Root, Prompt: prompt,
 		}
 		_ = run.WriteText(filepath.Join(attDir, "prompt.md"), prompt+"\n")
@@ -1229,9 +978,7 @@ func (m *Manager) runSemanticPass(ctx context.Context, run *audit.Run, ws *works
 		res, invErr := adapter.Invoke(ctx, call)
 		_ = run.WriteText(filepath.Join(attDir, "stdout.txt"), string(res.Stdout)) // raw, always preserved
 		_ = run.WriteText(filepath.Join(attDir, "stderr.txt"), string(res.Stderr))
-		// `body` is the semantic content to parse: the unwrapped envelope payload when the
-		// adapter provided one (e.g. claude-code), else raw stdout. The raw stdout stays
-		// in stdout.txt for audit; reviewer-result.json holds the (unwrapped) body.
+		// body is the unwrapped envelope payload when the adapter provides one, else raw stdout.
 		body := res.Stdout
 		if len(res.Payload) > 0 {
 			body = res.Payload
@@ -1274,10 +1021,8 @@ func (m *Manager) runSemanticPass(ctx context.Context, run *audit.Run, ws *works
 			WithHalt("G").WithReason(status.ReasonCode)}
 	}
 
-	// The lane (role/phase in call-status) is authoritative for the audit trail. If the
-	// model's echoed role/phase doesn't match the lane (common with small models that
-	// don't restate it), record a non-fatal warning rather than failing — the contract
-	// is compatible-by-shape, and call-status already attributes the call to this lane.
+	// call-status attributes the call to this lane, so an echoed role or phase that does not match
+	// is only a warning.
 	if rr.Role != string(role) || rr.Phase != string(phase) {
 		_ = run.Event(m.now(), "warn", "lane_output_role_mismatch", "lane output did not echo the requested role/phase (call-status is authoritative)",
 			map[string]any{"requestedRole": string(role), "requestedPhase": string(phase), "gotRole": rr.Role, "gotPhase": rr.Phase})
@@ -1285,16 +1030,12 @@ func (m *Manager) runSemanticPass(ctx context.Context, run *audit.Run, ws *works
 	status.Verdict, status.Summary, status.Findings = review.Verdict(rr.Verdict), rr.Summary, rr.Findings
 	_ = run.WriteJSON(filepath.Join(callDir, "call-status.json"), status)
 	_ = run.Event(m.now(), "info", "reviewer_result_parsed", "parsed reviewer result", map[string]any{"role": string(role), "phase": string(phase), "findings": len(rr.Findings), "attempts": status.Attempts})
-	// The identity caveat is now valid (the accepted attempt parsed schema-valid output); the
-	// caller commits it. status.VerificationStatus is the accepted attempt's tier — the panel's
-	// provenance ledger records it per seat.
+	// The accepted attempt parsed, so its caveat and identity tier are returned for the caller to commit.
 	return passOutcome{result: rr, shown: shown, caveat: pendingCaveat, identity: status.VerificationStatus, withheld: withheld}
 }
 
-// wantsSelfReport reports whether an adapter's declared identity CEILING is a WEAK self-report — the
-// only case in which the review/adjudication prompt asks for the inline identity wrapper. Strong-
-// evidence adapters (codex/claude/ollama) and none adapters never receive it, so their prompts and
-// verified paths are untouched. Reuses the same optional Evidence() ceiling the classifier caps at.
+// wantsSelfReport reports whether an adapter's declared identity ceiling is self-report, the only case
+// in which prompts ask for the inline identity wrapper.
 func wantsSelfReport(a model.Adapter) bool {
 	ev, ok := a.(interface {
 		Evidence() review.IdentityEvidence
@@ -1302,29 +1043,22 @@ func wantsSelfReport(a model.Adapter) bool {
 	return ok && ev.Evidence() == review.EvidenceSelfReport
 }
 
-// appendIdentityCaveat appends a caveat, deduped by role+adapter+model+evidence+status (a lane's
-// schema retries would otherwise record the same caveat more than once).
+// appendIdentityCaveat appends c unless an identical caveat is already present.
 func appendIdentityCaveat(caveats []review.IdentityCaveat, c review.IdentityCaveat) []review.IdentityCaveat {
-	for _, existing := range caveats {
-		if existing == c {
-			return caveats
-		}
+	if slices.Contains(caveats, c) {
+		return caveats
 	}
 	return append(caveats, c)
 }
 
-// adjudicate turns reviewer findings into decisions: deterministic (the safe
-// fake/default path) or via a model-backed host-adjudication call when the
-// author_remediator lane resolves to a non-fake adapter and there are findings.
+// adjudicate turns reviewer findings into decisions, deterministically or through a model-backed
+// host-adjudication call when the author_remediator lane uses a non-fake adapter and findings remain.
 func (m *Manager) adjudicate(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, plan review.RunPlan, auth authority.Set, findings []review.Finding, addressed map[string]review.DecisionState, addressedLines []string, hostCallID string, startedAt time.Time, outcome *review.RunOutcome) (adjudication.Result, error) {
 	base := adjudication.Judge(findings, addressed)
 	hostLane, hasHost := plan.Lanes[review.RoleAuthorRemediator]
 
-	// Collect the findings still "live" — i.e. NOT already in a deterministic terminal
-	// state (already_addressed from a prior outer cycle, or skipped). Only these go to
-	// the host. Each gets a UNIQUE host id (f1..fN) so cross-pass ID reuse can't cause
-	// a duplicate-id parse failure. Terminal deterministic states are preserved (the
-	// host can never re-activate an already_addressed finding → outer convergence holds).
+	// Only findings not already terminal (already_addressed or skipped) go to the host, each with a
+	// unique id. Terminal states are preserved, so outer convergence holds.
 	var live []review.Finding
 	liveIdxByID := map[string]int{}
 	for i := range base.Decisions {
@@ -1357,10 +1091,8 @@ func (m *Manager) adjudicate(ctx context.Context, run *audit.Run, ws *workspace.
 		if !ok {
 			continue
 		}
-		// Validity sets Valid; the decision State drives Actionable, which excludes
-		// every non-apply state (invalid/skipped/already_addressed/reported_invalid/
-		// upstream_conflict_deferred/withheld_class_e) — so a deferred/withheld host
-		// verdict is never applied even when validity is "valid".
+		// State, not validity, drives Actionable, so a deferred or withheld verdict is never
+		// applied even when valid.
 		base.Decisions[i].Valid = a.Validity == "valid"
 		base.Decisions[i].State = a.DecisionState
 		if a.SeverityAdjusted != "" {
@@ -1372,13 +1104,10 @@ func (m *Manager) adjudicate(ctx context.Context, run *audit.Run, ws *workspace.
 	return base, nil
 }
 
-// finalSelfCritique is the methodology's dismissal-verification pass (§ Final self-critique): after
-// the cycle settles, the host RE-CHECKS each finding it rejected as invalid against the files and
-// OVERTURNS any rejection that was clearly wrong. An overturned finding is surfaced REPORT-ONLY
-// (state reported_valid) — never silently applied after the cycle — so this can only RAISE recall
-// (recover a wrongly-dropped finding); it can neither destabilize an apply run nor remove a finding.
-// A fake/absent host, no rejected findings, or the ACP-validation probe is a no-op. A host halt here
-// propagates (the same host just adjudicated successfully, so a failure signals a real problem).
+// finalSelfCritique asks the host to re-check each finding it rejected and overturns rejections that
+// were wrong. Overturned findings become reported_valid and are never applied, so the pass can only
+// recover findings. It is a no-op for a fake or absent host or when nothing was rejected; a host halt
+// propagates.
 func (m *Manager) finalSelfCritique(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, plan review.RunPlan, auth authority.Set, last adjudication.Result, startedAt time.Time, outcome *review.RunOutcome) (adjudication.Result, error) {
 	hostLane, ok := plan.Lanes[review.RoleAuthorRemediator]
 	if !ok || hostLane.Adapter == "fake" {
@@ -1388,7 +1117,7 @@ func (m *Manager) finalSelfCritique(ctx context.Context, run *audit.Run, ws *wor
 	if !ok {
 		return last, nil
 	}
-	// Collect the rejected findings + their original reasons; map a fresh host id → original index.
+	// Collect rejected findings and their reasons, mapping a fresh host id to the original index.
 	var rejected []review.Finding
 	var reasons []string
 	origIdxByID := map[string]int{}
@@ -1416,8 +1145,7 @@ func (m *Manager) finalSelfCritique(ctx context.Context, run *audit.Run, ws *wor
 		if !ok || a.Validity != "valid" {
 			continue
 		}
-		// Overturn: surface it as a valid finding the user should act on, REPORT-ONLY (never applied
-		// post-cycle). Actionable() excludes reported_valid, so an apply run cannot loop on this.
+		// Overturn as reported_valid, which Actionable excludes, so an apply run cannot loop on it.
 		last.Decisions[i].Valid = true
 		last.Decisions[i].State = review.StateReportedValid
 		last.Decisions[i].Reasoning = "overturned on final self-critique: " + a.Reasoning
@@ -1428,11 +1156,9 @@ func (m *Manager) finalSelfCritique(ctx context.Context, run *audit.Run, ws *wor
 	return last, nil
 }
 
-// hostAdjudicationCall runs one host-adjudication model call (with one corrective
-// schema retry) and returns the parsed result. Halts mirror reviewerPass.
-// The `phase` argument sets the PERSISTED CallStatus.Phase label only (semantic_adjudicate for a
-// natural adjudication, validate_adjudicate for the ACP readiness probe); the model prompt + output
-// schema stay PhaseAdjudicate so ParseHostAdjudication is unaffected.
+// hostAdjudicationCall runs one host-adjudication model call, with one corrective schema retry, and
+// returns the parsed result. phase sets only the recorded CallStatus.Phase; the prompt and output
+// schema always use PhaseAdjudicate.
 func (m *Manager) hostAdjudicationCall(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, plan review.RunPlan, hostLane review.LaneResolution, hostAdapter model.Adapter, auth authority.Set, findings []review.Finding, addressedLines []string, callID string, phase review.Phase, selfCritique bool, startedAt time.Time, outcome *review.RunOutcome) (schema.HostAdjudicationResult, error) {
 	callDir := run.CallDir(callID)
 	status := review.CallStatus{
@@ -1467,8 +1193,7 @@ func (m *Manager) hostAdjudicationCall(ctx context.Context, run *audit.Run, ws *
 		wh := withheldFrom(stageCopy, copyH.Caveats)
 		snippets, snipCaveats, cerr := workspace.CollectSnippetsWithCaveats(copyH.Root)
 		wh = appendWithheld(wh, withheldFrom(stageSnippets, snipCaveats)...)
-		// Committed here (this runs single-threaded, unlike a panel seat) and BEFORE the halt
-		// branch, so a file withheld from the adjudicator is recorded either way.
+		// This runs single-threaded, so withheld files are committed here, before the halt branch.
 		m.eventWithheld(run, wh)
 		outcome.Withheld = appendWithheld(outcome.Withheld, wh...)
 		if cerr != nil {
@@ -1479,10 +1204,8 @@ func (m *Manager) hostAdjudicationCall(ctx context.Context, run *audit.Run, ws *
 		for i, s := range snippets {
 			files[i] = adjudicationprompt.FileSnippet{Path: s.Path, Content: s.Content}
 		}
-		// PROVENANCE SPLIT: the host adjudicator sees PATH authority only. Inline caller-supplied
-		// authority is deliberately withheld here — otherwise a client model could supply the
-		// intent, its peers could find "deviations" from it, and the host would decide on the
-		// strength of an artifact no human ever wrote.
+		// Provenance split: the adjudicator sees path authority only, so a client model cannot
+		// supply the intent the host then judges findings against.
 		pin := adjudicationprompt.Input{Mode: plan.Mode, Findings: findings, Files: files, Addressed: addressedLines, RequestSelfReportIdentity: wantsSelfReport(hostAdapter), SelfCritique: selfCritique, Authority: auth.AdjudicatorBlock()}
 		if attempt > 1 {
 			pin.Corrective = true
@@ -1494,7 +1217,7 @@ func (m *Manager) hostAdjudicationCall(ctx context.Context, run *audit.Run, ws *
 		call := model.Call{
 			Role: string(review.RoleAuthorRemediator), Phase: string(review.PhaseAdjudicate),
 			Model: hostLane.Model, ModelArg: hostLane.ModelArg, Effort: hostLane.Effort,
-			// CONTAINMENT: the adjudicator CLI runs in the isolated copy, never the orchestrator cwd.
+			// The adjudicator CLI runs in the isolated copy.
 			CopyRoot: copyH.Root, WorkDir: copyH.Root, Prompt: prompt,
 		}
 		_ = run.WriteText(filepath.Join(attDir, "prompt.md"), prompt+"\n")
@@ -1559,13 +1282,10 @@ func (m *Manager) hostAdjudicationCall(ctx context.Context, run *audit.Run, ws *
 	return hr, nil
 }
 
-// ensureHostAdjudicationExercised is the ACP-validation readiness probe. When the configured host lane
-// is a REAL (non-fake) adapter that made NO natural adjudication call this run (zero reviewer findings),
-// it runs ONE synthetic host-adjudication call — through the same model-adapter boundary, containment,
-// schema, and identity classification as a natural one — so ACP Validation proves the host can run. Its
-// adjudication OUTPUT is discarded (only the invocation + identity + call-status matter); a halt (Class
-// A/E/G) propagates → the host lane is shown failed. A fake or unconfigured host, or a host already
-// exercised by a natural adjudication, is a no-op.
+// ensureHostAdjudicationExercised runs one synthetic host-adjudication call, through the same adapter,
+// containment, schema and identity checks as a natural one, when a non-fake host lane made no natural
+// adjudication call this run. Its output is discarded and a halt propagates. It is a no-op for a fake
+// or unconfigured host, or one already exercised.
 func (m *Manager) ensureHostAdjudicationExercised(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, plan review.RunPlan, auth authority.Set, startedAt time.Time, outcome *review.RunOutcome) error {
 	hostLane, ok := plan.Lanes[review.RoleAuthorRemediator]
 	if !ok || hostLane.Adapter == "fake" {
@@ -1595,10 +1315,9 @@ func (m *Manager) ensureHostAdjudicationExercised(ctx context.Context, run *audi
 	return herr
 }
 
-// hostAdjudicationOccurred reports whether a NATURAL host adjudication model call ran this run — a
-// per-call call-status.json under run.Dir with role=author_remediator AND phase=semantic_adjudicate.
-// (A semantic_author_review self-review call does NOT count as adjudication readiness.) Fail-closed:
-// only schemaVersion-1 records count.
+// hostAdjudicationOccurred reports whether a natural host adjudication call ran this run: a
+// schemaVersion 1 call-status.json with role author_remediator and phase semantic_adjudicate. A
+// self-review call does not count.
 func (m *Manager) hostAdjudicationOccurred(runDir string) bool {
 	matches, _ := filepath.Glob(filepath.Join(runDir, "calls", "*", "call-status.json"))
 	for _, p := range matches {
@@ -1615,24 +1334,15 @@ func (m *Manager) hostAdjudicationOccurred(runDir string) bool {
 	return false
 }
 
-// classifyAndVerify runs the no-retry halt checks (M5 from discarding copyH, cancel, invocation
-// failure, non-zero exit) for one model call. On a halt it writes the per-call call-status and returns
-// the halt-carrying fault with ok=false; ok=true ⇒ proceed. It returns a PENDING identity caveat (nil
-// only when the identity is strongly verified) that the caller commits to outcome.IdentityCaveats ONLY
-// after the accepted attempt parses schema-valid output — so a caveat always corresponds to a real,
-// valid run. NO identity classification is a halt on any surface: unknown, self-reported and a proven
-// mismatch alike are recorded and the lane's output is used.
+// classifyAndVerify runs one model call's non-retriable halt checks (copy mutation, cancellation,
+// invocation failure, non-zero exit) and classifies the model identity. On a halt it writes the
+// call-status and returns the fault with ok false. Identity never halts: any result short of strong
+// verification yields a pending caveat for the caller to commit once the attempt parses.
 //
-// It deliberately does NOT touch the RunOutcome and does NOT write the run-level halt record: it
-// runs inside a blind panel SEAT goroutine, where mutating shared run state would both race and
-// make the halt-vs-halt ordering depend on wall clock. It reports (caveat, laneFailure, fault) to
-// the caller, which commits them single-threaded in seat order (first halt by INDEX wins).
-// `prompt` is the exact text this call SENT. It exists solely so the clihint classification below can
-// subtract the adapter's echo of it; see laneFailure.
+// It never touches the outcome or the run-level halt record, because it runs in panel seat goroutines;
+// the caller commits results in seat order. prompt is the text sent, so laneFailure can subtract its echo.
 func (m *Manager) classifyAndVerify(ctx context.Context, run *audit.Run, ws *workspace.Access, copyH *workspace.Handle, lane review.LaneResolution, res model.Result, prompt string, invErr error, callID, callDir, attDir string, status *review.CallStatus) (*review.IdentityCaveat, *review.LaneFailure, error, bool) {
-	// This runs once PER attempt against a REUSED CallStatus. Reset the per-attempt halt/reason fields
-	// so a rejected earlier attempt's outcome (e.g. attempt 1 set model_identity_unknown) can never be
-	// audited on a later ACCEPTED attempt (e.g. attempt 2 verified) — each attempt classifies fresh.
+	// status is reused across attempts, so reset per-attempt fields before classifying.
 	status.HaltClass, status.ReasonCode, status.Signal = nil, "", ""
 	mutDiff, m5, _ := ws.Discard(copyH)
 	if m5 != nil {
@@ -1668,10 +1378,8 @@ func (m *Manager) classifyAndVerify(ctx context.Context, run *audit.Run, ws *wor
 		return nil, f, fault.New(fault.Adapter, fmt.Sprintf("adapter %q exited %d", lane.Adapter, res.ExitCode)).
 			WithHalt("A").WithReason("adapter_exited_nonzero").WithSignal(f.Signal), false
 	}
-	// Cap the produced evidence at the adapter's declared CEILING (the registered recipe is the
-	// authority): a self_report/none adapter can never be classified on a strong tier and faked as
-	// `verified`. FAIL CLOSED — an adapter that exposes no `Evidence()` ceiling is treated as
-	// EvidenceNone (→ unknown), so a future/custom adapter cannot bypass the cap by omitting it.
+	// Cap evidence at the adapter's declared ceiling so a weak adapter cannot be classified as verified.
+	// An adapter without an Evidence method is treated as EvidenceNone.
 	ceiling := review.EvidenceNone
 	if a, ok := m.Adapters[lane.Adapter]; ok {
 		if ev, ok2 := a.(interface {
@@ -1686,15 +1394,9 @@ func (m *Manager) classifyAndVerify(ctx context.Context, run *audit.Run, ws *wor
 	_ = m.writeModelVerification(run, attDir, lane, res.ActualModel, produced, vstatus)
 	_ = run.Event(m.now(), "info", "model_verification_completed", "classified model identity",
 		map[string]any{"verificationStatus": vstatus, "evidence": string(produced)})
-	// Any identity short of a strong-evidence match is a PENDING caveat — including a proven MISMATCH;
-	// the caller commits it only after the accepted attempt parses schema-valid output. ReportedModel
-	// preserves what the adapter said so the surfaced caveat never hides a suspicious reported value.
-	//
-	// IDENTITY NEVER GATES A FINDING. A lane that ran and produced schema-valid output is kept whatever
-	// its identity says: what a reviewer FOUND is what decides whether the finding is worth anything, and
-	// a label about which model produced it cannot make a real defect false. This replaced two Class-E
-	// halts (an unconfirmed strong-evidence adapter, and a mismatch) that between them could discard a
-	// whole review over provenance. See ../../../../docs/model-identity.md.
+	// Any identity short of a strong match, including a mismatch, is a caveat that keeps the reported
+	// model. Identity never gates a finding: a lane's valid output is used whatever its identity says.
+	// See docs/model-identity.md.
 	var caveat *review.IdentityCaveat
 	if !ok {
 		caveat = &review.IdentityCaveat{
@@ -1716,16 +1418,10 @@ func (m *Manager) classifyAndVerify(ctx context.Context, run *audit.Run, ws *wor
 	return caveat, nil, nil, true
 }
 
-// laneFailure captures the failing lane's actionable detail (role/adapter/model/exit + raw stderr)
-// for RunOutcome.Failure, so a surface can present the underlying adapter failure rather than only
-// the top-level "adapter X exited N". The stderr is raw here; surfaces sanitize + cap it.
-//
-// The clihint classification happens HERE, once, and rides the failure: the persisted audit
-// signal and the next-step a human is shown are then the same fact by construction, instead of
-// two independent re-derivations that can drift.
-// `prompt` is what this lane was SENT. It is passed so clihint can subtract the echo before
-// classifying: several provider CLIs print the whole prompt to stderr, and our prompts embed the
-// reviewed source — so without it the classifier reads OUR vocabulary and reports a signal about it.
+// laneFailure captures a failing lane's detail (role, adapter, model, exit code, raw output) for
+// RunOutcome.Failure; surfaces sanitize and cap the output. The clihint signal is classified once here
+// so the audit record and the user-facing hint agree. prompt is subtracted before classifying, because
+// some CLIs echo the prompt to stderr and it embeds reviewed source.
 func laneFailure(lane review.LaneResolution, res model.Result, prompt, halt, reason string) *review.LaneFailure {
 	return &review.LaneFailure{
 		Role: string(lane.Role), Adapter: lane.Adapter, Model: lane.Model,
@@ -1746,22 +1442,12 @@ func evidenceOrNone(e review.IdentityEvidence) review.IdentityEvidence {
 	return e
 }
 
-// handleMode performs the report/patch/apply behavior, finalizes decision states,
-// and returns how many edits were applied (committed to the live workspace).
-//
-// Report mode is entirely this function's business: nothing is written, so there is nothing to
-// govern. Patch and apply DELEGATE — every byte this run puts in the live workspace goes through
-// governedWrite (writepath.go), the same function `Manager.Remediate` calls for the MCP surface.
-// That delegation is the point: a branch carrying its own copy/edit/commit sequence and committing
-// with an unpinned `ws.Commit` would leave the CLI and ACP surfaces silently without the journal,
-// the content pins, the cancel/commit gate, the receipt and the edit-target authorization the MCP
-// surface has. There is one write path and one commit call site.
-//
-// What this function still owns is the DECISION STATE: which findings authorize a write (the
-// write-path rule's untraceable refusals are marked here, before anything is offered to the write
-// path), and what each finding's terminal state becomes given what the write path reports.
+// handleMode performs the report, patch or apply behavior, finalizes decision states, and returns how
+// many findings were committed to the live workspace. Patch and apply delegate every write to
+// governedWrite (writepath.go), so there is one write path; this function owns only the decision
+// states before and after that write.
 func (m *Manager) handleMode(ctx context.Context, run *audit.Run, req Request, plan review.RunPlan, auth authority.Set, adj *adjudication.Result, shown map[string]bool, identity WorkspaceIdentity, cycle int, outcome *review.RunOutcome) (int, error) {
-	// WRITE-PATH RULE, marked before any mode branch so report mode records it too.
+	// Mark write-path refusals before branching, so report mode records them too.
 	markApplyRefusals(auth, adj, shown)
 	if plan.Mode == review.ModeReport {
 		for i := range adj.Decisions {
@@ -1772,18 +1458,12 @@ func (m *Manager) handleMode(ctx context.Context, run *audit.Run, req Request, p
 		return 0, nil
 	}
 
-	// The ids are about to AUTHORIZE writes, and the write path binds a decision to a finding by
-	// id. Lane-supplied ids can repeat across lanes (the merge dedupes by fingerprint, not by id),
-	// so a collision is resolved here rather than tolerated by a weaker binding. Ids that are
-	// already unique are untouched — the remediation marker quotes them.
+	// The write path binds decisions to findings by id, and lane-supplied ids can repeat, so make
+	// them unique; ids that already are keep their value.
 	uniqueFindingIDs(adj.Findings, adj.Decisions)
 
-	// WRITE-PATH RULE — the injection backstop. An applied hunk must trace to evidence in the
-	// workspace COPY, so a finding supported only by authority text is REPORTED and never applied.
-	// It is decided here, before the write path is offered anything, because naming an authority
-	// document is not an attempted escape (the human declared that document): it must degrade to a
-	// report-only disposition rather than halt the run, which is the opposite of what the write
-	// path does with an unauthorized target.
+	// A finding supported only by authority text is reported, never applied. Naming a declared
+	// document is not an escape attempt, so it degrades to report-only rather than halting.
 	for i := range adj.Decisions {
 		if !adjudication.Actionable(adj.Decisions[i]) {
 			continue
@@ -1797,11 +1477,8 @@ func (m *Manager) handleMode(ctx context.Context, run *audit.Run, req Request, p
 		}
 	}
 
-	// A run that converges over several outer cycles opens a write window per cycle, and each one
-	// gets its own journal/receipt directory: overwriting cycle 1's journal with cycle 2's would
-	// destroy the record of a write that already happened. The FIRST window keeps the documented
-	// `remediation/` path, so a single-cycle run (every MCP remediation, and the ordinary CLI
-	// apply) is spelled identically on every surface.
+	// Each outer cycle's write window gets its own artifact directory so no journal is overwritten;
+	// the first keeps the documented remediation/ path.
 	artifacts := ""
 	if cycle > 1 {
 		artifacts = defaultWriteArtifacts + "/" + fmt.Sprintf("cycle-%d", cycle)
@@ -1814,26 +1491,16 @@ func (m *Manager) handleMode(ctx context.Context, run *audit.Run, req Request, p
 		Workspace: req.Workspace, Identity: identity,
 		Mode: plan.Mode, Plan: plan, Artifacts: artifacts,
 		Findings: adj.Findings, Decisions: adj.Decisions,
-		// A full cycle writes what its own adjudication left actionable and un-refused. The
-		// refusal marking above has already turned every untraceable finding into a report-only
-		// decision, so this predicate never sees one.
 		Accept: func(d review.Decision) bool {
 			return adjudication.Actionable(d) && d.ApplyRefusalReason == ""
 		},
-		// THE NARROWING SELECTION. It narrows EVERY cycle of a converging apply — a filter
-		// that stopped applying after cycle 1 would write findings the caller excluded — but only
-		// the first cycle is MEASURED against the caller's list (SelectPrimary), because by cycle 2
-		// a selected finding may be absent precisely because cycle 1 applied it.
+		// The selection narrows every cycle, but only the first is measured against the caller's
+		// list: by a later cycle a selected finding may be absent because it was already applied.
 		Select: req.Select, SelectPrimary: cycle <= 1,
 		Shown: shown,
-		// The pins are RECORDED from the isolated copy this write is derived from, not carried
-		// from an earlier run: a full cycle decides against the copy it just took. See
-		// writepath.go.
+		// A full cycle records pins from the copy it just took. See writepath.go.
 		PinsFromCopy: true,
-		// The operator's own build/test commands. On a CONVERGING apply this window is one of
-		// several, and each records its own before/after — so the LAST one wins on the outcome
-		// below, which is the right answer: it is the only pass taken against the tree the run
-		// finally produced.
+		// On a converging apply the last window's verification wins, since it measured the final tree.
 		VerifyCommands: req.VerifyCommands, VerifyTimeout: req.VerifyTimeout,
 		AllowProtectedPaths: req.AllowProtectedPaths,
 	})
@@ -1844,17 +1511,14 @@ func (m *Manager) handleMode(ctx context.Context, run *audit.Run, req Request, p
 		outcome.Verification = res.Verification
 	}
 	outcome.Withheld = appendWithheld(outcome.Withheld, res.Withheld...)
-	// Protected-path refusals ride the outcome so the CLI and the ACP surface report the SAME
-	// fact the receipt records. They accumulate across the run's outer cycles, deduped by
-	// fingerprint — see appendRefusals for why the dedup is not cosmetic.
+	// Protected-path refusals accumulate across cycles on the outcome, deduplicated (see appendRefusals).
 	outcome.Refusals = appendRefusals(outcome.Refusals, res.Refusals...)
 	if werr != nil {
 		return 0, werr
 	}
 
-	// The terminal decision state of every finding the write path handled, derived ONLY from what
-	// it reported. `applied` is the convergence signal the outer cycle reads, so it counts findings
-	// whose hunks actually reached the live tree — never findings that merely reached the copy.
+	// Derive terminal states only from what the write path reported. applied, the convergence signal,
+	// counts only findings that reached the live tree.
 	byID := make(map[string]findingWrite, len(res.Findings))
 	for _, fw := range res.Findings {
 		byID[fw.FindingID] = fw
@@ -1867,11 +1531,8 @@ func (m *Manager) handleMode(ctx context.Context, run *audit.Run, req Request, p
 		}
 		switch {
 		case fw.Refused:
-			// A protected-path refusal is recorded on the DECISION with the same two fields the
-			// write-path rule's other refusals use, so every projection that already renders
-			// `applyable: false` + a reason renders this one too, without knowing it exists.
-			// The state stays `reported_valid`: the finding is real and was reported; what was
-			// refused is writing it.
+			// Record the refusal with the same fields as other write-path refusals; the finding
+			// stays reported_valid because only the write was refused.
 			no := false
 			adj.Decisions[i].State = review.StateReportedValid
 			adj.Decisions[i].Applyable, adj.Decisions[i].ApplyRefusalReason = &no, fw.Reason
@@ -1885,29 +1546,20 @@ func (m *Manager) handleMode(ctx context.Context, run *audit.Run, req Request, p
 			adj.Decisions[i].State = review.StateReportedValid
 		}
 	}
-	// `applied` is the convergence signal (live-tree writes only); `outcome.Applied` is the
-	// REPORTED total and counts patch mode too, because a patch run that refused one finding must
-	// still be able to say "7 applied, 1 refused" rather than "0 applied".
+	// outcome.Applied is the reported total and includes patch mode, unlike the convergence signal.
 	outcome.Applied += len(res.Receipt.Applied)
 	return applied, nil
 }
 
-// ScopeHaltClass is the halt-taxonomy class for a path-confinement refusal: a MECHANICAL
-// containment check (like M5), not a call-result class — the host was asked to write
-// somewhere it is not permitted to write. It maps to the existing containment exit code;
-// no new exit code is introduced.
+// ScopeHaltClass is the halt class for a path-confinement refusal, a mechanical containment check
+// that maps to the containment exit code.
 const ScopeHaltClass = "M6"
 
-// authorizeTarget runs the run's write guard against one workspace-relative target and
-// turns a refusal into a halt-carrying fault. It is a no-op when no guard is configured
-// (a caller that constructed the Access itself) and for an empty path (the caller's own
-// skip rules handle that).
+// authorizeTarget checks one workspace-relative target against the run's write guard and turns a
+// refusal into a halt fault wrapping the *scope.Denial, so callers can tell which rule refused. It is
+// a no-op without a guard or for an empty path.
 //
-// The returned error WRAPS the resolver's typed *scope.Denial, so a caller can ask which
-// rule refused — governedWrite does exactly that, because a protected-path denial is now a
-// recorded refusal while every other denial is still a halt. A non-Denial error is returned
-// unwrapped rather than through scopeFault: scopeFault returns a typed nil for one, and a
-// typed nil in an `error` is non-nil to the caller and answers no question correctly.
+// A non-Denial error is returned as is, because scopeFault's typed nil would be a non-nil error.
 func authorizeTarget(ws *workspace.Access, h *workspace.Handle, rel string) error {
 	if ws == nil || ws.Guard == nil || h == nil || rel == "" {
 		return nil
@@ -1921,10 +1573,8 @@ func authorizeTarget(ws *workspace.Access, h *workspace.Handle, rel string) erro
 	return nil
 }
 
-// scopeFault maps a path-confinement refusal to a typed halt: exit 6 (containment), halt
-// class M6, and the resolver's own MACHINE reason code — so the audit record names the
-// exact rule that refused rather than a generic "internal error". It returns nil for any
-// error that is not a confinement refusal, so the caller can classify it normally.
+// scopeFault maps a path-confinement refusal to a containment halt (class M6) carrying the
+// resolver's reason code. It returns nil for any other error.
 func scopeFault(err error) *fault.Fault {
 	d, ok := scope.AsDenial(err)
 	if !ok {
@@ -1934,13 +1584,9 @@ func scopeFault(err error) *fault.Fault {
 		WithHalt(ScopeHaltClass).WithReason(string(d.Reason))
 }
 
-// collectFault classifies a failure to assemble the prompt's workspace snippets. A typed
-// containment REFUSAL from meshcore/workspace (a protected copy root, a hardlinked file that
-// may be a second name for a secret) gets exactly the treatment a scope denial gets — exit 6,
-// halt class M6, the refusal's own MACHINE reason code — because it is the same kind of event:
-// the host was asked to read something it is not permitted to read. Anything else is an
-// ordinary internal failure. Either way the run STOPS: the legacy collector's empty-set return
-// made a refusal look like an empty workspace in the audit record.
+// collectFault classifies a failure to collect workspace snippets. A containment refusal from
+// meshcore/workspace becomes an M6 containment halt with its reason code; anything else is an
+// internal failure.
 func collectFault(err error) *fault.Fault {
 	if r, ok := workspace.AsRefusal(err); ok {
 		return fault.Wrap(fault.Containment, "workspace snippets refused by containment policy", err).
@@ -1950,20 +1596,12 @@ func collectFault(err error) *fault.Fault {
 		WithReason("workspace_collect_failed")
 }
 
-// --- withheld files (containment caveats) ---
-//
-// meshcore withholds a file rather than halting when withholding is the proportionate answer
-// — today: a hardlinked regular file, whose innocuous in-tree name may be a second name for
-// protected material, but which is also what an ordinary `cp -al` tree or dedup store looks
-// like. Halting on one would hand any writer inside a trusted tree an availability switch.
-//
-// The whole reason that is SAFE is that the omission is stated. A file nobody was shown is a
-// file no reviewer can object to, and a reviewer's silence reads as approval — so an
-// unrecorded withhold converts a containment rule into a blind spot. These helpers carry
-// meshcore's caveats onto the outcome, into the audit log, and out through the projection.
+// Withheld files: meshcore withholds some files (such as hardlinked files) rather than halting.
+// That is safe only if the omission is recorded, so these helpers carry the caveats onto the outcome,
+// the audit log and the projection.
 
-// stageCopy / stageSnippets name WHERE a file was withheld: never placed in the isolated copy
-// at all, or present in the copy but never rendered into a prompt.
+// stageCopy and stageSnippets name where a file was withheld: from the isolated copy, or from the
+// prompt.
 const (
 	stageCopy     = "copy"
 	stageSnippets = "snippets"
@@ -1983,9 +1621,8 @@ func withheldFrom(stage string, cs []workspace.Caveat) []review.WithheldFile {
 	return out
 }
 
-// appendWithheld merges withheld records, deduped by (stage, path, reason). The same file is
-// withheld again on every retry, every seat and every cycle — the run record should say
-// "these files were not shown", once each, not repeat the list N times.
+// appendWithheld merges withheld records, deduplicated by stage, path and reason, since the same file
+// is withheld again on every retry, seat and cycle.
 func appendWithheld(dst []review.WithheldFile, add ...review.WithheldFile) []review.WithheldFile {
 	for _, w := range add {
 		dup := false
@@ -2002,15 +1639,9 @@ func appendWithheld(dst []review.WithheldFile, add ...review.WithheldFile) []rev
 	return dst
 }
 
-// appendRefusals accumulates protected-path refusals across a run's outer cycles, DEDUPED BY
-// FINGERPRINT.
-//
-// The dedup is load-bearing rather than tidy. A converging apply opens a write window per cycle,
-// and a refused finding is refused again every time it is offered — it never reaches `applied`,
-// so nothing marks it as addressed and the next cycle re-raises it. Without dedup a two-cycle run
-// would report `refused: 2` for ONE finding, which is exactly the kind of recounted number the
-// host-computes-the-counts rule exists to prevent. Each cycle's receipt still records its own
-// window truthfully; this is the run-level roll-up.
+// appendRefusals accumulates protected-path refusals across outer cycles, deduplicated by fingerprint.
+// A refused finding is re-raised every cycle, so without deduplication one finding would be counted
+// once per cycle. Each cycle's receipt still records its own window.
 func appendRefusals(dst []review.ApplyRefusal, add ...review.ApplyRefusal) []review.ApplyRefusal {
 	for _, r := range add {
 		dup := false
@@ -2027,9 +1658,7 @@ func appendRefusals(dst []review.ApplyRefusal, add ...review.ApplyRefusal) []rev
 	return dst
 }
 
-// eventWithheld records the withholding in the audit log at the moment it happens, naming the
-// path and the rule. It is a warn, not an info: a file dropping out of the reviewed set is
-// something a human should see, not something to find later by diffing file lists.
+// eventWithheld logs a warning for each withheld file, naming the path and the rule.
 func (m *Manager) eventWithheld(run *audit.Run, w []review.WithheldFile) {
 	for _, e := range w {
 		_ = run.Event(m.now(), "warn", "workspace_file_withheld",
@@ -2038,20 +1667,13 @@ func (m *Manager) eventWithheld(run *audit.Run, w []review.WithheldFile) {
 	}
 }
 
-// remediationMaxBytes bounds the file content shown to the remediator (a huge file is truncated
-// and the model is told to decline if the fix needs the omitted part — never a blind edit).
+// remediationMaxBytes bounds the file content shown to the remediator; the model is told to decline
+// when a fix needs the omitted part.
 const remediationMaxBytes = 60000
 
-// readBounded reads one file OF THE REMEDIATION COPY and caps it to remediationMaxBytes,
-// reporting whether it was truncated.
-//
-// It takes the copy ROOT and a workspace-RELATIVE path rather than a joined path string,
-// because the bytes it returns are shown to the remediation model. Joining and then calling
-// os.ReadFile reopens the path by NAME, so an entry swapped for a symlink inside the copy
-// between the shown-file checks and this read would be followed straight out of the copy.
-// rootfile reads it through an identity-bound handle on the copy root instead: every
-// component is resolved inside that root, the final component is opened no-follow, and what
-// is validated is the OPENED descriptor.
+// readBounded reads one file of the remediation copy, capped at remediationMaxBytes, and reports
+// whether it was truncated. It reads through rootfile rather than a joined path, so a symlink swapped
+// into the copy cannot redirect the read outside it.
 func readBounded(copyRoot, rel string) (content string, truncated bool, err error) {
 	b, err := rootfile.ReadUnder(copyRoot, rel)
 	if err != nil {
@@ -2063,15 +1685,10 @@ func readBounded(copyRoot, rel string) (content string, truncated bool, err erro
 	return string(b), false, nil
 }
 
-// hostRemediationCall asks the host author_remediator to produce anchored edits that FIX one
-// finding in `fileContent` (the target file's CURRENT content in the remediation copy). It is
-// BEST-EFFORT: any problem — adapter error, non-zero exit, unparseable output, or a safe decline —
-// returns nil so the caller falls back to the deterministic review marker. A remediation miss must
-// never abort an otherwise-good apply run. The call runs read-only in a disposable copy of the
-// CURRENT remediation state (`sourceRoot`, so the model sees edits already applied this run); the
-// host lane's identity was verified by this cycle's adjudication, and every returned edit is
-// re-validated (ParseRemediationResult) and applied to a copy then diffed, so a wrong edit cannot
-// escape the safety envelope. One corrective retry mirrors the reviewer/adjudication calls.
+// hostRemediationCall asks the author_remediator for anchored edits that fix one finding in
+// fileContent. It is best effort: any failure or decline returns nil and the caller falls back to the
+// deterministic marker. The call runs in a disposable copy of sourceRoot, and every returned edit is
+// re-validated and applied to the copy before diffing. It makes one corrective retry.
 func (m *Manager) hostRemediationCall(ctx context.Context, run *audit.Run, ws *workspace.Access, sourceRoot string, hostLane review.LaneResolution, hostAdapter model.Adapter, f review.Finding, fileContent string, truncated bool, callID string) []review.Edit {
 	callDir := run.CallDir(callID)
 	const maxAttempts = 2
@@ -2100,7 +1717,7 @@ func (m *Manager) hostRemediationCall(ctx context.Context, run *audit.Run, ws *w
 		call := model.Call{
 			Role: string(review.RoleAuthorRemediator), Phase: string(review.PhaseRemediate),
 			Model: hostLane.Model, ModelArg: hostLane.ModelArg, Effort: hostLane.Effort,
-			// CONTAINMENT: the remediator CLI runs in the isolated copy, never the orchestrator cwd.
+			// The remediator CLI runs in the isolated copy.
 			CopyRoot: copyH.Root, WorkDir: copyH.Root, Prompt: prompt,
 		}
 		_ = run.WriteText(filepath.Join(attDir, "prompt.md"), prompt+"\n")
@@ -2162,8 +1779,7 @@ func (m *Manager) halt(run *audit.Run, outcome *review.RunOutcome, startedAt tim
 			outcome.Halt = &hc
 		}
 	}
-	// The halt's machine reason/signal ride the outcome too, so a surface can project the
-	// same codes the run directory records without re-reading it.
+	// The reason and signal ride the outcome, so surfaces need not re-read the run directory.
 	outcome.HaltReason, outcome.HaltSignal = fault.ReasonOf(f), fault.SignalOf(f)
 	rel := "halt-record.json"
 	if callID != "" {
@@ -2181,10 +1797,8 @@ func (m *Manager) writeModelVerification(run *audit.Run, callDir string, lane re
 		"schemaVersion": 1, "role": string(lane.Role), "adapter": lane.Adapter,
 		"requestedModel": string(lane.ModelArg), "actualModel": actual,
 		"identityEvidence": string(evidenceOrNone(evidence)), "verificationStatus": status,
-		// success = the identity was STRONGLY verified. Only VerifVerified qualifies: a weak
-		// self_reported identity is ACCEPTED (the run proceeds) but is NOT strong verification, so it is
-		// success=false with verificationStatus=self_reported — never conflated with verified. unknown
-		// and mismatch are also success=false. verificationStatus carries the precise disposition.
+		// success means strongly verified; self_reported, unknown and mismatch are all false, and
+		// verificationStatus carries the precise disposition.
 		"success":         status == review.VerifVerified,
 		"rawIdentityText": actual, // sanitized: only the model string, never secrets
 		"verifiedAt":      m.now().UTC().Format(time.RFC3339),
@@ -2196,7 +1810,7 @@ func sortedRoles(lanes map[review.Role]review.LaneResolution) []review.Role {
 	for r := range lanes {
 		roles = append(roles, r)
 	}
-	sort.Slice(roles, func(i, j int) bool { return roles[i] < roles[j] })
+	slices.Sort(roles)
 	return roles
 }
 
@@ -2223,15 +1837,11 @@ func runState(run *audit.Run, o review.RunOutcome, startedAt, completedAt time.T
 		"startedAt":     startedAt.UTC().Format(time.RFC3339),
 		"completedAt":   completedAt.UTC().Format(time.RFC3339),
 	}
-	// The inclusion manifest rides run-state so the audit record answers "which intent was
-	// this judged against" without opening a second file. The key is ABSENT when no authority
-	// was declared, so a run that uses none is byte-identical to before.
+	// Optional blocks are omitted when empty: the authority inclusion manifest, withheld files, the
+	// caller's trace context and the halt summary.
 	if len(o.Authority) > 0 {
 		st["authority"] = o.Authority
 	}
-	// The files a containment rule kept OUT of the reviewed set, with the rule that did it.
-	// Same shape of promise as `authority`: absent when there is nothing to say, so a run that
-	// withheld nothing is byte-identical to before, and never a silent omission when there is.
 	if len(o.Withheld) > 0 {
 		withheld := make([]map[string]any, 0, len(o.Withheld))
 		for _, w := range o.Withheld {
@@ -2246,22 +1856,11 @@ func runState(run *audit.Run, o review.RunOutcome, startedAt, completedAt time.T
 		}
 		st["withheld"] = withheld
 	}
-	// The caller's W3C trace context, carried verbatim and never interpreted. ABSENT when the caller
-	// sent none — which is every CLI run and every legacy-era request — so a run without one is
-	// byte-identical to a run written before the field existed. `measures` inside the block says what
-	// it does and does not account for: correlation, never token or cost figures, which no run in this
-	// repo records. See review.Trace.
 	if o.Trace != nil {
 		st["trace"] = o.Trace
 	}
-	// CROSS-RUN DISPOSITION MEMORY's disclosure. Same shape of promise as `authority` and `trace`:
-	// ABSENT when the run did not enable it (so the overwhelmingly common run is byte-identical to
-	// one written before the feature existed), and PRESENT whenever it was — because "this blind
-	// reviewer's prompt carried context from an earlier run" is a property of the review, not an
-	// implementation detail a reader should have to reconstruct.
 	if o.Halt != nil {
-		// A machine-readable halt SUMMARY (the full record lives in halt-record.json):
-		// class + stable reason code + any actionability signal.
+		// A halt summary; the full record is halt-record.json.
 		h := map[string]any{"haltClass": string(*o.Halt)}
 		if o.HaltReason != "" {
 			h["reasonCode"] = o.HaltReason
@@ -2274,15 +1873,9 @@ func runState(run *audit.Run, o review.RunOutcome, startedAt, completedAt time.T
 	return st
 }
 
-// haltRecord writes the machine-readable halt record.
-//
-// `reasonCode` is a STABLE MACHINE CODE (lower_snake, e.g. "adapter_exited_nonzero",
-// "scope_write_denied") — never a sentence. Carrying the fault's human message here would
-// make the field unusable for automation: the text moves whenever the wording does.
-// The human rendering lives in `detail`, and `signal` carries the classified
-// actionability hint (login_required / folder_trust / model_invalid / update_prompt /
-// timeout) when the failure produced one, so an automated consumer can react to WHY a run
-// halted and WHAT to do about it without parsing prose.
+// haltRecord builds the machine-readable halt record. reasonCode is a stable lower_snake code, never a
+// sentence; detail carries the human message, and signal carries any classified hint such as
+// login_required or model_invalid.
 func haltRecord(run *audit.Run, class, callID string, err error, now time.Time) map[string]any {
 	rec := map[string]any{
 		"schemaVersion": 1, "runId": run.ID, "occurredAt": now.UTC().Format(time.RFC3339),
@@ -2294,9 +1887,7 @@ func haltRecord(run *audit.Run, class, callID string, err error, now time.Time) 
 		rec["haltClass"] = class
 	}
 	if err != nil {
-		// ReasonOf/CodeOf/SignalOf are total: even an error that is not a typed fault
-		// yields a code-shaped reason, so this record never carries a sentence where a
-		// machine consumer expects a code.
+		// ReasonOf yields a code-shaped reason even for an untyped error.
 		rec["reasonCode"] = fault.ReasonOf(err)
 		rec["exitCode"] = int(fault.CodeOf(err))
 		rec["detail"] = err.Error() // the human rendering
@@ -2363,10 +1954,7 @@ func summaryMarkdown(plan review.RunPlan, adj adjudication.Result, req Request) 
 	panelled := false
 	for i, f := range adj.Findings {
 		fmt.Fprintf(&sb, "- **%s** [%s/%s] %s (`%s`) — %s", f.ID, f.Kind, f.Severity, f.Title, f.File, adj.Decisions[i].State)
-		// WHAT THE PANEL DID WITH IT, on the same line as the finding, because a reader deciding
-		// which finding to open next is deciding it here. A finding one seat of five reported and a
-		// finding all five reported are different things to read, and until this they looked
-		// identical in the artifact a person actually opens.
+		// Show the panel's consensus on the finding's own line.
 		if phrase := ConsensusPhrase(len(adj.Decisions[i].SupportingSeats), len(adj.Decisions[i].DissentingSeats), adj.Decisions[i].Consensus); phrase != "" {
 			fmt.Fprintf(&sb, " · %s", phrase)
 			panelled = true
@@ -2374,9 +1962,7 @@ func summaryMarkdown(plan review.RunPlan, adj adjudication.Result, req Request) 
 		sb.WriteString("\n")
 	}
 	if panelled {
-		// The caveat travels WITH the labels, in the same document. A reader who meets the word
-		// "contested" without it will supply their own meaning, and the meaning they supply — that
-		// the other seats voted against this — is the one thing it does not mean.
+		// The note explains that "contested" does not mean the other seats disagreed.
 		fmt.Fprintf(&sb, "\n> %s\n", DissentNote)
 	}
 	return sb.String()

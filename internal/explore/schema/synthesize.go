@@ -1,51 +1,43 @@
 package schema
 
-// This file holds the Synthesize mode's app-owned artifacts: the FIXED explorer
-// schema + deterministic explorer prompt (converge on one best complete answer), and the terminal
-// SynthesizeOutput the collator composes. Synthesize is FORMULATION-FREE like Map — the collator
-// authors NO round-1 schema: both the explorer prompt and the explorer schema are app-owned.
+// This file holds the synthesize mode's explorer schema and prompt, which ask each explorer for one best
+// complete answer, and the terminal SynthesizeOutput the collator composes.
 
 import (
 	"fmt"
 	"strings"
 )
 
-// SynthesizeOutput is the FIXED, exploremesh-owned terminal output of the Synthesize mode.
-// The collator SELECTS the strongest candidate answer and, where clearly beneficial, GRAFTS
-// superior elements from the others into a single composed artifact — it does NOT tally. Every grafted
-// element records which explorer it came from (componentProvenance), and rejected alternatives are
-// preserved with a reason (minorityReport) so a minority position is never silently dropped. It
-// satisfies the mode-package ModeOutput contract via Summary().
+// SynthesizeOutput is the terminal output of the synthesize mode. The collator selects the strongest answer
+// and may graft better elements from the others into it; it does not tally. Each grafted element records
+// its source explorer, and each rejected alternative is kept with the reason. It satisfies the mode
+// package's ModeOutput contract.
 type SynthesizeOutput struct {
-	// Artifact is the chosen/composed best answer — the single deliverable of the mode. Required.
+	// Artifact is the composed answer, the mode's deliverable. It is required.
 	Artifact string `json:"artifact"`
-	// ComponentProvenance records, per grafted element, which explorer it was taken from — so the
-	// composed artifact is attributable rather than an unsourced blend.
+	// ComponentProvenance attributes each grafted element to the explorer it came from.
 	ComponentProvenance []ProvenanceEntry `json:"componentProvenance"`
-	// MinorityReport preserves the rejected alternatives + why each was not chosen (minority
-	// carried, never dropped).
+	// MinorityReport lists the rejected alternatives and why each was not chosen.
 	MinorityReport []MinorityEntry `json:"minorityReport"`
-	// Rationale explains the selection/composition decision (why this candidate, why these grafts).
+	// Rationale explains the selection and the grafts.
 	Rationale string `json:"rationale"`
 }
 
-// ProvenanceEntry attributes one grafted component of the composed artifact to the explorer it came
-// from, keyed on the full (adapter, model, effort) identity.
+// ProvenanceEntry attributes one grafted component of the composed artifact to its explorer.
 type ProvenanceEntry struct {
 	Component    string           `json:"component"`
 	FromExplorer ExplorerIdentity `json:"fromExplorer"`
 }
 
 // MinorityEntry is one rejected alternative answer, attributed to its explorer, with the reason it was
-// not selected — the Synthesize analogue of Map's disagreement register.
+// not selected.
 type MinorityEntry struct {
 	Alternative  string           `json:"alternative"`
 	FromExplorer ExplorerIdentity `json:"fromExplorer"`
 	WhyRejected  string           `json:"whyRejected"`
 }
 
-// Summary returns the one-line human summary of a Synthesize result — the composition rationale when
-// present, else the composed artifact itself. Implements the mode-package ModeOutput contract.
+// Summary returns the rationale, or the artifact when there is no rationale.
 func (o SynthesizeOutput) Summary() string {
 	if strings.TrimSpace(o.Rationale) != "" {
 		return o.Rationale
@@ -53,9 +45,7 @@ func (o SynthesizeOutput) Summary() string {
 	return o.Artifact
 }
 
-// Validate checks the composed output is usable: a non-empty artifact (the mode's whole deliverable).
-// Provenance + minority report may legitimately be empty (a single dominant answer with no worthwhile
-// grafts and no substantive alternatives), so they are not required.
+// Validate checks that the artifact is non-empty. Provenance and the minority report may be empty.
 func (o SynthesizeOutput) Validate() error {
 	if strings.TrimSpace(o.Artifact) == "" {
 		return fmt.Errorf("synthesize output has an empty artifact")
@@ -63,10 +53,8 @@ func (o SynthesizeOutput) Validate() error {
 	return nil
 }
 
-// synthesizeExplorerFields is the Synthesize mode's FIXED explorer-response schema: one best complete
-// answer with its rationale + assumptions. It is app-owned (never collator-authored);
-// it is NOT the Map minimum schema — a formulation-free mode's explorer schema is its own contract and
-// is not held to the minimum-schema guard (that guard governs a collator-EXPANDED Map schema).
+// synthesizeExplorerFields is the synthesize explorer schema: one complete answer with its rationale and
+// assumptions. It is not subject to the minimum-schema guard.
 var synthesizeExplorerFields = []Field{
 	{Name: "answer", Type: TypeString, Required: true, Repeated: false},
 	{Name: "rationale", Type: TypeString, Required: true, Repeated: false},
@@ -74,19 +62,15 @@ var synthesizeExplorerFields = []Field{
 	{Name: "confidence", Type: TypeNumber, Required: false, Repeated: false},
 }
 
-// SynthesizeExplorerSchema returns a fresh copy of the Synthesize explorer schema (mirroring
-// MinimumSchema's copy-per-call contract so a caller can never mutate the shared baseline).
+// SynthesizeExplorerSchema returns a copy of the synthesize explorer schema.
 func SynthesizeExplorerSchema() Schema {
 	fields := make([]Field, len(synthesizeExplorerFields))
 	copy(fields, synthesizeExplorerFields)
 	return Schema{Fields: fields}
 }
 
-// SynthesizeExplorerPrompt derives the deterministic, app-owned explorer prompt for the Synthesize mode
-// from raw_task, preserving every purpose + criterion verbatim (add nothing, drop nothing). It asks for
-// the explorer's SINGLE best COMPLETE answer + rationale + assumptions and renders the exact fixed
-// schema field names into the prompt (RenderSchema) — the hard-won Map lesson: a prompt that merely
-// says "match the schema" gives the model nothing to match, so it improvises names and fails validation.
+// SynthesizeExplorerPrompt builds the synthesize explorer prompt from raw, quoting the purpose and
+// criteria verbatim, asking for one complete answer, and rendering the schema's field names.
 func SynthesizeExplorerPrompt(raw RawTask) string {
 	var b strings.Builder
 	b.WriteString("Give your SINGLE best COMPLETE answer to the following task, with your rationale and assumptions. ")

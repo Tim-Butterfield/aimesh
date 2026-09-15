@@ -1,12 +1,8 @@
 package cli
 
-// `aimesh review setup --acp`: the CLI half of the user-defined ACP adapter flow. The
-// detect/save/remove seams shipped with no CLI caller at all, so a headless install could not configure
-// an ACP adapter; these tests pin the surface that fixes it.
-//
-// HERMETIC: `--acp detect` and `--acp add` LAUNCH the candidate CLI (the only way to confirm it speaks
-// ACP), so they are covered by their usage guards only — no test here starts a process. `--acp remove`
-// touches config without launching anything, so it is exercised for real.
+// These tests cover `aimesh review setup --acp`, which configures user-defined ACP adapters. detect
+// and add launch the candidate CLI, so only their usage guards are tested; remove touches config
+// without launching anything and is exercised fully.
 
 import (
 	"path/filepath"
@@ -16,8 +12,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// TestSetupACP_ShapeGuards pins the guards that fire BEFORE any config is read and, critically, before
-// anything could be launched: an unknown action, a probe with no binary, and a remove with no key.
+// Guards that fire before config is read or anything is launched: an unknown action, a probe with no
+// binary, and a remove with no name.
 func TestSetupACP_ShapeGuards(t *testing.T) {
 	cases := []struct {
 		name string
@@ -45,14 +41,14 @@ func TestSetupACP_ShapeGuards(t *testing.T) {
 	}
 }
 
-// TestSetupACP_PathNoLongerRequiresAdapter: --path is shared with the adapter-capture surface, so the
-// "--path requires --adapter" guard has to stand down for the ACP probes. It must still fire otherwise.
+// --path is shared with adapter capture, so "--path requires --adapter" must not fire for the ACP
+// actions, but must still fire otherwise.
 func TestSetupACP_PathNoLongerRequiresAdapter(t *testing.T) {
 	code, _, errs := run(t, "setup", "--path", "/bin/true")
 	if code != int(fault.Usage) || !strings.Contains(errs, "--path requires --adapter") {
 		t.Fatalf("a bare --path must still be a usage error, got %d: %s", code, errs)
 	}
-	// With --acp remove the guard must not fire — the error must come from the ACP surface instead.
+	// With --acp remove the guard must not fire; the error comes from the ACP surface.
 	code, _, errs = run(t, "setup", "--acp", "remove", "--name", "acp-nope")
 	if strings.Contains(errs, "--path requires --adapter") {
 		t.Errorf("the adapter-path guard must not apply to --acp:\n%s", errs)
@@ -62,8 +58,8 @@ func TestSetupACP_PathNoLongerRequiresAdapter(t *testing.T) {
 	}
 }
 
-// TestSetupACP_RemoveUnknown: removing a name that is not a saved ACP instance is reported as a refusal
-// naming the scope, with a non-zero exit — and it launches nothing.
+// Removing a name that is not a saved ACP instance is a refusal naming the scope, with a non-zero
+// exit.
 func TestSetupACP_RemoveUnknown(t *testing.T) {
 	t.Setenv("AIMESH_HOME", t.TempDir())
 
@@ -76,9 +72,8 @@ func TestSetupACP_RemoveUnknown(t *testing.T) {
 	}
 }
 
-// TestSetupACP_DetectValidatesThePathFirst: the binary path is checked (exists / not a directory / on
-// POSIX executable) BEFORE the probe, so a typo'd path fails instantly instead of after a 90s launch
-// attempt. It is also what makes `detect` safe to cover here — nothing is ever started.
+// The binary path is validated before the probe, so a mistyped path fails immediately and nothing
+// is started.
 func TestSetupACP_DetectValidatesThePathFirst(t *testing.T) {
 	t.Setenv("AIMESH_HOME", t.TempDir())
 
@@ -100,7 +95,7 @@ func TestSetupACP_DetectValidatesThePathFirst(t *testing.T) {
 	}
 }
 
-// TestHelp_DocumentsACPSetup: a config surface nobody can discover is not a config surface.
+// The help text documents --acp.
 func TestHelp_DocumentsACPSetup(t *testing.T) {
 	_, out, _ := run(t, "--help")
 	for _, want := range []string{"setup --acp detect", "setup --acp add", "setup --acp remove", "--acp-arg"} {

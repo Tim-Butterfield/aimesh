@@ -5,13 +5,10 @@ import (
 	"testing"
 )
 
-// The registry's reservation is the ONE place "never apply the same accepted set twice" is decided.
-// A transport-level race depends on goroutine scheduling to reach the window; this test hits the
-// primitive directly, which is where the guarantee either exists or does not.
+// The registry's reservation is where applying an accepted set at most once is decided; these tests
+// exercise it directly rather than through goroutine scheduling at the transport.
 
-// TestRegistry_ReserveIsAtomicPerSourceRun hammers one source run from many goroutines. Exactly one
-// may be admitted; every other caller must be handed the winner. A check-then-act guard
-// (existingForSource, then admit) cannot promise this — between the two, every caller sees nothing.
+// Many goroutines reserve one source run; exactly one is admitted and the rest receive the winner.
 func TestRegistry_ReserveIsAtomicPerSourceRun(t *testing.T) {
 	const callers = 64
 	rg := newRegistry()
@@ -21,7 +18,7 @@ func TestRegistry_ReserveIsAtomicPerSourceRun(t *testing.T) {
 	var mu sync.Mutex
 	var winners, attached int
 	var winnerID string
-	for i := 0; i < callers; i++ {
+	for i := range callers {
 		done.Add(1)
 		go func(i int) {
 			defer done.Done()
@@ -57,8 +54,7 @@ func TestRegistry_ReserveIsAtomicPerSourceRun(t *testing.T) {
 	}
 }
 
-// TestRegistry_ReserveIsAtomicPerKey is the same property for the idempotency key, which covers the
-// retry that names no source run (the full-cycle form).
+// The same property for the idempotency key.
 func TestRegistry_ReserveIsAtomicPerKey(t *testing.T) {
 	const callers = 32
 	rg := newRegistry()
@@ -67,7 +63,7 @@ func TestRegistry_ReserveIsAtomicPerKey(t *testing.T) {
 	start.Add(1)
 	var mu sync.Mutex
 	winners := 0
-	for i := 0; i < callers; i++ {
+	for i := range callers {
 		done.Add(1)
 		go func(i int) {
 			defer done.Done()

@@ -1,11 +1,7 @@
 package mode
 
-// This file holds the ONE decoder for a canonicalizer's proposed partition, shared by every canonicalizing
-// mode. Each mode writes its own canonicalizer PROMPT (clustering candidate options and clustering findings
-// are genuinely different judgments and are instructed differently), but they all ask for the same JSON
-// shape — so they decode it in one place. A per-mode copy of this decoder would be a place for the
-// surjectivity contract to drift: `memberIndices` is what the host's gate is checked over, and exactly one
-// function should be responsible for getting it out of the model's bytes.
+// This file holds the decoder for a canonicalizer's proposed partition, shared by every canonicalizing mode.
+// Keeping one decoder means memberIndices, which the surjectivity check runs over, is extracted in one place.
 
 import (
 	"crypto/sha256"
@@ -16,7 +12,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// clusterProposalWire is the canonicalizer's raw output shape (memberIndices → canon.ProposedCluster.Members).
+// clusterProposalWire is the JSON shape a canonicalizer returns.
 type clusterProposalWire struct {
 	Clusters []struct {
 		CanonicalID   string `json:"canonicalId"`
@@ -27,10 +23,8 @@ type clusterProposalWire struct {
 	CoverageNotes      string   `json:"coverageNotes"`
 }
 
-// parseClusterProposal decodes a canonicalizer's raw output into a canon.Proposal, stamping the deciding call
-// ref + the SEPARATELY-verified canonicalizer identity onto it so every ledger row is attributable. It does
-// NOT enforce surjectivity — that GATE is canon's host-checked invariant over the parsed proposal, a single
-// authority no mode can weaken by parsing leniently.
+// parseClusterProposal decodes a canonicalizer's output into a canon.Proposal attributed to decidedByCall and
+// identity. Surjectivity is checked by package canon, not here.
 func parseClusterProposal(raw []byte, decidedByCall string, identity schema.ExplorerIdentity) (canon.Proposal, error) {
 	obj, _, xerr := schema.ExtractJSONObject(raw)
 	if xerr != nil {
@@ -57,8 +51,7 @@ func parseClusterProposal(raw []byte, decidedByCall string, identity schema.Expl
 	}, nil
 }
 
-// sha256Hex is the hex SHA-256 of b — used to digest a supplied artifact so a result can be tied to the exact
-// bytes it was produced against without copying them into the machine surface.
+// sha256Hex returns the hex-encoded SHA-256 of b.
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

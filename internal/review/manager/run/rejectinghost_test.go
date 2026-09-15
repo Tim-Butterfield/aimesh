@@ -1,9 +1,7 @@
 package run
 
-// A REVIEWER THAT FINDS SOMETHING AND A HOST THAT REJECTS IT.
-//
-// The shared fixture for any test needing a run that ends in a settled `reported_invalid` disposition
-// rather than an applied one — today the composition and grounding tests.
+// This file provides a reviewer that finds something and a host that rejects it: a run ending in a
+// settled `reported_invalid` disposition, used by the composition and grounding tests.
 
 import (
 	"context"
@@ -15,9 +13,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// rejectingHostFake REJECTS every finding, in the natural adjudication AND in the dismissal-
-// verification pass — so the rejection STANDS and the run ends with a settled `reported_invalid`
-// disposition rather than one that a later pass reopens.
+// rejectingHostFake rejects every finding in the natural adjudication and in the dismissal-verification
+// pass, so the rejection stands and the run ends with a settled `reported_invalid` disposition.
 type rejectingHostFake struct{}
 
 func (rejectingHostFake) Name() string              { return "rej-host" }

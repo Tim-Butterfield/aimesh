@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// The exit-code table is a PUBLIC CLI contract (documented in the app READMEs + docs/architecture.md):
-// scripts and CI gates branch on these numbers, so a silent renumbering would break callers with no
-// compile error anywhere. These tests pin the numbers and the CodeOf mapping rules.
+// The exit-code table is a public CLI contract (docs/architecture.md): scripts branch on these numbers,
+// and a renumbering would break them with no compile error. These tests pin the numbers and CodeOf.
 
 func TestCode_PublicExitCodeTable(t *testing.T) {
 	for _, c := range []struct {

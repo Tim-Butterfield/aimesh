@@ -19,13 +19,13 @@ const (
 	ScopeUser    ConfigScope = "user"
 )
 
-// SetupRequest is a setup-wizard invocation (CUC-3). Scope optional ("" = ask).
+// SetupRequest is a setup-wizard invocation. An empty Scope means ask.
 type SetupRequest struct {
 	Roles []Role
 	Scope ConfigScope
 }
 
-// RepairRequest is a repair-wizard invocation (doctor --fix). Scope optional ("" = ask).
+// RepairRequest is a repair-wizard invocation (doctor --fix). An empty Scope means ask.
 type RepairRequest struct {
 	Issues []DoctorIssue
 	Scope  ConfigScope
@@ -58,7 +58,7 @@ type AdapterStatus struct {
 	AuthOK  bool
 }
 
-// LaneSuggestion / LaneChoice are a (role, adapter, model, thinking) tuple.
+// LaneSuggestion is a suggested (role, adapter, model, thinking level) assignment.
 type LaneSuggestion struct {
 	Role          Role
 	Adapter       string
@@ -82,7 +82,7 @@ type PathCheck struct {
 	Reason string
 }
 
-// DoctorIssue is one problem found by doctor (carries the halt class).
+// DoctorIssue is one problem doctor found, with its halt class.
 type DoctorIssue struct {
 	Role    Role
 	Adapter string
@@ -90,7 +90,7 @@ type DoctorIssue struct {
 	Detail  string
 }
 
-// RepairAction is a template fix the wizard offers (the patch is built later via PatchFor).
+// RepairAction is a fix the wizard offers; its patch is built by PatchFor.
 type RepairAction struct {
 	Kind        string // reauthenticate | set_binary_path | choose_model | swap_or_reprobe | edit_config
 	Target      string // the adapter (or other target) the action applies to
@@ -148,7 +148,7 @@ type WorkspaceHandle struct {
 	IsLive bool
 }
 
-// FindingsView and Event are Reporter payloads.
+// FindingsView is the Reporter payload for emitted findings.
 type FindingsView struct {
 	Plan     RunPlan
 	Findings []Finding
@@ -159,7 +159,7 @@ type Event struct {
 	Message string
 }
 
-// PerCallRecord, RunSummary, Filter are audit payloads.
+// PerCallRecord is the audit record for one call.
 type PerCallRecord struct {
 	Status    CallStatus
 	Decisions []Decision
@@ -194,12 +194,7 @@ type CatalogEntry struct {
 	Adapters       map[string]ModelArg // per-adapter modelArg
 }
 
-// Config is the merged configuration view.
+// Config is the merged configuration view the setup contracts use.
 type Config struct {
 	Catalog ModelCatalog
-	// further config sections (profiles, adapters, defaults, surfaces, policy,
-	// review, validation, containment) are added during implementation.
 }
-
-// ModelCatalogView returns the catalog from a Config (helper for the wizard).
-func (c Config) ModelCatalogView() ModelCatalog { return c.Catalog }

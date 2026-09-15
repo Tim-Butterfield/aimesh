@@ -1,13 +1,10 @@
 package cli
 
-// Ad-hoc BLIND REVIEWER PANEL composition on the CLI: `--reviewer adapter=…,model=…[,effort=…]`,
-// repeatable, order-preserving. It is the CLI half of the surface-parity obligation that a panel
-// be composable from every surface (ACP `_meta.reviewmesh.panel`, MCP `panel` later) with
-// identical fail-closed semantics.
+// This file parses ad-hoc reviewer panels on the CLI: `--reviewer adapter=…,model=…[,effort=…]`,
+// repeatable and order-preserving, with the same fail-closed rules as panels on ACP and MCP.
 //
-// The grammar is deliberately the same key=value shape exploremesh's `--explorer` uses, and for
-// the same reason: the `adapter:model` colon shorthand is UNSAFE because model tags contain
-// colons (`llama3:8b`), so a value is taken verbatim after the FIRST `=` only.
+// The grammar matches exploremesh's --explorer. An `adapter:model` shorthand would be ambiguous
+// because model tags contain colons (llama3:8b), so each value is taken verbatim after the first `=`.
 
 import (
 	"fmt"
@@ -17,13 +14,11 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// parseSeatSpec parses one `--reviewer` value into a seat. Every failure is a malformed FLAG, so
-// each carries fault.Usage and the exit code follows from the error itself rather than from a
-// literal the caller has to remember.
+// parseSeatSpec parses one --reviewer value into a seat. Every error carries fault.Usage.
 func parseSeatSpec(spec string) (review.SeatSpec, error) {
 	var seat review.SeatSpec
 	seen := map[string]bool{}
-	for _, field := range strings.Split(spec, ",") {
+	for field := range strings.SplitSeq(spec, ",") {
 		field = strings.TrimSpace(field)
 		if field == "" {
 			continue // tolerate a trailing/doubled comma
@@ -55,10 +50,9 @@ func parseSeatSpec(spec string) (review.SeatSpec, error) {
 	return seat, nil
 }
 
-// parseReviewerPanel turns the repeatable `--reviewer` values into an ordered panel. It enforces
-// the panel CEILING here so an oversized panel is refused at the flag boundary with the flag's
-// own vocabulary; the resolver enforces the same bound again (and the identity-uniqueness and
-// resolvability rules) for every surface, so nothing depends on this check having run.
+// parseReviewerPanel turns the repeated --reviewer values into an ordered panel and refuses an
+// oversized panel at the flag boundary. The resolver enforces the same bound, plus uniqueness and
+// resolvability, for every surface.
 func parseReviewerPanel(specs []string) ([]review.SeatSpec, error) {
 	if len(specs) == 0 {
 		return nil, nil

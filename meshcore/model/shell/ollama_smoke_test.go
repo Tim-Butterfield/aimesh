@@ -11,15 +11,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// TestOllama_RealSmoke is a real, local-only Ollama invocation (no cloud, no
-// tokens). It skips unless both `ollama` is on PATH and REVIEWMESH_OLLAMA_MODEL
-// names an installed tag, e.g.:
+// TestOllama_RealSmoke runs a real local Ollama invocation. It skips unless `ollama` is on PATH and
+// REVIEWMESH_OLLAMA_MODEL names an installed tag, for example:
 //
-//	REVIEWMESH_OLLAMA_MODEL=qwen2.5-coder:14b go test ./internal/access/model/shell -run Ollama -v
+//	REVIEWMESH_OLLAMA_MODEL=qwen2.5-coder:14b go test ./model/shell -run Ollama -v
 //
-// The argv shape (`run <model> <prompt>`) was verified locally in Batch 4; Ollama
-// exposes no model-identity envelope, so the self-report tag (the invocation tag)
-// is the honest identity signal — confirmed here.
+// Ollama has no model-identity envelope, so the invocation tag is the identity signal.
 func TestOllama_RealSmoke(t *testing.T) {
 	tag := os.Getenv("REVIEWMESH_OLLAMA_MODEL")
 	if tag == "" {

@@ -17,13 +17,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/verify"
 )
 
-// TestCodex_BannerIsNotIdentityEvidence pins the ECHO finding. Codex prints a startup banner carrying
-// `model: <slug>`, and this recipe once parsed it as cli_status evidence. Measured against the real CLI,
-// that slug is the argument WE passed: invoking codex with a model that cannot exist prints
-// `model: totally-not-a-real-model-9x` verbatim before the API rejects it. A channel that can only ever
-// agree with the request proves nothing, so the recipe declares EvidenceNone and parses nothing.
-//
-// The fake below reproduces the measured behavior: the banner echoes the requested slug regardless.
+// TestCodex_BannerIsNotIdentityEvidence pins that the codex banner's `model:` line, which echoes the
+// requested argument even for a nonexistent model, is not treated as identity evidence. The fake binary
+// reproduces that echo.
 func TestCodex_BannerIsNotIdentityEvidence(t *testing.T) {
 	rec := codexRecipe()
 	if rec.Evidence != core.EvidenceNone {
@@ -42,26 +38,25 @@ func TestCodex_BannerIsNotIdentityEvidence(t *testing.T) {
 	if res.ActualModel != "" {
 		t.Errorf("captured identity = %q, want empty — the echoed banner must not be read as evidence", res.ActualModel)
 	}
-	// Had the banner been trusted, this would have classified as VERIFIED for a model that cannot exist.
+	// Trusting the banner would classify a nonexistent model as verified.
 	if st, ok := verify.ClassifyIdentity(res.Evidence, "totally-not-a-real-model-9x", res.ActualModel, "codex-cli"); ok || st != core.VerifUnknown {
 		t.Errorf("ClassifyIdentity = %q,%v; want unknown,false", st, ok)
 	}
-	// The lane still RUNS and returns its output: an unknown identity is never a reason to discard it.
+	// The call still returns its output: an unknown identity never discards it.
 	if len(res.Stdout) == 0 {
 		t.Error("codex lane produced no output; an unknown identity must not suppress the response")
 	}
 }
 
-// TestDevin_SelfReportNormalization drives the devin recipe against a fake binary emitting the
-// identity-probe JSON, proving the display-name + effort self-report normalizes to the requested slug
-// and classifies as self_reported (WEAK, never verified). An ordinary review output (no self-report
-// JSON) yields no identity → unknown, so ordinary review costs no extra spend.
+// TestDevin_SelfReportNormalization pins that a display-name and effort self-report normalizes to the
+// requested slug and classifies as self_reported, and that output without a self-report yields no
+// identity.
 func TestDevin_SelfReportNormalization(t *testing.T) {
 	rec := devinRecipe()
 	if rec.Evidence != core.EvidenceSelfReport {
 		t.Fatalf("devin Evidence ceiling = %q, want self_report (weak, never verified)", rec.Evidence)
 	}
-	// A probe-style response: model is a Devin DISPLAY name with a SEPARATE effort (Tim's real shape).
+	// A probe-style response: a Devin display name with a separate effort.
 	bin := fakeBin(t, `echo '{"result":"hello (source: system prompt)","model":"Claude Opus 4.8","effort":"Medium"}'`)
 	a := New(rec, bin, time.Minute)
 	res, err := a.Invoke(context.Background(), model.Call{Role: "reviewer", Phase: "semantic_iterate", ModelArg: "claude-opus-4-8-medium", CopyRoot: t.TempDir(), Prompt: "p"})
@@ -74,7 +69,7 @@ func TestDevin_SelfReportNormalization(t *testing.T) {
 	if st, ok := verify.ClassifyIdentity(res.Evidence, "claude-opus-4-8-medium", res.ActualModel, "devin-cli"); !ok || st != core.VerifSelfReported {
 		t.Errorf("ClassifyIdentity = %q,%v; want self_reported,true (weak match, not verified)", st, ok)
 	}
-	// Ordinary review output (a ReviewerResult, no self-report) → no identity captured → unknown.
+	// Output without a self-report captures no identity.
 	bin2 := fakeBin(t, `echo '{"schemaVersion":1,"role":"reviewer","verdict":"approve","findings":[]}'`)
 	res2, err := New(rec, bin2, time.Minute).Invoke(context.Background(), model.Call{Role: "reviewer", Phase: "semantic_iterate", ModelArg: "claude-opus-4-8-medium", CopyRoot: t.TempDir(), Prompt: "p"})
 	if err != nil {
@@ -88,10 +83,8 @@ func TestDevin_SelfReportNormalization(t *testing.T) {
 	}
 }
 
-// TestDevin_SelfReportWrapper drives the devin recipe against a fake binary emitting the review-path
-// WRAPPER {reviewmeshIdentity, result}: ParsePayload must strip it to the inner ReviewerResult (so the
-// strict schema parser never sees reviewmeshIdentity) and ParseIdentity must normalize the reported
-// display name+effort to the requested slug → self_reported.
+// TestDevin_SelfReportWrapper pins that ParsePayload strips the identity wrapper to the inner result and
+// ParseIdentity normalizes the reported display name and effort to the requested slug.
 func TestDevin_SelfReportWrapper(t *testing.T) {
 	rec := devinRecipe()
 	inner := `{"schemaVersion":1,"role":"reviewer","phase":"semantic_iterate","summary":"s","verdict":"approve","findings":[]}`
@@ -111,9 +104,9 @@ func TestDevin_SelfReportWrapper(t *testing.T) {
 	}
 }
 
-// TestAgy_SelfReportWrapper drives the agy recipe against a fake binary emitting the WRAPPER with the
-// captured agy shape (model "Gemini 3.1 Pro" + effort "High" for requested "Gemini 3.1 Pro (High)").
-// The inner result is unwrapped; the identity matches on canonical form → self_reported (never verified).
+// TestAgy_SelfReportWrapper pins agy's wrapper handling: model "Gemini 3.1 Pro" with effort "High"
+// matches the requested "Gemini 3.1 Pro (High)" on canonical form as self_reported, and the inner result
+// is unwrapped.
 func TestAgy_SelfReportWrapper(t *testing.T) {
 	rec := agyRecipe()
 	if rec.Evidence != core.EvidenceSelfReport {
@@ -131,7 +124,7 @@ func TestAgy_SelfReportWrapper(t *testing.T) {
 	if st, ok := verify.ClassifyIdentity(res.Evidence, "Gemini 3.1 Pro (High)", res.ActualModel, "agy-cli"); !ok || st != core.VerifSelfReported {
 		t.Errorf("ClassifyIdentity(agy, actual=%q) = %q,%v; want self_reported,true", res.ActualModel, st, ok)
 	}
-	// Ordinary review output (a bare ReviewerResult, no wrapper) → no identity → unknown, no extra spend.
+	// A bare result without a wrapper captures no identity and no payload.
 	bin2 := fakeBin(t, `echo '{"schemaVersion":1,"role":"verifier","phase":"semantic_verify","verdict":"approve","findings":[]}'`)
 	res2, _ := New(rec, bin2, time.Minute).Invoke(context.Background(), model.Call{Role: "verifier", Phase: "semantic_verify", ModelArg: "Gemini 3.1 Pro (High)", CopyRoot: t.TempDir(), Prompt: "p"})
 	if res2.ActualModel != "" || res2.Evidence != core.EvidenceNone || res2.Payload != nil {
@@ -153,16 +146,13 @@ func readArgv(t *testing.T, path string) []string {
 	return parts
 }
 
-// recipeExpect declares, per real adapter recipe, the argv flags that must be present
-// and whether the model argument is passed via argv. (claude-code now pins the model with
-// `--model <modelArg>` when one is configured.)
+// recipeExpect declares, per recipe, the argv flags that must be present and whether the model argument
+// is passed in argv.
 var recipeExpect = map[string]struct {
 	flags      []string
 	modelInArg bool
-	// onStdin: this recipe delivers the prompt on STANDARD INPUT rather than in argv, because
-	// argv is bounded by the OS and a workspace-sized prompt does not fit (see
-	// Recipe.PromptOnStdin). Where it is set, the prompt must be absent from argv — a recipe that
-	// sent it both ways would double the prompt.
+	// onStdin: the recipe delivers the prompt on standard input (see Recipe.PromptOnStdin), so the
+	// prompt must be absent from argv.
 	onStdin bool
 }{
 	"ollama":      {flags: []string{"run"}, modelInArg: true},
@@ -170,22 +160,14 @@ var recipeExpect = map[string]struct {
 	"claude-code": {flags: []string{"-p", "--permission-mode", "plan", "--disallowedTools", "--output-format", "json", "--model"}, modelInArg: true, onStdin: true},
 	"devin-cli":   {flags: []string{"--model", "-p"}, modelInArg: true},
 	"agy-cli":     {flags: []string{"--model", "-p"}, modelInArg: true},
-	// No `-p` for gemini: the prompt IS the piped stdin. Its own help documents `-p` as
-	// "appended to input on stdin (if any)", and a piped prompt with no `-p` was measured
-	// answering non-interactively (2026-08-12).
+	// No `-p` for gemini: the piped stdin is the prompt.
 	"gemini-cli": {flags: []string{"--model", "--approval-mode", "plan"}, modelInArg: true, onStdin: true},
 	"cursor-cli": {flags: []string{"--print", "--mode", "plan", "--trust", "--output-format", "json", "--model"}, modelInArg: true},
 }
 
-// TestShellAdapterMatrix_FakeBinary drives every real shell-adapter recipe against a
-// fake binary in every model-call role/phase: it proves command construction (binary +
-// flags + model arg + prompt delivery), stdout/stderr/exit capture, and per-recipe
-// identity extraction — with NO real CLI, network, auth, or token spend.
-//
-// NOTE: the current recipes' BuildArgs are role-invariant (they ignore Role/Phase), so
-// iterating the roles here is call-plumbing smoke coverage — it proves the same shell
-// invocation path accepts each role's Call/prompt, not role-specific argv selection
-// (role-specific read-only/write flags are future).
+// TestShellAdapterMatrix_FakeBinary drives every shell recipe against a fake binary in each role and
+// phase, checking argv construction, prompt delivery, output capture and identity extraction without a
+// real CLI. BuildArgs ignores Role and Phase, so iterating them covers call plumbing only.
 func TestShellAdapterMatrix_FakeBinary(t *testing.T) {
 	roles := []struct {
 		role  string
@@ -229,11 +211,11 @@ func TestShellAdapterMatrix_FakeBinary(t *testing.T) {
 				if !strings.Contains(string(res.Stderr), "diagnostic line") {
 					t.Errorf("stderr not captured: %q", res.Stderr)
 				}
-				argv := readArgv(t, argvOut) // proves the FAKE binary ran (not a real CLI)
+				argv := readArgv(t, argvOut) // proves the fake binary ran
 				if exp.modelInArg && !slices.Contains(argv, "model-XYZ") {
 					t.Errorf("%s: model arg not passed in argv: %v", name, argv)
 				}
-				// PROMPT DELIVERY, one way or the other and never both.
+				// The prompt is delivered one way, never both.
 				if exp.onStdin {
 					b, rerr := os.ReadFile(stdinOut)
 					if rerr != nil {
@@ -267,9 +249,8 @@ func TestShellAdapterMatrix_FakeBinary(t *testing.T) {
 	}
 }
 
-// TestShell_IdentityExtraction proves the adapter plumbs Recipe.ParseIdentity into
-// Result.ActualModel for BOTH the verified case (binary reports the requested model)
-// and the mismatch case (reports a different model → drives the Manager's Class E).
+// TestShell_EffortArg pins that codex-cli passes a separable effort only when set, and that name-bound or
+// unsupported recipes never add a separate effort flag.
 func TestShell_EffortArg(t *testing.T) {
 	argvOut := filepath.Join(t.TempDir(), "argv")
 	t.Setenv("REVIEWMESH_FAKE_ARGV", argvOut)
@@ -285,7 +266,7 @@ func TestShell_EffortArg(t *testing.T) {
 		t.Errorf("codex effort not passed: %v", argv)
 	}
 
-	// codex-cli: effort UNSET → no effort arg (backward-compatible)
+	// codex-cli: effort unset → no effort arg
 	if _, err := New(recipes["codex-cli"], bin, time.Minute).Invoke(context.Background(), model.Call{ModelArg: "gpt-5.5", Prompt: "P"}); err != nil {
 		t.Fatal(err)
 	}
@@ -343,9 +324,8 @@ func TestClaude_ModelArgFlag(t *testing.T) {
 }
 
 func TestClaude_RealReviewEnvelope_PrimaryModelAndUnwrap(t *testing.T) {
-	// sanitized REAL review smoke: modelUsage lists a tiny haiku helper + the primary
-	// opus-4-8 that answered. parseClaudeEnvelope must pick the primary (max output tokens);
-	// parseClaudePayload must unwrap the reviewer JSON from `result`.
+	// A sanitized real envelope: modelUsage lists a small haiku helper and the opus-4-8 model that
+	// answered. parseClaudeEnvelope picks the answering model; parseClaudePayload unwraps `result`.
 	dir := filepath.Join("..", "..", "..", "testdata", "adapters", "claude", "real-review-envelope-haiku-opus")
 	stdout, err := os.ReadFile(filepath.Join(dir, "stdout.txt"))
 	if err != nil {
@@ -360,20 +340,16 @@ func TestClaude_RealReviewEnvelope_PrimaryModelAndUnwrap(t *testing.T) {
 	}
 }
 
-// TestClaude_ShortResponse_RequestedModelBeatsAuxiliary guards against a FALSE identity mismatch.
-// Claude Code runs a small auxiliary haiku model for internal bookkeeping and reports it in modelUsage
-// beside the answering model. On a SHORT response the auxiliary can produce MORE output tokens than the
-// real answer — measured against Claude Code 2.1.219, a one-word reply to `--model opus` reported haiku
-// at 12 output tokens vs claude-opus-5 at 4. A most-output-tokens rule then names haiku, the verifier
-// sees a different family than requested with STRONG (envelope) evidence, and halts a legitimate run as
-// a Class E mismatch. reviewmesh's synthetic adjudication readiness probe is exactly that case.
+// TestClaude_ShortResponse_RequestedModelBeatsAuxiliary guards against a false identity mismatch: on a
+// short response, the auxiliary haiku model Claude Code reports in modelUsage can produce more output
+// tokens than the requested model.
 func TestClaude_ShortResponse_RequestedModelBeatsAuxiliary(t *testing.T) {
-	// Real observed shape: the auxiliary model out-tokens the requested one.
+	// An observed shape: the auxiliary model out-tokens the requested one.
 	stdout := []byte(`{"is_error":false,"modelUsage":{` +
 		`"claude-haiku-4-5-20251001":{"outputTokens":12},` +
 		`"claude-opus-5":{"outputTokens":4}}}`)
 
-	// Requested by ALIAS — must resolve to the requested model, not the chattier auxiliary.
+	// Requested by alias: resolves to the requested model, not the auxiliary.
 	if got := parseClaudeEnvelope(stdout, nil, model.Call{ModelArg: "opus"}); got != "claude-opus-5" {
 		t.Errorf("identity for --model opus = %q, want claude-opus-5 (the auxiliary haiku must not win)", got)
 	}
@@ -387,9 +363,8 @@ func TestClaude_ShortResponse_RequestedModelBeatsAuxiliary(t *testing.T) {
 	}
 }
 
-// TestClaude_RequestedModelAbsent_ReportsSubstitute proves that preference does NOT weaken the
-// no-silent-fallback invariant: when the requested model never ran, the parser reports what DID run so
-// the verifier can classify a mismatch and halt. It must never echo the requested model back.
+// TestClaude_RequestedModelAbsent_ReportsSubstitute pins that when the requested model never ran, the
+// parser reports the model that did, so the verifier sees the mismatch; it never echoes the request.
 func TestClaude_RequestedModelAbsent_ReportsSubstitute(t *testing.T) {
 	stdout := []byte(`{"is_error":false,"modelUsage":{` +
 		`"claude-haiku-4-5-20251001":{"outputTokens":12},` +
@@ -400,7 +375,7 @@ func TestClaude_RequestedModelAbsent_ReportsSubstitute(t *testing.T) {
 		t.Errorf("identity = %q, want claude-sonnet-5 — a substituted model must be reported, not hidden", got)
 	}
 
-	// Present but produced NOTHING is not evidence that it answered → still report the substitute.
+	// Present with no output is not evidence that it answered, so the substitute is still reported.
 	zero := []byte(`{"is_error":false,"modelUsage":{` +
 		`"claude-opus-5":{"outputTokens":0},` +
 		`"claude-sonnet-5":{"outputTokens":400}}}`)
@@ -412,13 +387,13 @@ func TestClaude_RequestedModelAbsent_ReportsSubstitute(t *testing.T) {
 
 func TestClaude_PayloadUnwrap(t *testing.T) {
 	reviewerJSON := `{"schemaVersion":1,"role":"reviewer","phase":"semantic_iterate","verdict":"approve","findings":[]}`
-	// claude envelope: result is the model's text (the reviewer JSON); modelUsage present
+	// claude envelope: result is the model's text; modelUsage present
 	envelope := `{"type":"result","result":` + jsonQuote(reviewerJSON) + `,"modelUsage":{"claude-opus-4-8[1m]":{"inputTokens":1}}}`
 	got := parseClaudePayload([]byte(envelope), nil, model.Call{})
 	if string(got) != reviewerJSON {
 		t.Errorf("unwrapped payload = %q, want %q", got, reviewerJSON)
 	}
-	// non-envelope (fake) output → nil (Manager falls back to stdout)
+	// non-envelope output → nil (the caller falls back to stdout)
 	if parseClaudePayload([]byte(reviewerJSON), nil, model.Call{}) != nil {
 		t.Error("plain reviewer JSON must not be treated as an envelope")
 	}
@@ -451,8 +426,7 @@ func TestShell_IdentityExtraction(t *testing.T) {
 	if res.ActualModel != "model-XYZ" {
 		t.Errorf("verified identity = %q, want model-XYZ", res.ActualModel)
 	}
-	// mismatch: binary reports a different model (the Manager would halt Class E ONLY under STRONG
-	// evidence; a weak self-report non-match is recorded `unknown`, a pass-with-caveat, not Class E)
+	// mismatch: the binary reports a different model
 	bin2 := fakeBin(t, `echo "model=some-other-model"`)
 	res2, _ := New(rec, bin2, time.Minute).Invoke(context.Background(), model.Call{ModelArg: "model-XYZ", Prompt: "p"})
 	if res2.ActualModel != "some-other-model" {

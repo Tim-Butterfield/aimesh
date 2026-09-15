@@ -10,15 +10,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/launchflags"
 )
 
-// This file resolves WHICH explorers a call runs. Every refusal here happens BEFORE any spend.
-//
-// Every call composes its own panel from the adapters this server was launched with (`--adapter`). A call
-// can never introduce an adapter, a binary path or a launch argument. That is enforced here rather than
-// left to the JSON Schema, because a schema is advisory to a client.
-//
-// Failures here are JSON-RPC protocol errors (-32602), not `isError` results: nothing has been spent and
-// no run exists. Every message names the field and the accepted values, so the corrected call is
-// derivable rather than guessable.
+// This file resolves which explorers a call runs, before any model call. Each call composes its panel from
+// the adapters named at launch and cannot add an adapter, binary path or launch argument; this is checked
+// here because clients may ignore the JSON Schema. Failures are JSON-RPC invalid-params errors, since no
+// run exists yet, and each message names the field and the accepted values.
 
 const panelExample = `{"panel": {"explorers": [{"adapter": "<adapter>", "model": "<model>"}, {"adapter": "<adapter>", "model": "<model>"}], "collator": {"adapter": "<adapter>", "model": "<model>"}}}`
 
@@ -59,10 +54,9 @@ func (s *Server) resolvePanel(p *panelArg) (panelPick, error) {
 	return panelPick{source: "adhoc", reqSeats: p.Explorers, reqCollate: p.Collator, plan: plan, selected: n, configured: n}, nil
 }
 
-// resolveCanonicalizers turns the optional `canonicalizers` argument into the two explicit canonicalizer
-// identities. Every seat goes through the SAME launch-set check a panel seat gets, and the
-// 0-or-2 / distinct-identities rule is roster.ValidateCanonicalizers', shared with the CLI and the ACP
-// surface so all three state the rule in the same words.
+// resolveCanonicalizers turns the optional `canonicalizers` argument into explicit canonicalizer
+// identities. Each seat gets the same launch-set check as a panel seat, and roster.ValidateCanonicalizers
+// applies the rule shared with the CLI and ACP.
 func (s *Server) resolveCanonicalizers(specs []slot) ([]roster.Explorer, error) {
 	out := make([]roster.Explorer, 0, len(specs))
 	for i, c := range specs {

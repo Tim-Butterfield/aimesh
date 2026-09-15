@@ -5,27 +5,19 @@ import (
 	"testing"
 )
 
-// The era latch's ATOMICITY, tested where it can actually be raced.
-//
-// This is a deliberately unglamorous test and it is the load-bearing one for the mechanism. On the
-// stdio read loop admission is SERIALIZED — one goroutine reads every frame and classifies it before
-// any handler starts — so the wire-level pipelining tests in era_test.go prove the OUTCOME (exactly
-// one of two cross-era openers wins, on every run) without ever exercising a genuine race. The
-// compare-and-set is what makes that outcome a property of the latch rather than a property of
-// today's dispatcher, and this is where it is put under real concurrency.
-//
-// AGAINST A TREE WITH NO MODERN ERA THIS DOES NOT COMPILE: there is no latch there, because no
-// request could select an era.
+// The era latch's atomicity under real concurrency. The stdio read loop admits frames serially, so the
+// wire-level tests in era_test.go never race the latch; this test does, so exactly one winner is a
+// property of the compare-and-set rather than of the dispatcher.
 
 func TestLatchEra_ExactlyOneWinnerUnderRealConcurrency(t *testing.T) {
-	for run := 0; run < 200; run++ {
+	for run := range 200 {
 		s := &Server{}
 		const n = 8
 		var start sync.WaitGroup
 		var done sync.WaitGroup
 		start.Add(1)
 		results := make([]Era, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			done.Add(1)
 			want := EraModern
 			if i%2 == 0 {

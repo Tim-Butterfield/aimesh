@@ -10,22 +10,12 @@ import (
 	"sync"
 )
 
-// Framer reads and writes raw JSON-RPC message bytes per a wire framing. The
-// message dispatch layer is framing-agnostic — both framings share it.
+// Framer reads and writes raw JSON-RPC message bytes for one wire framing; message dispatch is
+// framing-agnostic.
 //
-// WriteMessage is ATOMIC and safe for concurrent use: a frame is composed from more
-// than one Write on the underlying writer (body + "\n"; header + body), and an
-// underlying writer whose individual Writes are themselves atomic — an os.Pipe, an
-// io.Pipe, a process's stdin — does NOT make that COMPOSITION atomic. Two goroutines
-// writing at once could otherwise emit `{a}{b}\n\n`, which the peer reads as one
-// unparseable line and answers with a parse error, silently losing BOTH messages. The
-// serialization lives here rather than in each caller because it is a property of the
-// framing, not of any one server: every writer in this tree independently reinvented a
-// mutex to compensate for its absence, and the one that did not corrupted its stream.
-//
-// ReadMessage is NOT concurrent-safe and never can be: it owns a buffered reader over a
-// stream, so two concurrent readers would split frames between them. One read loop per
-// Framer.
+// WriteMessage is atomic and safe for concurrent use. A frame takes more than one Write on the
+// underlying writer, so without serialization two goroutines could interleave frames into one
+// unparseable line. ReadMessage is not safe for concurrent use; use one read loop per Framer.
 type Framer interface {
 	ReadMessage() ([]byte, error)
 	WriteMessage([]byte) error
@@ -47,8 +37,7 @@ const (
 	maxHeaderLines = 64
 )
 
-// NewFramer exposes the framing constructor for the ACP test host (and any other
-// in-repo client) so it speaks the exact wire framing the server uses.
+// NewFramer returns a Framer for the named framing over in and out.
 func NewFramer(name string, in io.Reader, out io.Writer) Framer {
 	return newFramer(name, in, out)
 }
@@ -66,7 +55,7 @@ func newFramer(name string, in io.Reader, out io.Writer) Framer {
 type newlineFramer struct {
 	r  *bufio.Reader
 	w  io.Writer
-	wm sync.Mutex // makes the body + "\n" pair ONE frame; see the Framer contract
+	wm sync.Mutex // makes the body + "\n" pair one frame; see the Framer contract
 }
 
 func (f *newlineFramer) ReadMessage() ([]byte, error) {
@@ -105,7 +94,7 @@ func (f *newlineFramer) WriteMessage(b []byte) error {
 type contentLengthFramer struct {
 	r  *bufio.Reader
 	w  io.Writer
-	wm sync.Mutex // makes the header + body pair ONE frame; see the Framer contract
+	wm sync.Mutex // makes the header + body pair one frame; see the Framer contract
 }
 
 // readHeaderLine reads one header line bounded by maxHeaderBytes so a stream that
@@ -142,14 +131,14 @@ func (f *contentLengthFramer) ReadMessage() ([]byte, error) {
 		if trimmed == "" {
 			break // blank line terminates headers
 		}
-		i := strings.IndexByte(trimmed, ':')
-		if i < 0 {
+		before, after, ok := strings.Cut(trimmed, ":")
+		if !ok {
 			return nil, fmt.Errorf("acp: malformed header line %q", trimmed)
 		}
-		if strings.EqualFold(strings.TrimSpace(trimmed[:i]), "Content-Length") {
-			n, perr := strconv.Atoi(strings.TrimSpace(trimmed[i+1:]))
+		if strings.EqualFold(strings.TrimSpace(before), "Content-Length") {
+			n, perr := strconv.Atoi(strings.TrimSpace(after))
 			if perr != nil || n < 0 {
-				return nil, fmt.Errorf("acp: invalid Content-Length %q", trimmed[i+1:])
+				return nil, fmt.Errorf("acp: invalid Content-Length %q", after)
 			}
 			length = n
 		}

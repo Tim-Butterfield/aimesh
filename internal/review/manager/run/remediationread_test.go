@@ -11,14 +11,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// A3 — the remediation read goes through a handle on the COPY ROOT, not through a joined
-// path string.
-//
-// readBounded's bytes become the file content the remediation model is shown and asked to
-// anchor edits into. The old form took `rcopy.Abs(f.File)` and called os.ReadFile on it,
-// which follows whatever that name points at NOW — so an entry swapped for a symlink inside
-// the copy, after the shown-file checks, is read straight out of the copy. That the copy is
-// ours makes the window narrow, not absent.
+// TestReadBounded_RefusesSymlinkInsideTheCopy checks that the remediation read goes through a handle
+// on the copy root rather than a joined path. readBounded's bytes are the file content the remediation
+// model anchors edits into; reading by path would follow an entry swapped for a symlink after the
+// shown-file checks.
 func TestReadBounded_RefusesSymlinkInsideTheCopy(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs developer mode/elevation on Windows")

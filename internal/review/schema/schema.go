@@ -1,14 +1,8 @@
-// Package schema holds the JSON payload envelopes that mirror docs/schema/ and
-// practical (Go-level) validation for them: structural validation (required
-// fields + enum membership) against the typed envelopes, which is what a running
-// binary enforces.
+// Package schema holds the JSON payload envelopes described in docs/schema/ and validates them
+// structurally: required fields and enum membership.
 //
-// Nothing here reads docs/schema/ at runtime, and that is deliberate — the
-// schemas are a reference declaration, not a loaded artifact. What closes the gap
-// is test-time validation: meshcore/jsonschema is a small draft-2020-12
-// validator, and tests use it to hold the config schema and the effective-config
-// schema to what the decoder accepts and to what a real run actually writes. The
-// remaining files in docs/schema/ are not yet checked that way.
+// docs/schema/ is not read at runtime. Tests use meshcore/jsonschema to check the config and
+// effective-config schemas against what the decoder accepts and what a run writes.
 package schema
 
 import (
@@ -22,7 +16,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// ReviewerResult is the JSON a reviewer/cross_check/verifier call returns
+// ReviewerResult is the JSON a reviewer, cross_check or verifier call returns
 // (docs/schema/reviewer-result.schema.json).
 type ReviewerResult struct {
 	SchemaVersion int              `json:"schemaVersion"`
@@ -45,9 +39,8 @@ var (
 		"upstream_conflict_deferred", "withheld_class_e", "reported_valid", "reported_invalid")
 )
 
-// HostAdjudicationResult is the JSON a host-adjudication call returns: a wrapper
-// object carrying one adjudication per reviewer finding
-// (docs/schema/host-adjudication.schema.json; prompts.md → Host adjudication prompt).
+// HostAdjudicationResult is the JSON a host-adjudication call returns: one adjudication per
+// reviewer finding (docs/schema/host-adjudication.schema.json).
 type HostAdjudicationResult struct {
 	SchemaVersion int                       `json:"schemaVersion"`
 	Role          string                    `json:"role"`
@@ -55,13 +48,11 @@ type HostAdjudicationResult struct {
 	Adjudications []review.HostAdjudication `json:"adjudications"`
 }
 
-// ParseHostAdjudication unmarshals + validates a host-adjudication response against
-// the reviewer finding ids it must cover (exactly one per id, no unknowns, no dups).
+// ParseHostAdjudication unmarshals and validates a host-adjudication response against the finding
+// ids it must cover: exactly one adjudication per id, with no unknown or duplicate ids. Unknown
+// top-level fields are ignored, as in ParseReviewerResult.
 func ParseHostAdjudication(b []byte, findingIDs []string) (HostAdjudicationResult, error) {
 	var r HostAdjudicationResult
-	// Tolerate unknown top-level fields (see ParseReviewerResult): a benign extra key must not
-	// discard an otherwise-valid adjudication. ValidateFor still enforces every real constraint
-	// (schemaVersion/role/phase, exact finding-id coverage, enum membership, required reasoning).
 	if err := json.Unmarshal(b, &r); err != nil {
 		return HostAdjudicationResult{}, fmt.Errorf("host adjudication is not valid JSON for the schema: %w", err)
 	}
@@ -81,8 +72,8 @@ func ParseHostAdjudication(b []byte, findingIDs []string) (HostAdjudicationResul
 	return r, nil
 }
 
-// ValidateFor checks the host-adjudication envelope + that it adjudicates exactly
-// the given finding ids (one each, no unknown, no duplicates) with valid enums.
+// ValidateFor checks the envelope and that it adjudicates exactly the given finding ids, once each,
+// with valid enum values.
 func (r HostAdjudicationResult) ValidateFor(findingIDs []string) error {
 	if r.SchemaVersion != 1 {
 		return fmt.Errorf("schemaVersion must be 1, got %d", r.SchemaVersion)
@@ -127,23 +118,15 @@ func (r HostAdjudicationResult) ValidateFor(findingIDs []string) error {
 	return nil
 }
 
-// ParseReviewerResult unmarshals and validates a reviewer response. Unknown
-// top-level fields are TOLERATED (ignored), not fatal: real models occasionally
-// emit a benign extra key (e.g. a top-level "source":"reviewer" echo), and
-// rejecting the whole result over one stray field discarded a valid, substantive
-// review — then the single corrective retry could replace it with an empty
-// approve (net finding loss). Every real constraint still holds — required
-// fields, enum membership (Validate), and the required "findings" array probe
-// below — so tolerating extras loses no integrity while matching the host's
-// "judge the content, don't choke on noise" posture. Raw stdout is preserved in
-// the audit regardless.
+// ParseReviewerResult unmarshals and validates a reviewer response. Unknown top-level fields are
+// ignored, since models sometimes add a stray key and rejecting the result would discard a valid
+// review; required fields and enum values are still enforced.
 func ParseReviewerResult(b []byte) (ReviewerResult, error) {
 	var r ReviewerResult
 	if err := json.Unmarshal(b, &r); err != nil {
 		return ReviewerResult{}, fmt.Errorf("reviewer result is not valid JSON for the schema: %w", err)
 	}
-	// `findings` is required and must be an array (an omitted/null value decodes to a
-	// nil slice, which would otherwise pass as "no findings" and bypass the retry).
+	// An omitted or null `findings` would decode as "no findings", so require an array explicitly.
 	var probe struct {
 		Findings *json.RawMessage `json:"findings"`
 	}
@@ -160,13 +143,10 @@ func ParseReviewerResult(b []byte) (ReviewerResult, error) {
 	return r, nil
 }
 
-// NormalizeReviewerOutput conservatively recovers a single JSON object from a real
-// model's stdout before parsing. It strips a single surrounding Markdown code fence
-// and extracts the first top-level JSON object when there is surrounding text — but
-// only when unambiguous. It NEVER repairs JSON or guesses fields. It rejects: empty
-// output, arrays, prose without an object, partial/unbalanced JSON, and multiple
-// top-level objects. `changed` reports whether anything was stripped/extracted (the
-// caller keeps the original stdout in the audit regardless).
+// NormalizeReviewerOutput recovers a single JSON object from model stdout: it strips one surrounding
+// Markdown code fence and surrounding text when the object is unambiguous. It never repairs JSON.
+// Empty output, arrays, prose without an object, unbalanced JSON and multiple objects are errors.
+// changed reports whether anything was stripped.
 func NormalizeReviewerOutput(raw []byte) (normalized []byte, changed bool, err error) {
 	s := strings.TrimSpace(string(raw))
 	if s == "" {
@@ -200,8 +180,8 @@ func NormalizeReviewerOutput(raw []byte) (normalized []byte, changed bool, err e
 	return []byte(obj), changed, nil
 }
 
-// objectEnd returns the index just past the '}' that closes the object beginning at
-// s[0] (which must be '{'), respecting string literals and escapes. Error if unbalanced.
+// objectEnd returns the index just past the '}' closing the object that begins at s[0], respecting
+// string literals and escapes. It returns an error when the object is unbalanced.
 func objectEnd(s string) (int, error) {
 	depth, inStr, esc := 0, false, false
 	for i := 0; i < len(s); i++ {
@@ -232,17 +212,16 @@ func objectEnd(s string) (int, error) {
 	return 0, fmt.Errorf("reviewer output has unbalanced/partial JSON (no matching '}')")
 }
 
-// stripFence removes a single surrounding Markdown code fence (```...``` or ```json)
-// when the whole string is fenced; returns (inner, true) if it stripped one.
+// stripFence removes one surrounding Markdown code fence and reports whether it did.
 func stripFence(s string) (string, bool) {
 	if !strings.HasPrefix(s, "```") {
 		return s, false
 	}
-	nl := strings.IndexByte(s, '\n')
-	if nl < 0 {
+	_, after, ok := strings.Cut(s, "\n")
+	if !ok {
 		return s, false
 	}
-	body := s[nl+1:]
+	body := after
 	if idx := strings.LastIndex(body, "```"); idx >= 0 {
 		return body[:idx], true
 	}
@@ -285,26 +264,15 @@ func (r ReviewerResult) Validate() error {
 
 var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 
-// NormalizeLocation buckets a location so small line drift doesn't change identity
-// (docs/design.md → Finding identity & rubrics).
-//
-// `location` is MODEL-AUTHORED FREE TEXT, so the normalization has to absorb the ways a model
-// restates the same place. Measured 2026-08-11 on a real two-vendor run, one seat produced BOTH
-// "loadPriorDispositions (lines 163-225)" and "loadPriorDispositions, lines 163-225" for the same
-// defect: after the non-alphanumeric collapse those differ only by a TRAILING separator, left
-// behind by the closing parenthesis. Trimming separators from both ends is what makes those one
-// identity rather than two.
-//
-// WHAT IT STILL DOES NOT DO, stated so nobody reads more into it: it does not reconcile different
-// line ranges for the same place. "(lines 177-181, 210-216)" and "(lines 177-217)" remain distinct
-// identities. Merging those is range arithmetic — host-computed entity resolution — and it is a
-// deliberate, separate decision rather than something smuggled into a normalizer.
+// NormalizeLocation normalizes a model-authored location so small restatements do not change a
+// finding's identity. A leading line number is bucketed to the nearest 10 below; otherwise
+// non-alphanumeric runs collapse to "-" and are trimmed from both ends, so "f (lines 1-2)" and
+// "f, lines 1-2" match. Different line ranges for the same place are not reconciled.
 func NormalizeLocation(loc string) string {
 	s := strings.ToLower(strings.TrimSpace(loc))
 	if s == "" {
 		return ""
 	}
-	// a leading "a-b" or "a" line range → bucket the start line to nearest 10
 	m := regexp.MustCompile(`^(\d+)`).FindStringSubmatch(s)
 	if m != nil {
 		var n int
@@ -314,43 +282,21 @@ func NormalizeLocation(loc string) string {
 	return strings.Trim(nonAlnum.ReplaceAllString(s, "-"), "-")
 }
 
-// Fingerprint is the deterministic identity of a finding for DEDUP: file|normalizedLocation, with
-// both title and KIND excluded.
+// Fingerprint returns a finding's host-computed identity for deduplication and selection: a hash of
+// its file and normalized location.
 //
-// KIND IS NOT PART OF THIS, although merging two findings of different kind at one location might
-// seem to drop a genuinely distinct issue. Measured evidence decides it. On a real
-// two-vendor run (2026-08-11, run dir 20260811T130527-1690) a single seat reported the same defect
-// at a BYTE-IDENTICAL file and location twice, once as `inconsistency` and once as `fail` — so a
-// model relabelling its own finding defeated its own dedup. Across 20 findings the agreement count
-// was 1 for every single one, on a run where two independent vendors demonstrably agreed.
-//
-// `kind` is model-authored, and this codebase already refuses model-authored values as identity:
-// the whole reason a fingerprint exists instead of `Finding.ID` is that the id is the model's to
-// choose. Kind is the model's to choose too. The conservatism it was meant to buy was illusory,
-// because the same relabelling that would "protect" a distinct issue also splits an identical one.
-//
-// This makes Fingerprint identical to what StabilityKey already computed — which is itself
-// corroboration, since that key excluded kind years earlier for exactly this observed drift.
-//
-// SHA-1 is deliberate and is not a security choice: the input is a file path and a location, both
-// model-authored and both already visible in the finding, so there is nothing to keep secret and no
-// collision an attacker could profit from — the property the fingerprint provides is that the HOST
-// computed it, not that it is hard to forge. The `sha1:` prefix is part of the public `--select`
-// vocabulary, so the algorithm is pinned by compatibility as well.
+// Title and kind are excluded because models relabel the same defect with a different kind, which
+// would split one finding into two. SHA-1 is not a security choice: the inputs are visible in the
+// finding, and the `sha1:` prefix is part of the public `select` vocabulary.
 func Fingerprint(f review.Finding) string {
 	identity := f.File + "|" + NormalizeLocation(f.Location)
 	sum := sha1.Sum([]byte(identity))
 	return fmt.Sprintf("sha1:%x", sum)
 }
 
-// StabilityKey is the finding identity for the inner-loop SET-STABILITY check (methodology §
-// Set-stability via content tuple). It excluded kind because "a reviewer often reports the SAME
-// underlying issue with a drifting kind across iterations (ambiguity↔inconsistency)".
-//
-// That observation turned out to describe DEDUP just as well as stability, so Fingerprint now
-// excludes kind too and the two identities have converged. It stays a named function because the
-// call site means something different by it — convergence of a seat's own set, not identity across
-// seats — and one delegating to the other is how they are kept from drifting apart again.
+// StabilityKey is the finding identity for a seat's set-stability check across rounds. It equals
+// Fingerprint and is named separately because the call site checks convergence rather than identity
+// across seats.
 func StabilityKey(f review.Finding) string { return Fingerprint(f) }
 
 type set map[string]struct{}

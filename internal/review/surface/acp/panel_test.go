@@ -10,7 +10,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 )
 
-// selectionReviewer captures the seats the Manager was actually called with.
+// selectionReviewer records the seats the manager was called with.
 type selectionReviewer struct {
 	noRemediation // these prompts are report turns; none reaches a write
 	called        bool
@@ -32,9 +32,9 @@ func (r *selectionReviewer) RunContext(ctx context.Context, req run.Request) (re
 const composedPanel = `{"reviewers":[{"adapter":"fake","model":"m1"},{"adapter":"claude-code","model":"m2","effort":"high"}],` +
 	`"author_remediator":{"adapter":"fake","model":"m1"},"cross_check":{"adapter":"claude-code","model":"cc"}}`
 
-// TestPromptMeta_PanelReachesTheManager: `_meta.reviewmesh.panel` composes the turn's seats on both
-// the ACP v1 `session/prompt` path and the compatibility `review` method. The reviewers arrive in the
-// order the host wrote them, and each role seat reaches the Manager as a composed role.
+// _meta.reviewmesh.panel composes the turn's seats on both session/prompt and the compatibility
+// review method. Reviewers keep the host's order, and each role seat reaches the manager as a
+// composed role.
 func TestPromptMeta_PanelReachesTheManager(t *testing.T) {
 	rec := &selectionReviewer{}
 	r := serve(t, rec,
@@ -52,7 +52,7 @@ func TestPromptMeta_PanelReachesTheManager(t *testing.T) {
 	if _, named := rec.roles[review.RoleVerifier]; named {
 		t.Error("a verifier the turn did not name must not be composed")
 	}
-	// The executed roster is echoed back, so a host that composed N seats can verify N ran.
+	// The executed roster is echoed, so a host can verify every composed seat ran.
 	if panel, ok := res["panel"].([]any); !ok || len(panel) != 2 {
 		t.Errorf("the result must echo the executed panel roster, got %v", res["panel"])
 	}
@@ -66,8 +66,7 @@ func TestPromptMeta_PanelReachesTheManager(t *testing.T) {
 	}
 }
 
-// TestPromptMeta_SelectionFailsClosed: every panel error is -32602 with a machine reason code,
-// BEFORE any spend.
+// Every panel error is invalid params with a machine reason code, before any spend.
 func TestPromptMeta_SelectionFailsClosed(t *testing.T) {
 	seat := `{"adapter":"fake","model":"m1"}`
 	big := "[" + strings.TrimSuffix(strings.Repeat(seat+",", review.MaxReviewerSeats+1), ",") + "]"
@@ -120,9 +119,8 @@ func TestPromptMeta_NoLaunchedAdapterNamesTheFlag(t *testing.T) {
 	}
 }
 
-// TestPromptMeta_ShapeIsStrict: a panel is the role object, and nothing else decodes. A `profile`
-// key, the bare-array form, and a seat carrying an adapter definition (`path`) are all malformed
-// requests — a turn uses the adapters named at launch and never introduces one.
+// A panel is the role object and nothing else decodes: a profile key, a bare array and a seat
+// carrying a path are malformed.
 func TestPromptMeta_ShapeIsStrict(t *testing.T) {
 	for name, meta := range map[string]string{
 		"profile key":        `{"profile":"any"}`,

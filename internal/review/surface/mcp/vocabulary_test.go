@@ -7,19 +7,11 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
 )
 
-// THE DECLARED-KEYWORD ALLOWLIST, over every schema this server publishes.
-//
-// The risk it closes is specific and is ours, not the protocol's. A tool's inputSchema/outputSchema
-// may use any 2020-12 keyword. meshcore/jsonschema treats a keyword it does not implement as an
-// ANNOTATION — which is correct for an UNKNOWN keyword and wrong for a KNOWN-and-unimplemented one.
-// Declare `patternProperties` here and `--strict-schema` would pass a payload a compliant client
-// rejects, while the build stayed green: a silent degradation with a green CI, which is the exact
-// shape this repo refuses everywhere else.
-//
-// So: any keyword outside the validator's declared vocabulary fails the build. It protects OUR
-// schemas from drifting outside OUR validator; it establishes nothing about general 2020-12 support.
+// Every published schema uses only keywords meshcore/jsonschema implements. The validator treats an
+// unimplemented keyword as an annotation, so a schema using one (patternProperties, say) would let
+// --strict-schema pass payloads a compliant client rejects.
 func TestPublishedToolSchemas_UseOnlyTheValidatorsDeclaredVocabulary(t *testing.T) {
-	// Every tool is registered, review_remediate — the one with the largest schema — included.
+	// Register every tool, including review_remediate, which has the largest schema.
 	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) {
 		s.Ceiling, s.AllowWrites = []string{t.TempDir()}, true
 	})
@@ -48,10 +40,8 @@ func TestPublishedToolSchemas_UseOnlyTheValidatorsDeclaredVocabulary(t *testing.
 	}
 }
 
-// Every published schema must also compile, which — now that compiling bounds a schema — is the
-// assertion that none of them carries a non-local `$ref`, a `$ref` cycle, or nesting past the
-// compile-time bounds. On the strict-schema path a compile failure is a failed CALL, so this is the
-// check that keeps that failure out of production rather than finding it there.
+// Every published schema compiles within the validator's bounds: no non-local $ref, no $ref cycle and
+// no excessive nesting. With --strict-schema a compile failure would fail calls.
 func TestPublishedToolSchemas_CompileWithinTheBounds(t *testing.T) {
 	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) {
 		s.Ceiling, s.AllowWrites = []string{t.TempDir()}, true
@@ -68,9 +58,7 @@ func TestPublishedToolSchemas_CompileWithinTheBounds(t *testing.T) {
 	}
 }
 
-// `tools/list` order is REGISTRATION order and is stable across calls. The property already held;
-// what it lacked was an assertion, and an unasserted property is one refactor from being a former
-// property. A client that caches a tool list keyed on its order has no other way to find out.
+// tools/list returns tools in registration order, the same on every call.
 func TestToolsList_IsDeterministicAndInRegistrationOrder(t *testing.T) {
 	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) {
 		s.Ceiling, s.AllowWrites = []string{t.TempDir()}, true
@@ -81,7 +69,7 @@ func TestToolsList_IsDeterministicAndInRegistrationOrder(t *testing.T) {
 	for _, tool := range s.Core().Tools() {
 		registered = append(registered, tool.Name)
 	}
-	for attempt := 0; attempt < 3; attempt++ {
+	for range 3 {
 		resp, _ := c.call(t, "tools/list", map[string]any{})
 		if resp.Error != nil {
 			t.Fatalf("tools/list: %+v", resp.Error)

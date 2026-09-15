@@ -1,19 +1,13 @@
 package pipeline
 
-// This file is the BALLOT STAGE — the two host steps that bracket the
-// ballot round a ballot-bearing mode declares:
+// This file holds the host steps around a ballot round:
 //
-//	freezeDecision   BEFORE the ballot round is dispatched: fix + hash the candidate-universe revision, the
-//	                 presented order, the criterion set (each with its origin + aggregation method), the tally
-//	                 method, the shortlist cut, and the quorum / tie / missing-response policy already frozen
-//	                 with the panel. The hash is then rendered into the ballot prompt by the host, so the
-//	                 framing a voter voted under is recoverable from the persisted prompt bytes.
-//	tallyBallots     AFTER it: parse each recorded ballot, reject an entry outside the confirmed universe, and
-//	                 hand the ballots to govern.Tally. The ranking is arithmetic; no model produces one.
+//	freezeDecision   before the ballot: fix and hash the candidates, presented order, criteria, method,
+//	                 shortlist size and panel policy; the hash is rendered into the ballot prompt
+//	tallyBallots     after the ballot: parse each ballot, reject entries outside the confirmed universe, and
+//	                 compute the ranking with govern.Tally
 //
-// The ordering is the whole governance property, and it is structural rather than remembered: the ballot
-// prompt cannot be built without a frozen record (the pipeline prepends its rendering), and govern.Tally
-// REFUSES a decision whose inputs were not frozen or whose hash no longer matches.
+// govern.Tally refuses inputs that were not frozen or whose hash no longer matches.
 
 import (
 	"fmt"
@@ -26,9 +20,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// freezeDecision fixes + hashes the decision inputs and records them on the Result BEFORE the ballot round is
-// dispatched. It is called only for a mode that declares a Ballot contract; every other mode
-// leaves Result.Decision nil and never acquires a decision by accident.
+// freezeDecision hashes the decision inputs and records them on the Result before the ballot round. Only
+// modes with a Ballot contract call it.
 func (r *runner) freezeDecision(confirmed canon.Result, pres canon.Presentation) error {
 	criteria := r.spec.Ballot.Criteria(r.raw)
 	frozen, err := govern.FreezeDecision(
@@ -37,8 +30,7 @@ func (r *runner) freezeDecision(confirmed canon.Result, pres canon.Presentation)
 	if err != nil {
 		return fault.Wrap(fault.Config, "freeze decision inputs", err)
 	}
-	// Recorded as a decision carrying ONLY its frozen inputs: the entries/ballots arrive at the tally. A
-	// reader of a halted run can therefore still see exactly what framing was about to be put to the panel.
+	// Record the frozen inputs now so a run that halts later still shows them.
 	r.res.Decision = &govern.Decision{Frozen: frozen, RuleVersion: govern.DecisionRuleVersion}
 	emit(r.onEvent, "info", "decision_frozen", fmt.Sprintf(
 		"decision inputs FROZEN + hashed BEFORE the ballot: %d criterion(s), method %s, %d candidate(s), shortlist %d, quorum %d, tie rule %s (inputs %s)",
@@ -52,15 +44,10 @@ func (r *runner) freezeDecision(confirmed canon.Result, pres canon.Presentation)
 	return nil
 }
 
-// tallyBallots parses the recorded ballot round and computes the HOST tally. It runs after the
-// ballot round, so it can only ever read ballots that were cast under the already-frozen framing.
+// tallyBallots parses the recorded ballot round and computes the host tally.
 //
-// An explorer whose ballot is unusable — no ballot round envelope, an unparseable body, or an entry naming a
-// candidate outside the confirmed universe — is recorded as having cast no ballot and is excluded from the
-// tally. That is deliberately the same posture the confirmation round takes toward a silent explorer: the
-// alternative (halting the run, or quietly deleting the offending entry) would either throw away a paid-for
-// panel or change a voter's expressed preference without saying so. The dual denominators keep the absence
-// visible either way.
+// An unusable ballot (unparseable, or naming a candidate outside the confirmed universe) counts as no ballot
+// rather than halting the run or silently editing the vote. The dual denominators show the absence.
 func (r *runner) tallyBallots(confirmed canon.Result, formulationHash string) error {
 	res := r.res
 	if res.Decision == nil {
@@ -91,8 +78,7 @@ func (r *runner) tallyBallots(confirmed canon.Result, formulationHash string) er
 			continue
 		}
 		b.EnvelopeRef = schema.EnvelopeRef(ballotRound.Index(), env.Order)
-		// The voter's stated reasoning is MODEL PROSE: it is moved into the collatorNarrative namespace here and
-		// never travels on the machine record of the ballot.
+		// The voter's rationale is kept as narrative, not on the ballot record.
 		if b.Rationale != "" {
 			narrative = append(narrative, govern.Narrative{Source: env.Identity, Phase: schema.PhaseBallot, Prose: b.Rationale})
 		}
@@ -124,8 +110,7 @@ func (r *runner) tallyBallots(confirmed canon.Result, formulationHash string) er
 	return nil
 }
 
-// lastRound returns the final recorded round (the ballot round for a ballot-bearing mode, whose ballot is
-// always the last declared round).
+// lastRound returns the last recorded round, which is the ballot round in a ballot-bearing mode.
 func lastRound(rounds []round.Round) (round.Round, bool) {
 	if len(rounds) == 0 {
 		return round.Round{}, false

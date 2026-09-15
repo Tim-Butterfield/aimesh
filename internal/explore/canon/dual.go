@@ -1,28 +1,15 @@
 package canon
 
-// This file is the DUAL-CANONICALIZER MERGE-AGREEMENT: the ranking-grade replacement
-// for a single canonicalizer's partition authority.
+// This file implements dual-canonicalizer merge agreement.
 //
-// The problem it closes: every emergent-space count rides on a partition ("is 'Postgres' the same candidate
-// as 'Postgres+Citus'?"). Merge → "3/5"; split → "2/5". Both are honest arithmetic and they disagree, so
-// whoever controls the partition controls the agenda. Recording the partition (the merge ledger) makes that
-// power VISIBLE; it does not divide it.
+// Two independent canonicalizers each propose a partition, and only merges both propose are kept: the held
+// partition is the intersection of the two equivalence relations (every class is A_i ∩ B_j), which is
+// always a valid partition. A merge only one proposes is contested and split. Splitting can undercount
+// corroboration but never manufacture it, and the contested merge is recorded so the confirmation round and
+// the counts can account for it.
 //
-// The rule: run TWO INDEPENDENT canonicalizer calls (each separately identity-verified by the caller) and
-// keep ONLY the merges BOTH propose. Formally the held partition is the INTERSECTION of the two proposed
-// equivalence relations — every class is A_i ∩ B_j — which is itself an equivalence relation, so the result
-// is always a well-formed partition and never needs transitive repair. A merge only ONE canonicalizer
-// proposes is CONTESTED and resolved by SPLITTING: that direction can UNDERCOUNT corroboration (two names
-// for one thing may be counted as two candidates with one source each) but it can NEVER MANUFACTURE
-// corroboration (it cannot turn one explorer's nomination into two explorers' agreement). Undercounting is
-// recoverable — the contested merge is recorded, the confirmation round can raise it, and a count over a
-// contested mapping is emitted as a range. Manufactured corroboration is not recoverable: it is a false
-// claim about independent support.
-//
-// Every held mapping row records `agreedBy` (both proposing calls + identities); the DECIDING authority on
-// this path is the versioned HOST rule, not either model (machine governance fields carry
-// host-produced values only), so DecidedByCall names the rule and DecidedByIdentity is deliberately left
-// zero — no model decided it.
+// Rows record both proposals in AgreedBy. The host rule decides, so DecidedByCall names the rule and
+// DecidedByIdentity is left zero.
 
 import (
 	"context"
@@ -31,41 +18,31 @@ import (
 	"strings"
 )
 
-// DualRuleVersion is the VERSIONED host rule that turns two independent canonicalizer proposals into one
-// held partition. It is persisted on every row's deciding call and on the Result, so a partition can always
-// be re-derived from the two recorded proposals by the exact rule that produced it.
+// DualRuleVersion identifies the merge-agreement rule. It is recorded on every row and on the Result.
 const DualRuleVersion = "host-dual-merge-agreement@v1"
 
-// ContestedMerge is a merge exactly ONE canonicalizer proposed. The host rule resolves it in
-// the conservative direction — the nominations are kept SPLIT — and the refused merge is recorded as a
-// first-class decision in the same append-only chain, so a reader can see precisely which corroboration the
-// partition may be undercounting and who proposed it.
+// ContestedMerge records a merge only one canonicalizer proposed, which the rule split.
 type ContestedMerge struct {
-	// ProposedBy is the canonicalizer call that wanted these nominations in one entity.
+	// ProposedBy is the canonicalizer call that proposed the merge.
 	ProposedBy Attribution `json:"proposedBy"`
-	// ProposedCanonicalID/Name are that canonicalizer's own label for the merged entity.
+	// ProposedCanonicalID and ProposedName are that canonicalizer's label for the merged entity.
 	ProposedCanonicalID string `json:"proposedCanonicalId"`
 	ProposedName        string `json:"proposedName"`
-	// RawNominations are the raw texts the proposing canonicalizer wanted together (in nomination order).
+	// RawNominations are the nominations it proposed merging, in nomination order.
 	RawNominations []string `json:"rawNominations"`
-	// SplitInto are the HELD canonical IDs those nominations actually landed in (>=2 — that is what makes the
-	// merge contested).
+	// SplitInto are the held canonical IDs those nominations landed in (at least two).
 	SplitInto []string `json:"splitInto"`
-	// Resolution + RuleVersion record the host decision and the rule version that made it.
+	// Resolution and RuleVersion record the host's decision and rule.
 	Resolution  string `json:"resolution"`
 	RuleVersion string `json:"ruleVersion"`
 }
 
-// ResolutionSplit is the only resolution DualRuleVersion ever applies to a contested merge.
+// ResolutionSplit is the resolution DualRuleVersion applies to every contested merge.
 const ResolutionSplit = "split"
 
-// CanonicalizeDual runs TWO INDEPENDENT canonicalizer calls over the same nominations and returns the
-// partition both agree on. Both proposals are validated for partition integrity FIRST (each
-// must itself be a surjective partition — an invalid proposal is a canonicalizer failure, not something to
-// silently intersect around), then the held partition is their intersection, then the surjectivity gate runs
-// over the held partition exactly as on the single path. Errors name WHICH canonicalizer produced the bad
-// proposal so a halt is diagnosable. A call failure (including an identity halt, which the caller raises
-// inside Propose) propagates unchanged.
+// CanonicalizeDual asks both canonicalizers for a partition of nominations and returns the partition they
+// agree on. Each proposal must itself pass the surjectivity checks, and errors name the canonicalizer at
+// fault. Call errors, including identity halts, are returned wrapped.
 func CanonicalizeDual(ctx context.Context, nominations []Nomination, first, second CanonicalizerCall) (Result, error) {
 	propA, err := first.Propose(ctx, nominations)
 	if err != nil {
@@ -89,15 +66,13 @@ func CanonicalizeDual(ctx context.Context, nominations []Nomination, first, seco
 	agreed := intersect(nominations, propA.Clusters, propB.Clusters, assignA, assignB)
 
 	led, err := buildLedger(nominations, agreed, 1, "", func(r *LedgerRow) {
-		// The DECIDING authority is the host rule; the two model proposals are the evidence (AgreedBy).
 		r.DecidedByCall = "host:" + DualRuleVersion
 		r.AgreedBy = []Attribution{attrA, attrB}
 	})
 	if err != nil {
 		return Result{}, err
 	}
-	// Record every merge one canonicalizer proposed that the agreement REFUSED — from both directions, so
-	// neither canonicalizer's rejected merges are silently privileged.
+	// Record the refused merges of both canonicalizers.
 	for _, cm := range contestedMerges(nominations, propA.Clusters, agreed, attrA) {
 		led.appendContested(cm)
 	}
@@ -117,10 +92,8 @@ func CanonicalizeDual(ctx context.Context, nominations []Nomination, first, seco
 	}, nil
 }
 
-// assignments validates ONE proposed partition (non-empty unique canonical IDs, in-range members, every
-// nomination in exactly one cluster) and returns the cluster INDEX each nomination was assigned to. It is
-// the pre-intersection integrity check: intersecting a proposal that already dropped or double-counted a
-// nomination would hide that canonicalizer's failure behind the agreement rule.
+// assignments validates one proposed partition and returns the cluster index of each nomination. A
+// proposal that drops or double-counts a nomination is an error, so intersection cannot hide it.
 func assignments(noms []Nomination, clusters []ProposedCluster) ([]int, error) {
 	out := make([]int, len(noms))
 	for i := range out {
@@ -157,12 +130,9 @@ func assignments(noms []Nomination, clusters []ProposedCluster) ([]int, error) {
 	return out, nil
 }
 
-// intersect builds the AGREED partition: one class per non-empty A_i ∩ B_j, in the order the classes are
-// first encountered walking A's clusters (deterministic, and stable under re-runs of the same proposals).
-// A class that IS an entire A cluster (i.e. A_i ⊆ B_j — nothing was contested about it) keeps A's canonical
-// ID and label unchanged, so an agreed partition reads like a normal one. A class that is a SPLIT of an A
-// cluster gets a composite ID + label naming BOTH canonicalizers' entities, because that is the honest
-// description of what it is: the part of A's entity that B also grouped together.
+// intersect builds the agreed partition: one class per non-empty A_i ∩ B_j, in order of first appearance.
+// A class equal to a whole A cluster keeps A's ID and label; a class that splits an A cluster gets an ID
+// and label combining both canonicalizers' entities.
 func intersect(noms []Nomination, a, b []ProposedCluster, assignA, assignB []int) []ProposedCluster {
 	type key struct{ ai, bi int }
 	var order []key
@@ -174,7 +144,7 @@ func intersect(noms []Nomination, a, b []ProposedCluster, assignA, assignB []int
 		}
 		members[k] = append(members[k], i)
 	}
-	// How many agreed classes each A cluster split into (1 = uncontested within A).
+	// splits counts the agreed classes each A cluster became.
 	splits := map[int]int{}
 	for _, k := range order {
 		splits[k.ai]++
@@ -184,8 +154,6 @@ func intersect(noms []Nomination, a, b []ProposedCluster, assignA, assignB []int
 		ac, bc := a[k.ai], b[k.bi]
 		id, name := ac.CanonicalID, ac.Name
 		if splits[k.ai] > 1 {
-			// Contested: A merged these with others, B did not. Name the intersection after both entities so
-			// the label itself records that this is an agreement-narrowed group, not either model's cluster.
 			id = ac.CanonicalID + "~" + bc.CanonicalID
 			name = ac.Name + " / " + bc.Name
 		}
@@ -194,13 +162,10 @@ func intersect(noms []Nomination, a, b []ProposedCluster, assignA, assignB []int
 	return out
 }
 
-// contestedMerges reports, for one canonicalizer's proposal, every cluster the agreement rule SPLIT: the
-// merge that canonicalizer proposed and the other refused. One record per split cluster (not per pair) keeps
-// the ledger proportional to the disagreement while still naming every raw nomination involved and every
-// held canonical ID they ended up in.
+// contestedMerges returns one record for each cluster in proposed that the agreement split.
 func contestedMerges(noms []Nomination, proposed, agreed []ProposedCluster, by Attribution) []ContestedMerge {
-	// held[nominationIndex] = the agreed canonical ID it landed in.
-	held := map[int]string{}
+	held := map[int]string{} // nomination index to agreed canonical ID
+
 	for _, c := range agreed {
 		for _, idx := range c.Members {
 			held[idx] = c.CanonicalID
@@ -213,7 +178,7 @@ func contestedMerges(noms []Nomination, proposed, agreed []ProposedCluster, by A
 			ids[held[idx]] = true
 		}
 		if len(ids) < 2 {
-			continue // fully agreed — nothing was refused
+			continue
 		}
 		raws := make([]string, 0, len(c.Members))
 		for _, idx := range c.Members {
@@ -223,7 +188,7 @@ func contestedMerges(noms []Nomination, proposed, agreed []ProposedCluster, by A
 		for id := range ids {
 			split = append(split, id)
 		}
-		sort.Strings(split) // deterministic record
+		sort.Strings(split)
 		out = append(out, ContestedMerge{
 			ProposedBy:          by,
 			ProposedCanonicalID: c.CanonicalID,
@@ -237,9 +202,7 @@ func contestedMerges(noms []Nomination, proposed, agreed []ProposedCluster, by A
 	return out
 }
 
-// mergeDimensions unions the two canonicalizers' PROPOSED dimensions, preserving A's order then appending
-// B's extras. They are proposed axes for the human (never decision criteria), so a union loses nothing and
-// keeping both is more honest than picking one canonicalizer's list.
+// mergeDimensions returns the union of both proposals' dimensions: a's in order, then b's additions.
 func mergeDimensions(a, b []string) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -253,8 +216,7 @@ func mergeDimensions(a, b []string) []string {
 	return out
 }
 
-// mergeCoverageNotes keeps BOTH canonicalizers' coverage notes, each labeled by its author. They are model
-// prose about coverage, so they are attributed rather than blended into one unattributed paragraph.
+// mergeCoverageNotes joins both canonicalizers' coverage notes, each labeled with its author.
 func mergeCoverageNotes(a, b string) string {
 	switch {
 	case strings.TrimSpace(a) == "" && strings.TrimSpace(b) == "":

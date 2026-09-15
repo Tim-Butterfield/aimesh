@@ -869,6 +869,10 @@ names the limit and the current count**.
 The idempotency guard is checked **before** admission accounting: a retry after a dropped connection must
 return the original run, not a second panel billed to the same person for the same question.
 
+Concurrency is set per call with `maxParallel` rather than at launch: the right bound depends on the
+caller's machine (memory, local model weights) and on provider rate limits, neither of which the server
+can see. It limits parallelism only; every seat or explorer still runs.
+
 ## Security posture
 
 Both servers share the first, third, fourth and last of these; the reviewmesh-specific posture (per-call

@@ -26,9 +26,7 @@ func writeSpec(t *testing.T) string {
 	return p
 }
 
-// TestAuthorityRef_SectionResolvesToTheBytesItNames is the property the whole shorthand rests on: the
-// range it produces must select exactly that section, because what gets embedded is what the
-// reviewers are told is authoritative.
+// A section selector must produce a range that selects exactly that section.
 func TestAuthorityRef_SectionResolvesToTheBytesItNames(t *testing.T) {
 	p := writeSpec(t)
 	docs, err := parseAuthority([]string{p + "#The Relevant Part"}, nil, "")
@@ -39,8 +37,7 @@ func TestAuthorityRef_SectionResolvesToTheBytesItNames(t *testing.T) {
 		t.Fatalf("got %d docs", len(docs))
 	}
 	d := docs[0]
-	// A SELECTOR MAKES IT A PARTIAL INCLUSION — which is what makes the manifest say complete:false
-	// and the prompt mark the omitted spans. It must never arrive as requireFull.
+	// A selector makes the inclusion partial; it must never arrive as requireFull.
 	if d.Completeness != review.CompletenessRanges {
 		t.Errorf("completeness = %q, want %q", d.Completeness, review.CompletenessRanges)
 	}
@@ -57,14 +54,13 @@ func TestAuthorityRef_SectionResolvesToTheBytesItNames(t *testing.T) {
 	if strings.Contains(got, "# Appendix") {
 		t.Errorf("the range spills into the next section: %q", got)
 	}
-	// The document's NAME is still its base name, so an --authority-hash pin refers to the same
-	// thing it always did.
+	// The document name is still its base name, so an --authority-hash pin refers to it.
 	if d.Name != "spec.md" {
 		t.Errorf("name = %q, want the file base name", d.Name)
 	}
 }
 
-// TestAuthorityRef_ExplicitByteRange: the form the budget refusal prints, pasted back verbatim.
+// An explicit byte range resolves to that range.
 func TestAuthorityRef_ExplicitByteRange(t *testing.T) {
 	p := writeSpec(t)
 	docs, err := parseAuthority([]string{p + ":10-30"}, nil, "")
@@ -83,9 +79,7 @@ func TestAuthorityRef_ExplicitByteRange(t *testing.T) {
 	}
 }
 
-// TestAuthorityRef_AWindowsPathKeepsItsDriveColon. The range syntax uses ':', and so does a drive
-// letter — the parse must anchor on the digits at the END or it eats `C:\...` on the one platform
-// this project explicitly supports but does not gate.
+// The range syntax uses ':', as does a drive letter, so parsing must anchor on the trailing digits.
 func TestAuthorityRef_AWindowsPathKeepsItsDriveColon(t *testing.T) {
 	ref, err := parseAuthorityRef(`C:\specs\design.md`)
 	if err != nil {
@@ -103,8 +97,7 @@ func TestAuthorityRef_AWindowsPathKeepsItsDriveColon(t *testing.T) {
 	}
 }
 
-// TestAuthorityRef_NoSelectorIsUnchanged: the ordinary whole-document case must be byte-identical to
-// what it was, or this convenience has changed the meaning of every existing invocation.
+// A value with no selector declares the whole document.
 func TestAuthorityRef_NoSelectorIsUnchanged(t *testing.T) {
 	p := writeSpec(t)
 	docs, err := parseAuthority([]string{p}, nil, "")
@@ -120,8 +113,7 @@ func TestAuthorityRef_NoSelectorIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestAuthorityRef_AnUnknownSectionNamesTheRealOnes. A mistyped heading should be one correction, not
-// a guessing game — the refusal lists what the document actually has.
+// A mistyped heading is refused with a list of the document's real sections.
 func TestAuthorityRef_AnUnknownSectionNamesTheRealOnes(t *testing.T) {
 	p := writeSpec(t)
 	_, err := parseAuthority([]string{p + "#Relevant"}, nil, "")
@@ -136,8 +128,7 @@ func TestAuthorityRef_AnUnknownSectionNamesTheRealOnes(t *testing.T) {
 	}
 }
 
-// TestAuthorityRef_AnAmbiguousSectionIsRefused. Two sections with one heading is exactly where a
-// first-match would quietly choose which half of a document the review is judged against.
+// Two sections with the same heading are refused rather than silently picking one.
 func TestAuthorityRef_AnAmbiguousSectionIsRefused(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "dup.md")
 	if err := os.WriteFile(p, []byte("# Notes\na\n# Notes\nb\n"), 0o644); err != nil {
@@ -152,7 +143,7 @@ func TestAuthorityRef_AnAmbiguousSectionIsRefused(t *testing.T) {
 	}
 }
 
-// TestAuthorityRef_MalformedSelectors are refused at the flag boundary, where they cost nothing.
+// Malformed selectors are refused at the flag boundary.
 func TestAuthorityRef_MalformedSelectors(t *testing.T) {
 	cases := map[string]string{
 		"empty section":   "spec.md#",

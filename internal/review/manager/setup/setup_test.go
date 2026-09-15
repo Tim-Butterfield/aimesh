@@ -463,9 +463,7 @@ func TestSetupWizard_AcceptDefaultsWrites(t *testing.T) {
 	}
 }
 
-// Wizard: choosing a profile CONFIGURES that profile — it never repoints defaultProfile
-// (the one default profile is the profile named `default`; changing the effective default
-// means editing/copying into `default`, the same fixed semantics as the web UI).
+// Choosing a profile in the wizard configures that profile and never repoints defaultProfile.
 func TestSetupWizard_ProfileChoiceDoesNotRepointDefault(t *testing.T) {
 	base := t.TempDir()
 	// `default` is the only profile the wizard offers to configure (the shipped fake profile is
@@ -532,9 +530,8 @@ func TestSetupWizard_InvalidPathRejectedNotRecorded(t *testing.T) {
 }
 
 // Wizard: an existing config is surgically patched — only the new adapter path changes;
-// every unrelated field is preserved, INCLUDING a legacy defaultProfile pointer (the wizard
-// never writes defaultProfile; a stale pointer is repaired only via the explicit, confirmed
-// web-UI/doctor repair, never silently by another flow).
+// every unrelated field is preserved, including a defaultProfile pointer (the wizard never writes
+// defaultProfile; only the confirmed doctor repair changes it).
 func TestSetupWizard_PreservesExistingConfig(t *testing.T) {
 	t.Setenv("AIMESH_HOME", t.TempDir())
 	base := t.TempDir()
@@ -869,91 +866,6 @@ func TestPromote_IncludeAdapterPaths(t *testing.T) {
 	}
 	if got := sharedAdapterPath(t, projShared, "claude-code"); got == nil || *got != "/personal/claude" {
 		t.Errorf("adapter path should be promoted into the project shared file: %v", got)
-	}
-}
-
-// PlanProjectPromotion previews what would be written WITHOUT writing (the web dialog's summary):
-// defaultProfile always, adapter paths only when opted in, and Exists detection — no file is created.
-func TestPlanProjectPromotion_PreviewNoWrite(t *testing.T) {
-	writeUserConfig(t, "schemaVersion: 1\ndefaultProfile: native-three-provider\n")
-	if err := config.SetSharedAdapterPath(userSharedPath(t), "claude-code", "/personal/claude"); err != nil {
-		t.Fatalf("seed user shared path: %v", err)
-	}
-	proj := t.TempDir()
-	pv, err := mgr().PlanProjectPromotion(proj, false)
-	if err != nil {
-		t.Fatalf("preview: %v", err)
-	}
-	if pv.DefaultProfile != "native-three-provider" {
-		t.Errorf("preview defaultProfile = %q, want native-three-provider", pv.DefaultProfile)
-	}
-	if len(pv.AdapterPaths) != 0 {
-		t.Errorf("adapter paths must be opt-in (absent by default): %+v", pv.AdapterPaths)
-	}
-	if pv.Exists {
-		t.Error("no project config should exist yet")
-	}
-	if config.DiscoverProjectConfig(proj) != "" {
-		t.Error("PlanProjectPromotion must NOT write a project config (preview only)")
-	}
-	if pv2, _ := mgr().PlanProjectPromotion(proj, true); len(pv2.AdapterPaths) != 1 || pv2.AdapterPaths[0] != "claude-code" {
-		t.Errorf("adapter path should be previewed with includePaths: %+v", pv2.AdapterPaths)
-	}
-	if _, err := mgr().PromoteUserToProject(proj, false, true, nil); err != nil {
-		t.Fatalf("promote: %v", err)
-	}
-	if pv3, _ := mgr().PlanProjectPromotion(proj, false); !pv3.Exists {
-		t.Error("preview must report Exists after a project config is written")
-	}
-}
-
-// CreateProjectConfig writes a valid minimal override even with NOTHING to promote (no defaultProfile
-// in the raw user config) — never a blank/invalid file — and refuses when a project config exists.
-func TestCreateProjectConfig_WritesMinimalValidOverride(t *testing.T) {
-	writeUserConfig(t, "schemaVersion: 1\nadapters:\n  claude-code:\n    path: /personal/claude\n")
-	proj := t.TempDir()
-	res, err := mgr().CreateProjectConfig(proj, false)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if !res.ConfigWritten {
-		t.Fatal("expected a write (a minimal override), got none")
-	}
-	pp := config.ProjectConfigPath(proj)
-	if cfg := loadCfgT(t, pp); cfg.SchemaVersion != 1 {
-		t.Errorf("minimal override must set schemaVersion: got %d", cfg.SchemaVersion)
-	}
-	if raw, _ := os.ReadFile(pp); strings.Contains(string(raw), "/personal/claude") {
-		t.Errorf("adapter path must NOT be written without opt-in:\n%s", raw)
-	}
-	if _, err := mgr().CreateProjectConfig(proj, false); err == nil {
-		t.Error("expected refusal when a project config already exists")
-	}
-}
-
-// CreateProjectConfig promotes defaultProfile (→ project config.yaml) + (opt-in) the user's saved
-// adapter paths (→ project shared adapters.yaml).
-func TestCreateProjectConfig_PromotesDefaultAndOptInPaths(t *testing.T) {
-	writeUserConfig(t, "schemaVersion: 1\ndefaultProfile: native-three-provider\n")
-	if err := config.SetSharedAdapterPath(userSharedPath(t), "claude-code", "/personal/claude"); err != nil {
-		t.Fatalf("seed user shared path: %v", err)
-	}
-	proj := t.TempDir()
-	if err := os.Mkdir(filepath.Join(proj, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := mgr().CreateProjectConfig(proj, true); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if cfg := loadCfgT(t, config.ProjectConfigPath(proj)); cfg.DefaultProfile != "native-three-provider" {
-		t.Errorf("defaultProfile not promoted: %q", cfg.DefaultProfile)
-	}
-	projShared, ok := config.SharedProjectLocationsPath(proj)
-	if !ok {
-		t.Fatal("proj should resolve a repo root")
-	}
-	if got := sharedAdapterPath(t, projShared, "claude-code"); got == nil || *got != "/personal/claude" {
-		t.Errorf("opt-in adapter path not promoted into the project shared file: %v", got)
 	}
 }
 

@@ -1,31 +1,16 @@
 package run
 
-// This file is the BLIND PRIMARY PANEL: the variable-count first stage of a review.
+// The blind primary panel runs N ordered reviewer seats (1..review.MaxReviewerSeats), each an
+// independent adapter, model and effort. It enforces three rules:
 //
-// A panel is N ordered seats (1..review.MaxReviewerSeats), each an independent
-// (adapter, model, effort) vantage. The count is variable BY CONSTRUCTION — nothing here, in
-// the config schema, or in any surface encodes a particular N, and a panel of one is exactly
-// the historical single-reviewer run (same call ids, same artifacts, same prompts).
-//
-// THE THREE RULES THIS FILE EXISTS TO ENFORCE
-//
-//  1. BLINDNESS. Between its own stabilization rounds a seat sees ONLY its own prior findings.
-//     It never sees another seat's output and never sees host decisions. The enforcement point
-//     is structural, not documentary: `reported` is a seat-LOCAL slice built inside runSeat, and
-//     the `decisions` argument to runSemanticPass is nil for every seat — there is no variable
-//     in scope that could carry a peer's findings into a seat prompt. Host adjudication does not
-//     begin until every seat has completed or halted.
-//
-//  2. NO SILENT DEGRADATION. N seats requested is N seats executed, or the run fails with a
-//     clear reason. Nothing is clamped, dropped, or "best-effort skipped": a seat that cannot
-//     resolve fails config validation before spend; a seat that fails at runtime HALTS the run;
-//     and the executed-roster echo carries one entry per requested seat, including the ones that
-//     halted or never started.
-//
-//  3. HOST-COMPUTED COUNTS. Agreement is arithmetic the host does over which seats reported a
-//     fingerprint. No model is asked to count, and the model-facing schema has no field a count
-//     could ride in — the provenance ledger lives on review.Decision, which is never parsed
-//     from model output.
+//  1. Blindness: between rounds a seat sees only its own prior findings, never another seat's output
+//     or host decisions. runSeat keeps reported local and passes no decisions, and adjudication
+//     starts only after every seat has finished.
+//  2. No silent degradation: every requested seat runs or the run fails with a reason, and the roster
+//     has one entry per requested seat. A capacity failure is recorded as a lost seat instead (see
+//     capacity.go).
+//  3. Host-computed counts: the host counts agreement over fingerprints; no model output carries a
+//     count.
 
 import (
 	"context"
@@ -43,24 +28,14 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// defaultPanelRoundCeiling is the RUN-LEVEL ceiling on total blind-primary rounds when the
-// config does not set one. It is what stops N seats from multiplying the per-seat round cap into
-// an unbounded budget: the default allowance is maxInner rounds per seat, but never more than
-// this in total. It is deliberately >= review.MaxReviewerSeats, so a full-size panel can
-// always run every seat's first round.
+// defaultPanelRoundCeiling caps total blind-primary rounds when config sets no limit, so seats cannot
+// multiply the per-seat cap. It is at least review.MaxReviewerSeats, so every seat can run its first
+// round.
 const defaultPanelRoundCeiling = 64
 
-// seatFanout returns how many seats invoke their model CLI concurrently: every seat at once unless
-// the CALLER asked for fewer, and never below 1 or above n.
-//
-// There is no built-in ceiling. Each seat is a real provider CLI under a long per-call timeout, so
-// how many may run at once is a fact about the operator's machine — RAM and process count for a
-// cloud CLI, loaded weights for a local model — and about their provider rate limits. aimesh knows
-// none of those, so any constant it picked would be a guess binding people it knows nothing about.
-// maxParallel is therefore stated per invocation by whoever is making it, and 0 means "all of them".
-//
-// It bounds PARALLELISM only: every requested seat still runs. (exploremesh's explorerFanout is the
-// same rule for explorers.)
+// seatFanout returns how many seats run concurrently: all n unless maxParallel is a smaller positive
+// number, and never below 1. There is no built-in ceiling, because the right value depends on the
+// caller's machine and provider limits.
 func seatFanout(n, maxParallel int) int {
 	switch {
 	case n < 1:
@@ -72,18 +47,15 @@ func seatFanout(n, maxParallel int) int {
 	}
 }
 
-// panelBudget is the RUN-LEVEL round budget, shared by every seat.
-//
-// Round 1 of every seat is GUARANTEED and never drawn from the pool (the budget is validated to
-// be at least one round per seat), so the budget can only ever shorten stabilization — it can
-// never silently remove a seat. Later rounds draw from the shared pool, so a chatty seat cannot
-// starve the run and N seats cannot multiply the spend without bound.
+// panelBudget is the round budget shared by every seat. Each seat's first round is guaranteed and not
+// drawn from the pool, so the budget only shortens stabilization and never removes a seat.
 type panelBudget struct {
 	mu    sync.Mutex
-	extra int // rounds available BEYOND each seat's guaranteed first round
-	total int // the configured/derived ceiling, for reporting
+	extra int // rounds available beyond each seat's guaranteed first round
+	total int // the configured or derived ceiling, for reporting
 }
 
+// take draws one round from the shared pool, reporting whether one was available.
 func (b *panelBudget) take() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -94,17 +66,11 @@ func (b *panelBudget) take() bool {
 	return true
 }
 
-// newPanelBudget derives the run-level ceiling. An explicit `review.maxPanelRounds` wins; the
-// default is maxInner rounds per seat, capped at defaultPanelRoundCeiling.
-//
-// FAIL-CLOSED: a configured ceiling below the seat count is a CONFIG ERROR before any spend,
-// because it would mean a requested seat could not run even once — silent degradation by budget
-// is still silent degradation.
+// newPanelBudget derives the round budget: review.maxPanelRounds when set, else maxInner rounds per
+// seat capped at defaultPanelRoundCeiling. A budget below the seat count is a config error, because a
+// requested seat could not run at all.
 func newPanelBudget(configured *int, maxInner, seats int) (*panelBudget, error) {
-	total := maxInner * seats
-	if total > defaultPanelRoundCeiling {
-		total = defaultPanelRoundCeiling
-	}
+	total := min(maxInner*seats, defaultPanelRoundCeiling)
 	if configured != nil && *configured > 0 {
 		total = *configured
 	}
@@ -116,13 +82,8 @@ func newPanelBudget(configured *int, maxInner, seats int) (*panelBudget, error) 
 	return &panelBudget{extra: total - seats, total: total}, nil
 }
 
-// withSeatCause stamps a failing seat's OWN actionable cause onto its roster entry.
-//
-// It prefers the LaneFailure, because that is where the clihint Signal was derived once (with the
-// prompt echo subtracted — see meshcore/clihint), and falls back to the error's own text for a
-// failure that produced no LaneFailure at all (a containment breach, a cancellation). The error
-// string is the fallback rather than the primary so the seat's detail and the run's halt message
-// stay the same sentence when both exist.
+// withSeatCause records a failing seat's own cause on its roster entry: the error text as detail, and
+// the LaneFailure's signal and reason code when there is one.
 func withSeatCause(s review.SeatStatus, f *review.LaneFailure, err error) review.SeatStatus {
 	if err == nil {
 		return s
@@ -160,29 +121,23 @@ func seatCauses(roster []review.SeatStatus) map[string]any {
 
 // panelResult is the blind stage's output for one outer cycle.
 type panelResult struct {
-	// findings is the UNION of every seat's findings, in seat order then report order. The
-	// Judge dedups it by fingerprint; nothing is dropped here.
+	// findings is the union of every seat's findings, in seat order; the Judge deduplicates them.
 	findings []review.Finding
-	// shown is the union of files any seat was shown (the apply-safety gate).
+	// shown is the union of files any seat was shown.
 	shown map[string]bool
-	// roster is the executed-roster echo: one entry per REQUESTED seat, in requested order.
+	// roster has one entry per requested seat, in requested order.
 	roster []review.SeatStatus
-	// support maps a finding FINGERPRINT to the seats that reported it — the host-computed
-	// provenance ledger, keyed on the same fingerprint the Judge dedups by, which is what makes
-	// the ledger (and the weak-identity quarantine built on it) survive dedup by construction.
+	// support maps a finding fingerprint to the seats that reported it, keyed like the Judge's
+	// deduplication so it survives it.
 	support map[string][]review.SeatRef
-	// completed lists the seats that ran to a valid result; they are the only seats whose
-	// SILENCE on a finding is meaningful, so they are the dissent denominator.
+	// completed lists seats that returned a valid result; only their silence counts as dissent.
 	completed []review.SeatRef
 	// caveats are the identity caveats collected across seats, in seat order.
 	caveats []review.IdentityCaveat
-	// lost are the seats a CAPACITY failure removed — a provider out of quota, or a wall clock
-	// reached. The panel continued without them at a smaller denominator; see capacity.go for why
-	// that is not the same event as an integrity failure.
+	// lost are seats removed by a capacity failure (quota or wall clock); the panel continued without
+	// them. See capacity.go.
 	lost []LostSeat
-	// withheld are the containment caveats collected across seats (deduped): files a rule
-	// kept out of the reviewed set. Seats copy the same workspace, so the same file is
-	// normally withheld from all of them — the union is what a reader needs, once each.
+	// withheld are containment caveats from every seat, deduplicated.
 	withheld []review.WithheldFile
 }
 
@@ -190,7 +145,7 @@ type panelResult struct {
 type seatOutput struct {
 	status   review.SeatStatus
 	findings []review.Finding
-	// fingerprints is the set of finding fingerprints THIS seat reported (dedup-stable).
+	// fingerprints is the set of finding fingerprints this seat reported.
 	fingerprints map[string]bool
 	shown        map[string]bool
 	caveats      []review.IdentityCaveat
@@ -200,12 +155,9 @@ type seatOutput struct {
 	failedCallID string
 }
 
-// seatCallID is the audit call id for one seat's round.
-//
-// Seat 1 round 1 keeps the BARE cycle call id and its later rounds keep the historical `-iN`
-// suffix, so a panel of one writes exactly the call directories a pre-panel build wrote — that
-// is what makes "a panel of one is today's behavior" a checkable fact (the golden run diffs
-// those very files) rather than a claim.
+// seatCallID returns the audit call id for one seat's round: the bare cycle id for seat 1, an -sN
+// suffix for later seats, and an -iN suffix for rounds after the first. The golden run checks the
+// resulting call directories.
 func seatCallID(base string, seatIdx, round int) string {
 	id := base
 	if seatIdx > 0 {
@@ -217,14 +169,10 @@ func seatCallID(base string, seatIdx, round int) string {
 	return id
 }
 
-// runPanel executes every seat of the blind primary stage CONCURRENTLY (bounded fan-out) and
-// returns the union of their findings plus the provenance ledger and the executed roster.
-//
-// Halt semantics: a seat failure (identity mismatch, adapter failure, containment breach,
-// unparseable output after the corrective retry) halts the RUN — there is no partial-panel
-// "success". When more than one seat fails, the FIRST BY SEAT INDEX wins, never the first by
-// wall clock, so the same panel and the same failures always produce the same halt record. Every
-// seat runs to completion before adjudication either way, so the audit record is complete.
+// runPanel runs every seat concurrently, with bounded fan-out, and returns the union of findings, the
+// provenance ledger and the executed roster. A non-capacity seat failure halts the run; when several
+// seats fail, the lowest seat index wins, so the halt record is deterministic. Every seat runs to
+// completion first.
 func (m *Manager) runPanel(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, seats []review.LaneResolution, auth authority.Set, addressedLines []string, baseCallID string, maxInner int, budget *panelBudget, startedAt time.Time, outcome *review.RunOutcome) (panelResult, error) {
 	fanout := seatFanout(len(seats), req.MaxParallel)
 	_ = run.Event(m.now(), "info", "panel_started", "blind reviewer panel dispatched",
@@ -244,9 +192,8 @@ func (m *Manager) runPanel(ctx context.Context, run *audit.Run, ws *workspace.Ac
 	}
 	wg.Wait()
 
-	// AGGREGATION — single-threaded, in seat order. Every shared-state mutation (the outcome's
-	// failure/caveats, the halt record) happens here, so seat concurrency can never race and the
-	// halt that wins is decided by index rather than by scheduling.
+	// Aggregate single-threaded in seat order, so shared state never races and the winning halt is
+	// decided by index.
 	res := panelResult{shown: map[string]bool{}, support: map[string][]review.SeatRef{}}
 	var haltErr error
 	var haltFailure *review.LaneFailure
@@ -254,16 +201,9 @@ func (m *Manager) runPanel(ctx context.Context, run *audit.Run, ws *workspace.Ac
 	failedSeats := 0
 	for i := range outs {
 		o := outs[i]
-		// EVERY failing seat records its OWN cause on its roster entry before the first-by-index
-		// halt is chosen. The run-level Failure can only carry one seat; a panel that dispatched N
-		// seats and was paid for N failures must not report one of them and drop the rest (the same
-		// rule ResolvePanel follows, one layer later, where the failures have already been paid for).
-		// CAPACITY IS NOT INTEGRITY. A seat that ran out of quota, or hit its wall clock, is a fact
-		// about a billing relationship or a timer — it says nothing about whether the seats that DID
-		// answer were sound. Halting on it would discard everything already paid for, so such a seat
-		// is recorded as LOST and the panel continues at a smaller denominator. An integrity failure
-		// (identity, containment, an unresolvable adapter) still halts: there the run's premises are
-		// broken and no count over the survivors would mean anything. See capacity.go.
+		// Every failing seat records its own cause. A capacity failure (quota, wall clock) says
+		// nothing about the seats that answered, so the seat is recorded as lost and the panel
+		// continues; any other failure halts. See capacity.go.
 		if o.err != nil && IsCapacityFailure(o.failure) {
 			entry := withSeatCause(o.status, o.failure, o.err)
 			entry.ReasonCode = ReasonPanelDegraded
@@ -286,8 +226,7 @@ func (m *Manager) runPanel(ctx context.Context, run *audit.Run, ws *workspace.Ac
 		} else {
 			res.roster = append(res.roster, o.status)
 		}
-		// Before the halt branch: the withheld set is collected from EVERY seat, including one
-		// that halted, so a halted run still records what was kept out of the reviewed set.
+		// Collect withheld files from every seat, including one that halted.
 		res.withheld = appendWithheld(res.withheld, o.withheld...)
 		if o.err != nil {
 			if haltErr == nil {
@@ -304,14 +243,10 @@ func (m *Manager) runPanel(ctx context.Context, run *audit.Run, ws *workspace.Ac
 			res.support[fp] = append(res.support[fp], ref)
 		}
 	}
-	// Seats after the halting one may never have produced a result; label them honestly rather
-	// than leaving them out of the roster.
 	outcome.Withheld = appendWithheld(outcome.Withheld, res.withheld...)
 	if haltErr != nil {
 		_ = run.WriteJSON("panel/roster.json", rosterRecord(run, res.roster))
-		// `failedSeats` and `causes` are logged alongside the winning reasonCode so the audit trail
-		// says how many seats failed and why EACH did — a reader of the event stream alone can then
-		// fix every blocker in one pass instead of re-running to meet the next one.
+		// Log every failing seat's cause, so all of them can be fixed in one pass.
 		_ = run.Event(m.now(), "error", "panel_halted", "a reviewer seat halted the run (no partial-panel success)",
 			map[string]any{
 				"seats": len(seats), "reasonCode": fault.ReasonOf(haltErr),
@@ -328,9 +263,7 @@ func (m *Manager) runPanel(ctx context.Context, run *audit.Run, ws *workspace.Ac
 		outcome.IdentityCaveats = appendIdentityCaveat(outcome.IdentityCaveats, c)
 	}
 	outcome.Panel = mergePanelStatus(outcome.Panel, res.roster)
-	// THE REDUCED DENOMINATOR, stated as loudly as the identity caveats are. Its PRESENCE is the
-	// signal: a consumer never has to compare two counts to notice that the panel it configured is
-	// not the panel that answered.
+	// Report a partial panel explicitly, so a consumer need not compare counts to notice lost seats.
 	if len(res.lost) > 0 {
 		partial := &PartialPanel{
 			Configured: len(seats), Answered: len(res.completed),
@@ -349,13 +282,9 @@ func (m *Manager) runPanel(ctx context.Context, run *audit.Run, ws *workspace.Ac
 	return res, nil
 }
 
-// runSeat runs ONE seat's private stabilization loop.
-//
-// BLINDNESS ENFORCEMENT POINT: `reported` below is seat-local and is fed ONLY from this seat's
-// own findings; the `decisions` argument to runSemanticPass is nil. Nothing in this function's
-// scope can reach another seat's output or the host's decisions, so a seat's later rounds see
-// only what it itself said. Stabilization semantics are the historical ones (approve → stop; a
-// round that adds no new finding → stop) plus the run-level round budget.
+// runSeat runs one seat's private stabilization loop. reported holds only this seat's own findings
+// and no host decisions are passed, which keeps the seat blind. The loop stops when the seat
+// approves, when a round adds no new finding, or when the shared round budget is exhausted.
 func (m *Manager) runSeat(ctx context.Context, run *audit.Run, ws *workspace.Access, req Request, seat review.LaneResolution, seatIdx, seatCount int, auth authority.Set, addressedLines []string, baseCallID string, maxInner int, budget *panelBudget) seatOutput {
 	out := seatOutput{
 		status: review.SeatStatus{
@@ -374,7 +303,7 @@ func (m *Manager) runSeat(ctx context.Context, run *audit.Run, ws *workspace.Acc
 	_ = run.Event(m.now(), "info", "seat_started", "blind reviewer seat dispatched",
 		map[string]any{"seat": seat.SeatID, "index": seatIdx + 1, "of": seatCount, "adapter": seat.Adapter, "model": seat.Model})
 
-	var reported []string // THIS seat's own prior findings — never a peer's, never a host decision
+	var reported []string // this seat's own prior findings only
 	seen := map[string]bool{}
 	for round := 1; round <= maxInner; round++ {
 		if round > 1 && !budget.take() {
@@ -387,9 +316,8 @@ func (m *Manager) runSeat(ctx context.Context, run *audit.Run, ws *workspace.Acc
 		}
 		callID := seatCallID(baseCallID, seatIdx, round)
 		po := m.runSemanticPass(ctx, run, ws, req, seat, adapter, review.RoleReviewer, review.PhaseIterate,
-			auth, addressedLines, reported, nil /* BLIND: no peer output, no host decisions */, callID)
-		// Carried on the halt path too — a file this seat was never shown is a fact about the
-		// run regardless of how the seat ended.
+			auth, addressedLines, reported, nil /* blind: no peer output or host decisions */, callID)
+		// Keep withheld files on the halt path too.
 		out.withheld = appendWithheld(out.withheld, po.withheld...)
 		if po.err != nil {
 			out.status.Status, out.status.ReasonCode = "halted", fault.ReasonOf(po.err)
@@ -400,7 +328,7 @@ func (m *Manager) runSeat(ctx context.Context, run *audit.Run, ws *workspace.Acc
 		out.status.IdentityTier = weakestTier(out.status.IdentityTier, po.identity)
 		if po.caveat != nil {
 			c := *po.caveat
-			c.Role = seat.SeatID // attribute the caveat to the SEAT, not the bare role
+			c.Role = seat.SeatID // attribute the caveat to the seat, not the role
 			out.caveats = append(out.caveats, c)
 		}
 		mergeShown(out.shown, po.shown)
@@ -409,9 +337,8 @@ func (m *Manager) runSeat(ctx context.Context, run *audit.Run, ws *workspace.Acc
 		for _, f := range po.result.Findings {
 			out.findings = append(out.findings, f) // keep all; the Judge dedups
 			out.fingerprints[schema.Fingerprint(f)] = true
-			// Set-stability is keyed WITHOUT kind (schema.StabilityKey): a drifting kind on the
-			// same file+location is the same underlying issue, so it must not read as a "new"
-			// finding and keep this seat's loop spinning.
+			// Stability is keyed without kind, so a drifting kind for the same file and location is
+			// not a new finding.
 			sk := schema.StabilityKey(f)
 			if !seen[sk] {
 				seen[sk] = true
@@ -431,21 +358,10 @@ func (m *Manager) runSeat(ctx context.Context, run *audit.Run, ws *workspace.Acc
 	return out
 }
 
-// attachPanelProvenance writes the HOST-COMPUTED provenance ledger onto each decision.
-//
-// It is computed over the DEDUPED result: the ledger is keyed on the same fingerprint the Judge
-// dedups by, so a finding three seats reported carries three supporting seats on ONE decision. Each
-// SeatRef carries that seat's identity tier, so a reader can see exactly what the support consists of.
-//
-// Nothing here consults model output: agreement is arithmetic over which seats reported the
-// fingerprint, exactly as exploremesh computes corroboration host-side.
-//
-// It does NOT gate on identity. A finding supported only by weak-identity seats was once refused for
-// apply ("weak_identity_only"), and that is gone: identity is recorded, never acted on
-// (../../../../docs/model-identity.md). The refusal presumed we could tell a real model from a claimed
-// one, which the codex echo test showed we cannot — so it withheld fixes for genuine defects on the
-// strength of a tier that could itself be an argument echoed back at us. What a reviewer FOUND, and
-// whether the write path can trace it to evidence in the workspace copy, decide whether it is applied.
+// attachPanelProvenance writes host-computed provenance onto each deduplicated decision: the
+// supporting seats with their identity tiers, the agreement count, the dissenting seats and a
+// consensus label. It does not gate on identity (see docs/model-identity.md): whether a finding is
+// applied depends on its evidence, not on which model reported it.
 func attachPanelProvenance(adj *adjudication.Result, p panelResult) {
 	if len(p.completed) == 0 {
 		return
@@ -460,16 +376,13 @@ func attachPanelProvenance(adj *adjudication.Result, p panelResult) {
 		d.SupportingSeats = append([]review.SeatRef(nil), support...)
 		d.AgreementCount = len(support)
 		d.DissentingSeats = dissenters(p.completed, support)
-		// What the seats that RAN did with it — a label over the two lists above and nothing else.
-		// See dissent.go: a silent seat is not a seat that disagreed, so this is a reading prompt and
-		// never a verdict.
+		// A label over the two lists above; a silent seat is not a disagreeing one (see dissent.go).
 		d.Consensus = consensusOf(len(support), len(d.DissentingSeats))
 	}
 }
 
-// dissenters lists the seats that COMPLETED and did not report the finding. A seat that halted
-// or never started is in neither list: its silence is unknowable, and recording it as dissent
-// would manufacture disagreement out of a failure.
+// dissenters lists seats that completed without reporting the finding. Halted or unstarted seats are
+// excluded, because their silence means nothing.
 func dissenters(completed, support []review.SeatRef) []string {
 	sup := map[string]bool{}
 	for _, r := range support {
@@ -491,8 +404,8 @@ func seatRef(seat review.LaneResolution, tier string) review.SeatRef {
 	return review.SeatRef{SeatID: seat.SeatID, Adapter: seat.Adapter, Model: seat.Model, IdentityTier: tier}
 }
 
-// weakestTier keeps the WEAKEST identity tier a seat produced across its rounds — fail closed,
-// so a seat that verified once and went unknown later is recorded at the weaker tier.
+// weakestTier returns the weaker of two identity tiers, so a seat is recorded at its weakest tier
+// across rounds.
 func weakestTier(a, b string) string {
 	rank := map[string]int{review.SeatIdentityVerified: 2, review.SeatIdentitySelfReported: 1}
 	if a == "" {
@@ -507,9 +420,8 @@ func weakestTier(a, b string) string {
 	return a
 }
 
-// mergePanelStatus folds a cycle's roster into the run-level echo: identity/status come from the
-// latest cycle, while rounds and findings ACCUMULATE across outer cycles (the echo answers "what
-// did this run spend on the panel", which a per-cycle snapshot would understate).
+// mergePanelStatus folds a cycle's roster into the run-level roster: identity and status come from the
+// latest cycle, while rounds and findings accumulate across cycles.
 func mergePanelStatus(prev, cur []review.SeatStatus) []review.SeatStatus {
 	if len(prev) == 0 {
 		return append([]review.SeatStatus(nil), cur...)

@@ -1,8 +1,6 @@
-// Package reviewprompt renders the reviewer prompt — a pure transformation (data
-// in → string out), so it is an Engine activity with no I/O. The Manager reads the
-// bounded workspace snippets (via WorkspaceAccess) and hands them here. The prompt
-// instructs a real local model to emit a schema-valid ReviewerResult JSON object;
-// the enum lists below are kept in lockstep with internal/schema's validators.
+// Package reviewprompt renders the reviewer prompt without I/O. The Manager reads the workspace files
+// and passes them in; the prompt asks the model for a ReviewerResult JSON object whose enum values
+// must match package schema's validators.
 package reviewprompt
 
 import (
@@ -12,9 +10,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// FileSnippet is one WHOLE workspace file shown to the reviewer. The collector does not clip a
-// file or stops early (see workspace.Snippet), so there is no truncation for this prompt to
-// declare — every file it names, it carries in full.
+// FileSnippet is one workspace file shown to the reviewer, carried in full (see workspace.Snippet).
 type FileSnippet struct {
 	Path    string // workspace-relative
 	Content string
@@ -30,22 +26,17 @@ type Input struct {
 	Decisions   []string // prior host decisions (readable) — context for cross_check/verifier
 	Corrective  bool     // true on a schema-failure retry
 	ParserError string   // the previous parse error (corrective only)
-	// RequestSelfReportIdentity, set by the Manager ONLY for weak self-report-strategy adapters (never
-	// for strong-evidence adapters), asks the model to WRAP its JSON answer with a self-reported
-	// model/effort the adapter strips before the strict result schema is parsed. Absent/ignored → the
-	// bare result still parses and identity is recorded unknown (self-report is never required).
+	// RequestSelfReportIdentity asks the model to wrap its answer with a self-reported model and
+	// effort, which the adapter strips before parsing. The Manager sets it only for self-report
+	// adapters; a bare answer still parses, with identity recorded as unknown.
 	RequestSelfReportIdentity bool
-	// Authority is the pre-rendered AUTHORITY CONTEXT block (internal/engine/authority.Render):
-	// the intent these files are judged against, as structurally delimited QUOTED EVIDENCE with
-	// the instruction hierarchy restated. It is rendered ONCE, by that package, and the SAME
-	// string is given to every judging phase — reviewer, cross_check, verifier and the host
-	// adjudicator — so no phase can end up judging a different intent. Empty when the caller
-	// declared no authority, in which case the prompt is byte-identical to what it was before.
+	// Authority is the pre-rendered authority block (authority.Render), given unchanged to every
+	// judging phase so all of them judge the same intent. Empty when no authority was declared.
 	Authority string
 }
 
-// selfReportWrapperInstruction is appended for self-report-strategy adapters: it asks for a wrapper
-// carrying the ACTUAL model/effort, kept OUTSIDE the strict result schema so it can't break parsing.
+// selfReportWrapperInstruction is appended for self-report adapters. It asks for a wrapper carrying
+// the actual model and effort, outside the result schema so it cannot break parsing.
 const selfReportWrapperInstruction = "IDENTITY WRAPPER (this tool cannot report its model any other way):\n" +
 	"- Instead of the bare object above, output ONE JSON object of this shape:\n" +
 	"  { \"reviewmeshIdentity\": { \"model\": \"<the model you are ACTUALLY running>\", \"effort\": \"<actual effort>\", \"source\": \"self_report\" },\n" +
@@ -65,11 +56,9 @@ func purpose(role review.Role) string {
 	}
 }
 
-// allowed enum values — must match internal/schema (validKind/validSeverity). The
-// schema also accepts the verdicts `approve_with_suggestions` and `block`, but the
-// semantic_iterate prompt INTENTIONALLY narrows verdict to the two meaningful for a
-// reviewer pass (approve | request_changes) to keep small local models on track;
-// the parser still accepts all four.
+// Allowed enum values, which must match package schema. The prompt offers only the verdicts approve
+// and request_changes to keep small local models on track; the parser also accepts
+// approve_with_suggestions and block.
 const (
 	allowedKinds    = "pass | fail | ambiguity | inconsistency | gap | risk"
 	allowedSeverity = "info | low | medium | high | critical"

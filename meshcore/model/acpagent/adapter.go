@@ -1,16 +1,11 @@
-// Package acpagent is a GENERIC model adapter that drives an ACP-capable CLI as a client
-// over stdio, reusing meshcore's ACP framing (meshcore/acp) as the transport. One code path
-// supports every CLI that exposes an ACP server — Cursor (`agent acp`), Copilot
-// (`copilot --acp --stdio`), Devin (`devin acp`), Gemini (`gemini --acp`), OpenCode
-// (`opencode acp`), Qwen (`qwen --acp`) — parameterized only by a launch Recipe, so a new
-// ACP CLI is one map entry, not a new package.
+// Package acpagent is a model adapter that drives any ACP-capable CLI as a client over stdio, using
+// meshcore/acp framing. Each instance names the CLI and the arguments that start its ACP server (for
+// example `agent acp`, `copilot --acp --stdio` or `gemini --acp`), so one code path serves every ACP CLI.
 //
-// Per call it: spawns `<bin> <acp-args>`, `initialize`s, opens a `session/new`, switches the
-// session to a read-only mode (plan/ask) so the reviewer cannot edit, optionally selects the
-// requested model, sends the prompt, and aggregates the streamed `agent_message_chunk`s into
-// the reviewer payload. When the session authoritatively reports its active model
-// (`currentModelId`) that becomes a cli_status-tier verified identity — stronger than a
-// one-shot CLI's self-report. See docs/adapters.md and docs/acp.md.
+// Per call it spawns the CLI, sends `initialize` and `session/new`, switches the session to a read-only
+// mode (ask or plan), selects the requested model when offered, sends the prompt, and aggregates the
+// streamed `agent_message_chunk` updates. A session that reports its active model (`currentModelId`)
+// yields cli_status identity evidence. See docs/adapters.md and docs/acp.md.
 package acpagent
 
 import (
@@ -37,10 +32,9 @@ type Recipe struct {
 	ACPArgs []string // args that start the CLI's ACP server over stdio, e.g. {"acp"} / {"--acp"} / {"--acp","--stdio"}
 }
 
-// Instance is a fully-specified, USER-DEFINED ACP adapter to run: its Name (adapter key), the launch
-// binary (Path override, else Detect looked up on PATH), and the Args that start that CLI's ACP server
-// over stdio. There is NO fixed catalog — ACP is an open protocol, so instances come from config
-// (meshcore/config/adapterlocations `acpAdapters`), and one generic Adapter drives any of them.
+// Instance is a user-defined ACP adapter: its Name, the launch binary (Path, else Detect on PATH), and
+// the Args that start the CLI's ACP server over stdio. Instances come from configuration
+// (meshcore/config/adapterlocations `acpAdapters`).
 type Instance struct {
 	Name   string
 	Detect string
@@ -75,10 +69,8 @@ func New(r Recipe, path string, timeout time.Duration) *Adapter {
 	return &Adapter{Recipe: r, Path: path, Timeout: timeout}
 }
 
-// Registry builds one runnable ACP adapter per CONFIG-DEFINED instance, keyed by name — the ACP-side
-// counterpart to shell.Registry, but driven by user-supplied instances rather than a fixed catalog.
-// Both apps build the instance set from meshcore/config/adapterlocations and pass it here. A missing
-// Detect falls back to the instance name for PATH lookup (used only when Path is empty).
+// Registry builds one ACP adapter per configured instance, keyed by name. A missing Detect falls back
+// to the instance name for PATH lookup when Path is empty.
 func Registry(instances map[string]Instance, timeout time.Duration) map[string]model.Adapter {
 	reg := make(map[string]model.Adapter, len(instances))
 	for name, in := range instances {
@@ -173,9 +165,8 @@ func (a *Adapter) Invoke(ctx context.Context, c model.Call) (res model.Result, e
 		defer func() { emitDebug(w, a.Recipe.Name, bin, a.Recipe.ACPArgs, res, err, time.Since(start)) }()
 	}
 
-	// Spawn + handshake (initialize → session/new) under a startup-deadline watchdog. cwd is the
-	// contained copy, or a fresh empty temp dir (never the process's real cwd) so an agentic CLI can't
-	// wander — the task content is always inline in the prompt.
+	// Spawn and handshake under a startup watchdog. The session cwd is the contained copy or a fresh
+	// empty temp dir, never the process cwd; the prompt content is always inline.
 	cwd, cleanupCwd := resolveCwd(c.CopyRoot)
 	defer cleanupCwd()
 
@@ -196,12 +187,12 @@ func (a *Adapter) Invoke(ctx context.Context, c model.Call) (res model.Result, e
 	// Identity: the session's active model (authoritative), normalized to its base slug.
 	actualModel := stripParams(sn.Models.CurrentModelID)
 
-	// 3. read-only mode (containment is still the backstop).
+	// Switch to a read-only mode; containment remains the backstop.
 	if modeID := pickReadOnlyMode(sn.Modes.AvailableModes); modeID != "" {
 		_, _ = cl.call("session/set_mode", map[string]any{"sessionId": sn.SessionID, "modeId": modeID}, nil)
 	}
 
-	// 4. select the requested model when the session exposes a matching one.
+	// Select the requested model when the session offers a match.
 	if want := string(c.ModelArg); want != "" && len(sn.Models.AvailableModels) > 0 {
 		if pick := pickModel(sn.Models.AvailableModels, want); pick != "" {
 			if _, err := cl.call("session/set_model", map[string]any{"sessionId": sn.SessionID, "modelId": pick}, nil); err == nil {
@@ -210,7 +201,7 @@ func (a *Adapter) Invoke(ctx context.Context, c model.Call) (res model.Result, e
 		}
 	}
 
-	// 5. prompt — aggregate the assistant's message chunks into the reviewer payload.
+	// Send the prompt and aggregate the assistant's message chunks.
 	var sb strings.Builder
 	if _, err := cl.call("session/prompt", map[string]any{
 		"sessionId": sn.SessionID,
@@ -226,10 +217,8 @@ func (a *Adapter) Invoke(ctx context.Context, c model.Call) (res model.Result, e
 	full := sb.String()
 	res = model.Result{
 		Stdout: []byte(full),
-		// Agentic ACP CLIs narrate ("Searching the codebase…") and may fence their answer;
-		// surface the embedded JSON object as the semantic Payload so a strict consumer gets a
-		// clean body while Stdout keeps the full turn for audit. Nil when there is no JSON object
-		// (a non-JSON use falls back to Stdout).
+		// Agentic ACP CLIs narrate and may fence their answer, so the embedded JSON object becomes
+		// Payload while Stdout keeps the full turn for audit. Payload is nil without a JSON object.
 		Payload:     extractJSONObject(full),
 		Stderr:      stderr.Bytes(),
 		ExitCode:    0,
@@ -325,8 +314,8 @@ type acpSession struct {
 	sn     sessionNewResult
 }
 
-// Close ends the session: a fire-and-forget `shutdown` NOTIFICATION (no id, no read — a blocking
-// shutdown CALL could hang on a CLI that doesn't implement it), then EOF stdin, kill the group, reap.
+// Close ends the session: a `shutdown` notification (a request could hang on a CLI that does not
+// implement it), then stdin EOF, a process-group kill, and reaping.
 func (s *acpSession) Close() {
 	_ = s.cl.notify("shutdown", nil)
 	_ = s.stdin.Close()
@@ -343,9 +332,8 @@ func initializeParams() map[string]any {
 	}
 }
 
-// resolveCwd returns the session working directory and a cleanup func. A contained copy is used
-// directly (no temp); otherwise a fresh EMPTY temp dir (never the process's real cwd) so an agentic
-// CLI can't wander — removed by the returned func.
+// resolveCwd returns the session working directory and a cleanup func: the contained copy when given,
+// otherwise a fresh empty temp dir, removed by the cleanup func.
 func resolveCwd(copyRoot string) (string, func()) {
 	if copyRoot != "" {
 		return copyRoot, func() {}
@@ -357,12 +345,11 @@ func resolveCwd(copyRoot string) (string, func()) {
 	return wd, func() {}
 }
 
-// openSession spawns the CLI and completes the handshake (initialize → session/new) under a
-// startup-deadline WATCHDOG. The process stays bound to the OUTER ctx (so a real prompt can run for the
-// full Timeout); a separate short deadline arms an AfterFunc that kills the process group if the
-// handshake stalls — the signature of a first-run login/folder-trust prompt — disarmed the instant
-// session/new returns so it can never affect the subsequent prompt. Returns the live session, the
-// classified failure signal (if any), and an error; on error nothing is left running.
+// openSession spawns the CLI and completes the handshake (initialize, session/new) under a startup
+// watchdog. The process is bound to ctx, so a prompt can use the full Timeout; the watchdog kills the
+// process group if the handshake stalls, as a first-run login or folder-trust prompt does, and is
+// disarmed once session/new returns. It returns the session, any classified failure signal, and an
+// error; on error nothing is left running.
 func (a *Adapter) openSession(ctx context.Context, bin, cwd string, stderrCap int) (*acpSession, clihint.Signal, error) {
 	cmd := exec.CommandContext(ctx, bin, a.Recipe.ACPArgs...)
 	cmd.Env = model.HardenedEnv()
@@ -445,10 +432,9 @@ func (a *Adapter) failResult(ctx context.Context, stderr *cappedBuffer, e error)
 	}
 }
 
-// Probe implements model.Prober: a bounded ACP handshake (spawn → initialize → session/new) with NO
-// prompt and NO tokens, reusing openSession so it exercises the exact path a real call takes. It always
-// runs in a fresh empty temp cwd (never the user's tree). Diagnostic only — success does not prove a
-// subsequent real prompt won't block on an approval the handshake never reaches.
+// Probe implements model.Prober with a bounded ACP handshake through openSession, in a fresh empty temp
+// dir, sending no prompt. Success does not prove a real prompt will not block on an approval the
+// handshake never reaches.
 func (a *Adapter) Probe(ctx context.Context) model.ProbeResult {
 	bin, err := a.resolveBinary()
 	if err != nil {
@@ -477,12 +463,9 @@ func stripParams(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// pickReadOnlyMode chooses the read-only session mode that best fits a one-shot Q&A/review over
-// INLINE content. "ask" (pure question-answering, no edits AND no command/tool execution) is
-// preferred over "plan": both prevent edits, but "plan" leaves the agent free to behave like a
-// coding assistant — searching the workspace and narrating a plan instead of answering — whereas
-// "ask" keeps it a chat responder that returns the requested payload. Containment is the backstop
-// regardless.
+// pickReadOnlyMode chooses a read-only session mode, preferring "ask" over "plan": both prevent edits,
+// but "plan" lets the agent search the workspace and narrate a plan instead of answering. Containment
+// is the backstop either way.
 func pickReadOnlyMode(modes []acpMode) string {
 	have := make(map[string]bool, len(modes))
 	for _, m := range modes {

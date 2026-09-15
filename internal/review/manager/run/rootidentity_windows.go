@@ -2,21 +2,10 @@
 
 package run
 
-// See rootidentity_unix.go for what this is and why it exists.
-//
-// Windows DOES have a durable identity — volume serial number plus the 64-bit file index — but
-// `fs.FileInfo.Sys()` does not carry it: that returns a `*syscall.Win32FileAttributeData`, which
-// holds timestamps, attributes and size, and no index. The identity is only reachable from an OPEN
-// HANDLE, so this build opens one rather than reporting no key.
-//
-// Reporting no key here was not a neutral choice. It disabled the durable check in
-// `BindWorkspace`, and — because `os.Stat` on Windows defers loading the file index to a lazy
-// `loadFileId` that reopens BY PATH the first time `os.SameFile` is called — it also made the
-// in-process comparison in `verifyAgainst` re-resolve the path instead of comparing the captured
-// object. Both ends of the report→apply binding therefore rested on the canonical path plus the
-// content pins, and a substituted directory reached by the same path with byte-identical content
-// satisfies both. The first native Windows run caught exactly that: a swapped workspace was accepted
-// with no reason code. Capturing the key eagerly is what closes it.
+// On Windows the durable identity is the volume serial number plus the 64-bit file index.
+// fs.FileInfo.Sys() does not carry the index, so it is read from an open handle. Capturing it eagerly
+// matters: os.SameFile loads the index lazily by path, so it cannot detect a directory swapped in under
+// the same path (see WorkspaceIdentity.Key).
 
 import (
 	"fmt"
@@ -24,14 +13,11 @@ import (
 	"syscall"
 )
 
-// rootIdentityKey returns the durable volume+file-index key for the object at path, or "" if it
-// cannot be opened. The FileInfo is unused here — Windows does not expose the index through it —
-// and is taken for a signature the unix build can also satisfy.
+// rootIdentityKey returns the volume and file-index key for the object at path, or "" if it cannot be
+// opened. The FileInfo is unused; it keeps the signature shared with the Unix build.
 //
-// FILE_FLAG_BACKUP_SEMANTICS is required: without it CreateFile refuses to open a DIRECTORY, and a
-// workspace root is always a directory. Access is 0 (metadata only), so this neither reads the
-// directory nor needs read permission on it, and the share mode is fully permissive so that merely
-// identifying the root cannot make a concurrent write, rename or delete fail.
+// FILE_FLAG_BACKUP_SEMANTICS is needed to open a directory. Access 0 reads only metadata, and the fully
+// permissive share mode keeps concurrent writes, renames and deletes from failing.
 func rootIdentityKey(path string, _ fs.FileInfo) string {
 	if path == "" {
 		return ""

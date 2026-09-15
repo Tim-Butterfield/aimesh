@@ -28,9 +28,8 @@ type rpcMessage struct {
 	Error   *rpcError       `json:"error,omitempty"`
 }
 
-// sessionUpdate is one streamed `session/update` payload. We only consume the
-// assistant's message text (agent_message_chunk); thought chunks and other update
-// kinds are ignored for the review payload.
+// sessionUpdate is one streamed `session/update` payload. Only the assistant's message text
+// (agent_message_chunk) is consumed.
 type sessionUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 	Content       struct {
@@ -39,10 +38,9 @@ type sessionUpdate struct {
 	} `json:"content"`
 }
 
-// client is a minimal synchronous JSON-RPC 2.0 client over meshcore's ACP framer. It
-// issues one outstanding request at a time (the review flow is strictly sequential),
-// pumping interleaved notifications and auto-answering agent→client requests so the
-// agent never blocks waiting on a client it drives read-only.
+// client is a minimal synchronous JSON-RPC 2.0 client over an ACP framer. It has one outstanding
+// request at a time, pumping notifications and answering agent-to-client requests so the agent never
+// blocks on its read-only client.
 type client struct {
 	fr   acp.Framer
 	next int
@@ -124,9 +122,9 @@ func (c *client) call(method string, params any, onUpdate func(sessionUpdate)) (
 	}
 }
 
-// answerRequest replies to an agent→client request so the agent proceeds. The client is a
-// read-only reviewer: it advertised no filesystem/terminal capability and grants no tool
-// permission, so it cancels permission prompts and refuses any other client-side method.
+// answerRequest replies to an agent-to-client request so the agent proceeds. The client advertised no
+// filesystem or terminal capability and grants no tool permission, so it cancels permission prompts
+// and refuses other methods.
 func (c *client) answerRequest(m rpcMessage) {
 	switch m.Method {
 	case "session/request_permission":

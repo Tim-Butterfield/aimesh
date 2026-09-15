@@ -135,7 +135,7 @@ func TestPreview_ReportsTheSameExclusions(t *testing.T) {
 	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
 	writeFile(t, filepath.Join(root, ".vscode", "mcp.json"), "{}\n")
 
-	p, err := PreviewPayload(root)
+	p, err := PreviewPayloadWith(root, false)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}

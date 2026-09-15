@@ -6,14 +6,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/shell"
 )
 
-// TestAdapterDisplayName_EveryImplementedAdapter proves the Go-owned projection gives a readable
-// product name for each implemented adapter, and that the raw KEY stays stable/distinct from the
-// display name (the SPA renders the display name; the key stays canonical in config/API/testids).
-//
-// It ENUMERATES shell.Recipes() rather than a hand-written list, per the repo's discover-don't-hardcode
-// rule: a frozen list silently stops covering adapters added later. (It did — `cursor-cli` shipped as a
-// recipe without a display name, so reviewmesh rendered "Cursor Cli" from the key fallback while
-// exploremesh rendered "Cursor". This test now fails until a new recipe gets a real product name.)
+// TestAdapterDisplayName_EveryImplementedAdapter checks that every implemented adapter has a readable
+// product name distinct from its key. It enumerates shell.Recipes(), so a new recipe without a product
+// name fails here.
 func TestAdapterDisplayName_EveryImplementedAdapter(t *testing.T) {
 	want := map[string]string{
 		"codex-cli":   "Codex",

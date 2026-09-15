@@ -1,16 +1,15 @@
-// Package config is the ConfigAccess layer: it loads the layered configuration
-// (shipped seed → user → project → invocation override) and exposes it for the
-// Resolver. The seed ships as a Go literal; override files load as YAML
-// (gopkg.in/yaml.v3) or JSON, chosen by file extension. Unknown struct fields are
-// rejected (strict), while free map keys (profile/adapter/catalog/lane names) are
-// allowed.
+// Package config loads the layered review configuration (shipped seed, user, project, invocation
+// override) and resolves it into run plans. Override files are YAML or JSON by extension and are
+// parsed strictly: unknown struct fields are rejected, while map keys are free.
 package config
 
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 
 	"github.com/Tim-Butterfield/aimesh/internal/review"
@@ -21,10 +20,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ConfigPatch and SetOp are re-exported from meshcore's domain-free config store so existing
-// reviewmesh code (setup/engine) keeps using `config.ConfigPatch`/`config.SetOp` unchanged. The
-// mechanism (patch apply, atomic write, validated load) lives in meshcore/config; this package
-// supplies the typed Config schema + its validator.
+// ConfigPatch and SetOp re-export meshcore's domain-free config store types. The store implements
+// patch apply, atomic write and validated load; this package supplies the typed schema and validator.
 type (
 	ConfigPatch = store.Patch
 	SetOp       = store.SetOp
@@ -40,67 +37,39 @@ type Config struct {
 	Defaults       Defaults                `json:"defaults"`
 	Surfaces       Surfaces                `json:"surfaces"`
 	Review         Review                  `json:"review"`
-	// NOTE: this struct is the WHOLE accepted schema. Strict parsing rejects anything else, on
-	// purpose — reviewmesh never accepts-and-ignores a setting. Reserved-for-later sections
-	// (`policy`, `validation`, `containment`, `audit`, `timeouts`) were removed rather than parsed
-	// into inert free maps: a knob that silently does nothing is worse than an honest load error.
-	// Re-add a section here only together with the code that reads it.
-	//
-	// Two keys survived that rule by accident and have since been removed on the same grounds:
-	// `defaults.autoDetect` and `profiles.<name>.lanes.<role>.optional`. Both parsed, both merged
-	// across layers, and nothing anywhere read either one — so setting them looked like configuring
-	// something. They now fail strict parsing like any other unknown field. If either concept is
-	// wanted, it comes back with the code that reads it, not before.
+	// This struct is the whole accepted schema. Strict parsing rejects anything else, so a setting
+	// is never accepted and ignored; add a section only together with the code that reads it.
 }
 
-// Review holds iteration/convergence caps. Pointers so an explicit value
-// (including 0) is distinguishable from omission during merge. Both fields are
-// enforced by the review loop (inner reviewer passes / outer cycles).
+// Review holds iteration and convergence caps. The fields are pointers so an explicit value,
+// including 0, is distinguishable from omission during merge.
 type Review struct {
 	MaxInnerIterations *int `json:"maxInnerIterations,omitempty"`
 	MaxOuterCycles     *int `json:"maxOuterCycles,omitempty"`
-	// MaxPanelRounds is the RUN-LEVEL ceiling on the TOTAL number of blind-primary rounds a
-	// single outer cycle may spend across ALL panel seats — the knob that stops N seats from
-	// multiplying maxInnerIterations into an unbounded budget. Unset (the shipped default) means
-	// maxInnerIterations rounds per seat, capped in code; a panel of one therefore gets exactly
-	// maxInnerIterations, i.e. the historical inner loop unchanged. A value below the seat count
-	// is a CONFIG ERROR: every requested seat must be able to run at least one round, since a
-	// budget that quietly drops a seat is still silent degradation.
+	// MaxPanelRounds caps the total blind-primary rounds one outer cycle may spend across all panel
+	// seats. Unset means maxInnerIterations rounds per seat, capped in code. A value below the seat
+	// count is a configuration error, because every requested seat must run at least one round.
 	MaxPanelRounds *int `json:"maxPanelRounds,omitempty"`
 }
 
-// boolPtr/intPtr are helpers for optional scalar config fields (nil = unspecified,
-// so a merge keeps the base value rather than zeroing it — the merge-safety fix).
-func boolPtr(b bool) *bool { return &b }
-func intPtr(i int) *int    { return &i }
-
-// Profile is a runtime profile (a named bundle of lane assignments).
+// Profile is a runtime profile: a named bundle of lane assignments.
 type Profile struct {
 	Description       string          `json:"description,omitempty"`
 	AdapterPreference []string        `json:"adapterPreference,omitempty"`
 	Lanes             map[string]Lane `json:"lanes"`
-	// Reviewers is the ORDERED blind-primary PANEL: 1..review.MaxReviewerSeats seats, each
-	// an independent (adapter, model, effort) vantage that reviews blind and in parallel. The
-	// count is variable BY CONSTRUCTION — this is a slice, not a fixed set of slots, and no
-	// count is privileged anywhere.
+	// Reviewers is the ordered blind-primary panel of 1..review.MaxReviewerSeats seats, each an
+	// independent (adapter, model, effort) vantage.
 	//
-	// MIGRATION / SPELLING RULE: `lanes.reviewer` is accepted as SUGAR for a one-seat panel and
-	// is normalized to `reviewers[0]` on read (ReviewerSeats). A single config layer that names
-	// BOTH spellings for the same profile is a CONFIG ERROR (validateProfileSpelling) — there
-	// must never be a question of which one won. Across layers there is no ambiguity either: an
-	// override layer that supplies one spelling REPLACES the other (mergeProfile), so the
-	// effective config carries exactly one.
-	//
-	// cross_check / verifier / author_remediator stay in `lanes`: they are distinguished single
-	// phase lanes (informed-vs-blind, applyable-vs-report-only), not seats.
+	// `lanes.reviewer` is accepted as a one-seat panel and normalized by ReviewerSeats. Naming both
+	// spellings in one layer is a configuration error (validateProfileSpelling); across layers, the
+	// higher layer's spelling replaces the other (mergeProfile). cross_check, verifier and
+	// author_remediator stay in Lanes because they are single phase lanes, not seats.
 	Reviewers []Lane `json:"reviewers,omitempty"`
 }
 
-// ReviewerSeats returns the profile's ordered blind-primary panel, normalizing the legacy
-// spelling: an explicit `reviewers` list when present, else the single `lanes.reviewer` as a
-// panel of one, else nil (no primary lane configured at all). This is THE accessor — no caller
-// reads `lanes.reviewer` directly to decide what the primary stage is, so the migration cannot
-// be half-applied.
+// ReviewerSeats returns the profile's ordered blind-primary panel: the `reviewers` list when
+// present, else `lanes.reviewer` as a panel of one, else nil. Callers use it rather than reading
+// `lanes.reviewer` directly.
 func (p Profile) ReviewerSeats() []Lane {
 	if len(p.Reviewers) > 0 {
 		out := make([]Lane, len(p.Reviewers))
@@ -116,12 +85,9 @@ func (p Profile) ReviewerSeats() []Lane {
 // HasPanelSpelling reports whether this profile uses the explicit `reviewers` spelling.
 func (p Profile) HasPanelSpelling() bool { return len(p.Reviewers) > 0 }
 
-// Lane is one role's assignment within a profile. There is deliberately no `optional` flag: it used
-// to parse and merge here and was read by nothing, so a config that set it was configuring nothing.
-// Whether a lane runs is decided by PRESENCE — a profile that defines no `cross_check` lane simply
-// does not run that phase (the run records a `lane_skipped` event saying so), while the required
-// roles fail resolution when they are absent. A boolean saying "this one may be missing" adds
-// nothing to a map whose keys already say which lanes exist.
+// Lane is one role's assignment within a profile. Whether a lane runs is decided by its presence:
+// a profile with no `cross_check` lane skips that phase, while a missing required role fails
+// resolution.
 type Lane struct {
 	Execution string `json:"execution"` // "host" | "adapter"
 	Adapter   string `json:"adapter,omitempty"`
@@ -136,22 +102,15 @@ type CatalogEntry struct {
 	Effort         string `json:"effort,omitempty"`
 	DisplayName    string `json:"displayName,omitempty"`
 	Authoritative  *bool  `json:"authoritative,omitempty"` // *bool: merge-safe
-	// AdapterDefault marks this entry as an ADAPTER DEFAULT/fallback (not a saved model
-	// preset). The web-UI lane editor projects flagged entries under "Adapter default" —
-	// separate from user/discovered "saved models" — so a fallback is never rendered as a
-	// saved preset. It does NOT affect resolution (a lane referencing the entry resolves the
-	// same either way). *bool so user/project layers can override the seed truth (set false
-	// to reclassify a default as a saved model). INVARIANT (this build): an AdapterDefault
-	// entry maps a SINGLE adapter — true of every seed default and every discovered/manual
-	// entry the editor materializes; a per-AdapterModel marker would be the move if
-	// multi-adapter defaults ever arise.
+	// AdapterDefault marks the entry as an adapter's fallback model rather than a saved model, so
+	// views list it separately. It does not affect resolution. An adapter-default entry maps a
+	// single adapter.
 	AdapterDefault *bool                   `json:"adapterDefault,omitempty"` // *bool: merge-safe
 	Adapters       map[string]AdapterModel `json:"adapters"`
 }
 
-// IsAdapterDefault reports whether this catalog entry is an adapter default/fallback
-// (default false). The web-UI lane editor uses it to project the entry under "Adapter
-// default" rather than as a saved-model preset; it does not affect resolution.
+// IsAdapterDefault reports whether this catalog entry is an adapter's fallback model (default
+// false). It does not affect resolution.
 func (c CatalogEntry) IsAdapterDefault() bool { return c.AdapterDefault != nil && *c.AdapterDefault }
 
 // AdapterModel is the per-adapter argument for a catalog entry.
@@ -160,17 +119,12 @@ type AdapterModel struct {
 	Effort   string `json:"effort,omitempty"`
 }
 
-// Adapter is per-adapter capability metadata. It is deliberately small: the runnable half of an
-// adapter (its probe binary name, argv, identity extraction, effort handling) is CODE-owned — a
-// meshcore shell recipe or the generic ACP adapter — so config carries only what config can
-// actually change. There is deliberately no `detect` probe name, `defaultAuthoritative` fallback or
-// `needsCapture` provenance marker here: none would be read by anything, and the
-// concepts they name are owned elsewhere (recipe `Detect`, per-catalog-entry `authoritative`, and
-// the per-recipe capture status in docs/adapters.md + the spec-only projection in views).
+// Adapter is per-adapter capability metadata. The runnable half of an adapter (binary name, argv,
+// identity extraction, effort handling) is owned by code in a meshcore shell recipe or the generic
+// ACP adapter, so configuration carries only what it can change.
 type Adapter struct {
-	// Path is the adapter binary location. It is populated ONLY from the shared
-	// `.aimesh/adapters.yaml` layers (LoadLayered clears any path a config layer carried), and is
-	// what reaches the runnable registry.
+	// Path is the adapter binary location. It comes only from the shared `.aimesh/adapters.yaml`
+	// layers; LoadLayered clears any path a config layer carried.
 	Path          string `json:"path,omitempty"`
 	ModelIdentity string `json:"modelIdentity"`
 	Enabled       *bool  `json:"enabled,omitempty"` // nil = enabled
@@ -179,10 +133,7 @@ type Adapter struct {
 // IsEnabled reports whether the adapter is enabled (default true).
 func (a Adapter) IsEnabled() bool { return a.Enabled == nil || *a.Enabled }
 
-// Defaults holds resolution defaults. Both fields are consulted only when `defaultProfile` is
-// empty. There is deliberately no `autoDetect`: it parsed and merged here and was read by nothing —
-// adapter detection is a `setup`/`doctor` action a human runs, never a config-driven behavior — so
-// it is rejected rather than accepted-and-ignored.
+// Defaults holds resolution defaults, consulted only when `defaultProfile` is empty.
 type Defaults struct {
 	AdapterPreference []string          `json:"adapterPreference"`
 	ProfileForAdapter map[string]string `json:"profileForAdapter"`
@@ -193,39 +144,28 @@ type Defaults struct {
 // `--allow-writes` launch grant, so entries for them here have no effect.
 type Surfaces struct {
 	DefaultModeBySurface map[string]string `json:"defaultModeBySurface"`
-	// CapabilitiesBySurface grants named POLICY CAPABILITIES to a surface. The write-authority ceiling
-	// a surface gets is a FUNCTION of this config (see SurfaceCeiling), so granting a capability RAISES
-	// the ceiling instead of stepping around it. The only capability is CapabilityAllowRemediate.
+	// CapabilitiesBySurface grants named policy capabilities to a surface. A capability raises the
+	// surface's write ceiling (see SurfaceCeiling). The only capability is CapabilityAllowRemediate.
 	CapabilitiesBySurface      map[string][]string `json:"capabilitiesBySurface,omitempty"`
 	DegradeWhenModeUnavailable *bool               `json:"degradeWhenModeUnavailable,omitempty"` // *bool: merge-safe
 }
 
-// CapabilityAllowRemediate is the policy capability that lets a surface WRITE as the result of a
-// review: it raises that surface's write-authority ceiling to `apply`. Without it, a surface whose
-// default mode is `report` (the shipped `ci` entry) cannot reach patch/apply however the request is
-// spelled.
+// CapabilityAllowRemediate raises a surface's write ceiling to `apply`. Without it, a surface whose
+// configured mode is `report` (the shipped `ci` entry) cannot reach patch or apply.
 const CapabilityAllowRemediate = "allowRemediate"
 
 // HasCapability reports whether `surface` has been granted `capability`.
 func (s Surfaces) HasCapability(surface, capability string) bool {
-	for _, c := range s.CapabilitiesBySurface[surface] {
-		if c == capability {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.CapabilitiesBySurface[surface], capability)
 }
 
-// SurfaceCeiling is the write-authority ceiling for a surface: its configured default mode,
-// RAISED to `apply` when the surface holds CapabilityAllowRemediate. A surface with no configured
-// entry resolves to `apply` — the ceiling is a config statement, and an absent statement is not a
-// restriction (a surface that must fail closed, like `ci`, ships with an explicit `report` entry).
+// SurfaceCeiling returns the write ceiling for a surface: its configured mode, raised to `apply` when
+// the surface holds CapabilityAllowRemediate. A surface with no entry resolves to `apply`; `ci` ships
+// with an explicit `report` entry.
 //
-// The agent surfaces (`acp`, `mcp`) always resolve to `apply`, and a config entry for them is ignored:
-// those servers read no configuration and gate writes with their own `--allow-writes` launch grant.
-//
-// It is the ONE evaluation point: resolution, the surfaces, and the remediation path all read the
-// ceiling from here, so no two of them can disagree about what a config permits.
+// The agent surfaces (`acp`, `mcp`) always resolve to `apply` and ignore configuration; they gate
+// writes with their `--allow-writes` launch grant. Resolution, the surfaces and remediation all read
+// the ceiling from here.
 func (c Config) SurfaceCeiling(surface string) review.Mode {
 	if IsAgentSurface(surface) {
 		return review.ModeApply
@@ -244,9 +184,8 @@ func (c Config) SurfaceCeiling(surface string) review.Mode {
 // authority comes from their launch arguments rather than from configuration.
 func IsAgentSurface(surface string) bool { return surface == "acp" || surface == "mcp" }
 
-// WithSurfaceCapability returns a COPY of c with `capability` granted to `surface`. It copies the
-// capability map rather than mutating it, so a grant cannot leak into a shared config snapshot other
-// components are reading.
+// WithSurfaceCapability returns a copy of c with capability granted to surface. The capability map
+// is copied so the grant cannot leak into a shared config snapshot.
 func WithSurfaceCapability(c Config, surface, capability string) Config {
 	if c.Surfaces.HasCapability(surface, capability) {
 		return c
@@ -260,12 +199,9 @@ func WithSurfaceCapability(c Config, surface, capability string) Config {
 	return c
 }
 
-// ExampleProfiles returns the opt-in / smoke profile definitions that are NOT part of the
-// shipped seed inventory (the seed ships only `default`). A user creates any of them in the web
-// UI's New-profile dialog or by copying/editing `default`; `fully-local-ollama` is additionally
-// seedable via `setup --profile fully-local-ollama` into a fresh config. They are also referenced
-// by docs as examples and used by tests — they never appear as shipped runtime profile inventory
-// in the web UI or `Default()`, so the Profiles list shows only what the user actually created.
+// ExampleProfiles returns opt-in and smoke profile definitions that are not part of the shipped seed.
+// A user creates one by copying or editing `default`; `fully-local-ollama` can also be seeded into a
+// fresh config with `setup --profile fully-local-ollama`. Docs and tests use them as examples.
 func ExampleProfiles() map[string]Profile {
 	return map[string]Profile{
 		// Fully local, no cloud: every lane uses the Ollama adapter. Model tag from
@@ -343,63 +279,43 @@ func ExampleProfile(name string) (Profile, bool) {
 	return p, ok
 }
 
-// ProfileNotFoundGuidance returns a trailing guidance clause (leading " — …", or "") when a
-// missing profile name is one of the EXAMPLE profiles (which the seed does not ship). It turns a
-// bare "profile not found" into an actionable message pointing at how to create it, so legacy
-// `--profile <example>` / `defaultProfile: <example>` usages migrate gracefully.
+// ProfileNotFoundGuidance returns a trailing clause (" — …") explaining how to create a missing
+// profile when name is one of the example profiles, or "" otherwise.
 func ProfileNotFoundGuidance(name string) string {
 	if _, ok := ExampleProfiles()[name]; !ok {
 		return ""
 	}
-	// The creation route that always works is copying/editing `default` in the config file.
-	// `fully-local-ollama` is additionally seedable via the CLI into a FRESH config; a plain
-	// `setup --profile <other>` does not add a profile to an existing config, so the CLI hint is
-	// offered only for ollama (this guidance fires when a config already exists).
+	// Only fully-local-ollama has a CLI seeding route; the others are created by copying `default`.
 	if name == "fully-local-ollama" {
 		return fmt.Sprintf(" — %q is an example profile, not shipped by default; create it with `aimesh review setup --profile %s`, or by copying/editing `default` in the config file", name, name)
 	}
 	return fmt.Sprintf(" — %q is an example profile, not shipped by default; create it by copying/editing the `default` profile in the config file", name)
 }
 
-// WithExampleProfiles returns a copy of cfg with the ExampleProfiles merged in (existing
-// profiles win). Used by the CLI `setup --profile <name>`, docs examples, and tests — NOT the
-// shipped seed.
+// WithExampleProfiles returns a copy of cfg with ExampleProfiles merged in; existing profiles win.
 func WithExampleProfiles(cfg Config) Config {
 	if cfg.Profiles == nil {
 		cfg.Profiles = map[string]Profile{}
 	}
 	merged := map[string]Profile{}
-	for k, v := range ExampleProfiles() {
-		merged[k] = v
-	}
-	for k, v := range cfg.Profiles {
-		merged[k] = v
-	}
+	maps.Copy(merged, ExampleProfiles())
+	maps.Copy(merged, cfg.Profiles)
 	cfg.Profiles = merged
 	return cfg
 }
 
-// FakeProfile is the SHIPPED but HIDDEN test-only profile key. Its lanes use the built-in
-// deterministic `fake` adapter, so tests, the
-// golden-run baseline, and the ACP validation fake-only smoke have a runnable fake-only profile
-// WITHOUT the shipped `default` profile being pre-wired to fake — a fresh install ships `default`
-// UNCONFIGURED (honestly Doctor-flagged). Like the `fake` ADAPTER (hidden from AdapterViews), this
-// profile is hidden from the normal SPA profile list + setup guidance (see setup.ProfileViews /
-// the setup wizard); it is still present in the config by name so those flows can select it.
+// FakeProfile is the shipped, hidden, test-only profile whose lanes use the deterministic `fake`
+// adapter. Tests, the golden run and the ACP validation smoke select it by name; profile views and
+// setup guidance hide it.
 const FakeProfile = "fake-smoke"
 
-// IsHiddenProfile reports whether a profile is hidden from the normal profile list / setup
-// guidance (mirrors the way the `fake` ADAPTER is hidden from AdapterViews). Today only the
-// shipped-but-test-only FakeProfile is hidden; it stays selectable by name for tests/golden/ACP.
+// IsHiddenProfile reports whether a profile is hidden from profile views and setup guidance. Only
+// FakeProfile is hidden.
 func IsHiddenProfile(name string) bool { return name == FakeProfile }
 
-// Default returns the shipped seed configuration. The delivered runtime profile is `default`,
-// which now ships UNCONFIGURED (no adapters wired to its required lanes) — a fresh install is
-// honestly unconfigured (Doctor flags it) rather than pre-wired to the `fake` adapter. The
-// deterministic `fake` coverage moved to the SHIPPED-but-HIDDEN `fake-smoke` profile (FakeProfile),
-// used by tests/golden/the ACP fake-only smoke but hidden from the normal profile list. Every other
-// profile is user-created, copied, or a test fixture (see ExampleProfiles); the UI lists only what
-// the user actually has (minus the hidden fake profile).
+// Default returns the shipped seed configuration. The `default` profile ships with its required
+// lanes present but no adapters, so doctor reports a fresh install as unconfigured. FakeProfile
+// provides a runnable fake-only profile for tests.
 func Default() Config {
 	return Config{
 		SchemaVersion:  1,
@@ -407,18 +323,11 @@ func Default() Config {
 		Profiles: map[string]Profile{
 			"default": {
 				Description: "Delivered default profile — no adapters configured yet. Configure the author_remediator and reviewer lanes with an installed adapter (Doctor flags this until you do), or copy a ready-made profile onto it.",
-				// No AdapterPreference and empty-adapter required lanes: the lanes are PRESENT (the
-				// required roles exist) but UNCONFIGURED, so a fresh install is honestly not-ready
-				// (Doctor flags it) instead of silently pre-wired to the fake adapter.
 				Lanes: map[string]Lane{
 					"author_remediator": {Execution: "host"},
 					"reviewer":          {Execution: "adapter"},
 				},
 			},
-			// Shipped-but-HIDDEN deterministic fake profile (see FakeProfile / IsHiddenProfile). It
-			// carries fake lanes for every required role, so tests, the golden-run
-			// baseline, and the ACP validation fake-only smoke stay green without shipping `default`
-			// pre-wired to fake. Hidden from the normal SPA profile list + setup guidance.
 			FakeProfile: {
 				Description:       "Deterministic built-in fake adapter across both required lanes. Shipped but hidden (test-only): the ACP validation smoke, the golden-run baseline, and tests use it; it is not shown in the normal profile list.",
 				AdapterPreference: []string{"fake"},
@@ -429,19 +338,15 @@ func Default() Config {
 			},
 		},
 		ModelCatalog: map[string]CatalogEntry{
-			// The shipped catalog seeds exactly ONE entry per adapter, each an ADAPTER DEFAULT
-			// (adapterDefault: true) — the adapter's fallback model argument, NOT a saved-model
-			// preset and NOT a claim about the provider's current catalog. The web-UI lane editor
-			// projects these under "Adapter default"; genuine saved models are user/project entries
-			// or discovered/manual choices the user explicitly saves. We deliberately do NOT seed
-			// multiple current provider model names (those are volatile — use discovery/manual).
+			// One adapter-default entry per adapter: a fallback model argument, not a claim about
+			// the provider's current models, which change too often to ship.
 			"fake-model": {
 				Provider:       "fake",
 				Runtime:        "local",
 				CanonicalModel: "fake-1",
 				DisplayName:    "Fake Model 1",
-				Authoritative:  boolPtr(true),
-				AdapterDefault: boolPtr(true),
+				Authoritative:  new(true),
+				AdapterDefault: new(true),
 				Adapters:       map[string]AdapterModel{"fake": {ModelArg: "fake-1"}},
 			},
 			// The local Ollama model: its tag is supplied at runtime (REVIEWMESH_OLLAMA_MODEL)
@@ -451,43 +356,35 @@ func Default() Config {
 				Runtime:        "local",
 				CanonicalModel: "",
 				DisplayName:    "Local Ollama model",
-				Authoritative:  boolPtr(true),
-				AdapterDefault: boolPtr(true),
+				Authoritative:  new(true),
+				AdapterDefault: new(true),
 				Adapters:       map[string]AdapterModel{"ollama": {ModelArg: ""}},
 			},
-			// Native provider / gateway ADAPTER DEFAULTS. ModelArg values are sensible
-			// fallbacks; override per project or pick a specific model via discovery/manual.
-			// The CLIs must be installed + authenticated by the user (reviewmesh never
-			// authenticates them).
+			// Provider and gateway adapter defaults. The user installs and authenticates each CLI.
 			"claude-code-default": {
 				Provider: "anthropic", CanonicalModel: "claude-sonnet", DisplayName: "Claude Sonnet",
-				Authoritative: boolPtr(true), AdapterDefault: boolPtr(true), Adapters: map[string]AdapterModel{"claude-code": {ModelArg: "sonnet"}},
+				Authoritative: new(true), AdapterDefault: new(true), Adapters: map[string]AdapterModel{"claude-code": {ModelArg: "sonnet"}},
 			},
 			"codex-cli-default": {
 				Provider: "openai", CanonicalModel: "gpt-5-codex", DisplayName: "GPT-5 Codex",
-				Authoritative: boolPtr(true), AdapterDefault: boolPtr(true), Adapters: map[string]AdapterModel{"codex-cli": {ModelArg: "gpt-5-codex"}},
+				Authoritative: new(true), AdapterDefault: new(true), Adapters: map[string]AdapterModel{"codex-cli": {ModelArg: "gpt-5-codex"}},
 			},
 			"agy-cli-default": {
 				Provider: "google", CanonicalModel: "gemini-3-pro", DisplayName: "Gemini 3 Pro",
-				Authoritative: boolPtr(true), AdapterDefault: boolPtr(true), Adapters: map[string]AdapterModel{"agy-cli": {ModelArg: "gemini-3-pro"}},
+				Authoritative: new(true), AdapterDefault: new(true), Adapters: map[string]AdapterModel{"agy-cli": {ModelArg: "gemini-3-pro"}},
 			},
 			"devin-cli-default": {
 				Provider: "devin", CanonicalModel: "devin", DisplayName: "Devin gateway",
-				// devin-cli is name-bound: `modelArg` is the Devin IDE/Cascade DISPLAY name
-				// (no effort, no "Thinking"); `effort` is separate. The resolver renders the
-				// final slug (e.g. "claude-opus-4-8-medium"). See RenderDevinModelArg.
-				Authoritative: boolPtr(true), AdapterDefault: boolPtr(true), Adapters: map[string]AdapterModel{"devin-cli": {ModelArg: "Claude Opus 4.8", Effort: "medium"}},
+				// devin-cli takes a display name plus a separate effort; the resolver renders the
+				// final slug (e.g. "claude-opus-4-8-medium") with RenderDevinModelArg.
+				Authoritative: new(true), AdapterDefault: new(true), Adapters: map[string]AdapterModel{"devin-cli": {ModelArg: "Claude Opus 4.8", Effort: "medium"}},
 			},
-			// NOTE: no ACP adapters are seeded. ACP is an open protocol with no fixed CLI list, so ACP
-			// adapters are USER-DEFINED instances (meshcore/config/adapterlocations `acpAdapters`),
-			// synthesized into cfg.Adapters + cfg.ModelCatalog at load (see synthesizeACPInstances).
+			// ACP adapters are user-defined instances, added at load by synthesizeACPInstances.
 		},
 		Adapters: map[string]Adapter{
 			"fake": {ModelIdentity: "self_report"},
-			// Real shell adapters are configured (so a profile may select them) but are
-			// NEVER chosen automatically: only the `fake` adapter is in any default
-			// AdapterPreference. Availability is a runtime binary check (doctor reports it).
-			// The probe binary name lives with the code-owned recipe (meshcore/model/shell), not here.
+			// Shell adapters a profile may select. None is in a default AdapterPreference, so none
+			// is chosen automatically.
 			"ollama":      {ModelIdentity: "self_report"},
 			"devin-cli":   {ModelIdentity: "self_report"},
 			"claude-code": {ModelIdentity: "envelope"},
@@ -495,39 +392,27 @@ func Default() Config {
 			"agy-cli":     {ModelIdentity: "self_report"},
 			"gemini-cli":  {ModelIdentity: "envelope"},
 			"cursor-cli":  {ModelIdentity: "self_report"},
-			// Generic ACP adapters are NOT seeded — they are user-defined instances (see above),
-			// driven by the one generic meshcore/model/acpagent adapter.
 		},
 		Defaults: Defaults{
 			AdapterPreference: []string{"fake"},
 			ProfileForAdapter: map[string]string{"*": "default"},
 		},
 		Surfaces: Surfaces{
-			// Per-surface write-authority CEILINGS for the CLI surfaces: deliberate, config-visible
-			// POLICY.
-			//
-			// THESE ARE CEILINGS, NOT DEFAULTS. A run that names no mode gets `report` on every
-			// surface (see ResolvePlan) — the entries here bound what a surface may do when it IS
-			// asked. `cli` sits at `apply` so that `--apply` works there at all, NOT so that an
-			// unadorned `aimesh review run .` writes. `ci` sits at `report`: an unattended run writes
-			// only when the config grants it the `allowRemediate` capability.
-			//
-			// The ACP and MCP servers have no entry: they read no configuration and gate writes with
-			// their own `--allow-writes` launch grant (see SurfaceCeiling).
+			// Write ceilings for the CLI surfaces, not defaults: a run that names no mode is a report
+			// on every surface (see Resolve). `ci` writes only when granted allowRemediate. The ACP
+			// and MCP servers have no entry (see SurfaceCeiling).
 			DefaultModeBySurface: map[string]string{
 				"cli": "apply", "ci": "report",
 			},
-			DegradeWhenModeUnavailable: boolPtr(true),
+			DegradeWhenModeUnavailable: new(true),
 		},
-		Review: Review{MaxInnerIterations: intPtr(4), MaxOuterCycles: intPtr(3)},
+		Review: Review{MaxInnerIterations: new(4), MaxOuterCycles: new(3)},
 	}
 }
 
-// WithOllamaModel returns a copy of c with the local Ollama model tag applied to
-// the `ollama-local` catalog entry (canonical model + the `ollama` adapter's
-// modelArg). It is how REVIEWMESH_OLLAMA_MODEL / a project config supplies the tag
-// without baking a model into the shipped seed. A no-op if tag is empty or the
-// entry is absent.
+// WithOllamaModel returns a copy of c with tag applied to the `ollama-local` catalog entry's
+// canonical model and `ollama` model argument. It is a no-op when tag is empty or the entry is
+// absent.
 func WithOllamaModel(c Config, tag string) Config {
 	if tag == "" {
 		return c
@@ -537,29 +422,22 @@ func WithOllamaModel(c Config, tag string) Config {
 		return c
 	}
 	entry.CanonicalModel = tag
-	// copy the adapters map key-by-key (preserving any other mappings/metadata) and
-	// update only the ollama entry's modelArg — don't mutate a shared seed map.
+	// Copy the maps rather than mutating the shared seed.
 	adapters := make(map[string]AdapterModel, len(entry.Adapters)+1)
-	for k, v := range entry.Adapters {
-		adapters[k] = v
-	}
+	maps.Copy(adapters, entry.Adapters)
 	am := adapters["ollama"]
 	am.ModelArg = tag
 	adapters["ollama"] = am
 	entry.Adapters = adapters
 	cat := make(map[string]CatalogEntry, len(c.ModelCatalog))
-	for k, v := range c.ModelCatalog {
-		cat[k] = v
-	}
+	maps.Copy(cat, c.ModelCatalog)
 	cat["ollama-local"] = entry
 	c.ModelCatalog = cat
 	return c
 }
 
-// Load returns the effective configuration: the shipped seed overlaid with an
-// optional override file (path may be ""). The format is chosen by extension —
-// `.yaml`/`.yml` parse as YAML, everything else as JSON. A missing default path is
-// not an error; an explicitly-requested path that is missing or invalid is a fault.
+// Load returns the shipped seed overlaid with the override file at path, if any. `.yaml` and `.yml`
+// parse as YAML, anything else as JSON. A named path that is missing or invalid is an error.
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path == "" {
@@ -576,10 +454,8 @@ func Load(path string) (Config, error) {
 	return merge(cfg, override), nil
 }
 
-// parseConfigBytes parses a config layer into the typed Config. YAML is converted to JSON first
-// so the single set of `json:` struct tags stays the schema source of truth (JSON is a subset of
-// YAML, so a JSON file in a .yaml path also parses). It is the TYPED half of the store; the
-// generic byte/format plumbing (isYAML, yamlToJSON, decodeStrictJSON) lives in rawstore.go.
+// parseConfigBytes strictly parses a config layer into the typed Config. YAML is converted to JSON
+// first so the `json` struct tags are the single schema definition.
 func parseConfigBytes(path string, b []byte) (Config, error) {
 	var override Config
 	if store.IsYAML(path) {
@@ -589,8 +465,7 @@ func parseConfigBytes(path string, b []byte) (Config, error) {
 		}
 		b = jb
 	}
-	// Strict: reject unknown STRUCT fields (typos). Free map keys — profile, adapter,
-	// model-catalog, and lane names — remain allowed (maps accept any key).
+	// Unknown struct fields are rejected; map keys (profile, adapter, catalog and lane names) are free.
 	if err := store.DecodeStrict(b, &override); err != nil {
 		return override, fault.Wrap(fault.Config, fmt.Sprintf("parse config %q", path), err)
 	}
@@ -600,11 +475,8 @@ func parseConfigBytes(path string, b []byte) (Config, error) {
 	return override, nil
 }
 
-// validateProfileSpelling enforces the reviewer-panel SPELLING RULE per config LAYER: a profile
-// may name `reviewers` (the panel) or `lanes.reviewer` (sugar for a one-seat panel), never both
-// in the same file. Accepting both would mean silently picking a winner, which is exactly the
-// class of ambiguity a fail-closed config refuses. Across layers there is no conflict to detect:
-// mergeProfile makes a supplied spelling REPLACE the other, so only one survives.
+// validateProfileSpelling refuses a layer whose profile names both `reviewers` and
+// `lanes.reviewer`, rather than silently picking one.
 func validateProfileSpelling(c Config) error {
 	for _, name := range sortedProfileNames(c.Profiles) {
 		p := c.Profiles[name]
@@ -629,18 +501,14 @@ func sortedProfileNames(m map[string]Profile) []string {
 	return out
 }
 
-// validateConfigBytes is the typed-schema validator injected into the generic store primitives
-// (loadRawMapValidated / applyMapPatchToFile): it strict-decodes bytes into the typed Config and
-// returns the parse fault, discarding the value. This is the one seam through which reviewmesh's
-// schema reaches the domain-free store — so the store never learns Profile/Lane/roster shapes.
+// validateConfigBytes is the schema validator passed to the domain-free store: it strictly decodes b
+// into Config and returns the parse error.
 func validateConfigBytes(path string, b []byte) error {
 	_, err := parseConfigBytes(path, b)
 	return err
 }
 
-// ComponentName is review's subdirectory of the shared `.aimesh/` state root. One state root with a
-// component subdirectory per domain means one `init`, one VCS exclusion, and one home override
-// instead of several that would have to agree.
+// ComponentName is review's subdirectory of the shared `.aimesh/` state root.
 const ComponentName = "review"
 
 // ComponentDir is review's config directory under a base directory: <base>/.aimesh/review. The base is
@@ -662,8 +530,7 @@ func DiscoverProjectConfig(base string) string {
 	return ""
 }
 
-// HomeDir returns the base directory for user/global config — the ONE home override for the whole
-// tool (localstate.HomeEnvVar), so a hermetic run sets a single variable rather than one per domain.
+// HomeDir returns the base directory for user config, honoring localstate.HomeEnvVar.
 func HomeDir() (string, error) { return localstate.UserHomeBase() }
 
 // UserConfigPath is the canonical user/global config write path (~/.aimesh/review/config.yaml).
@@ -685,7 +552,7 @@ func DiscoverUserConfig() string {
 	return DiscoverProjectConfig(h)
 }
 
-// Layers records which config layers were discovered + loaded (for doctor/diagnostics).
+// Layers records which config layers were discovered and loaded, for doctor and diagnostics.
 type Layers struct {
 	UserPath       string
 	UserLoaded     bool
@@ -694,43 +561,37 @@ type Layers struct {
 	ExplicitPath   string
 	ExplicitLoaded bool
 
-	// Shared adapter-location layers (`.aimesh/adapters.yaml`) — the PATH-ONLY substrate reviewmesh
-	// shares with exploremesh. SharedUser is AIMESH_HOME-anchored; SharedProject is ROOT-anchored
-	// (walk-up from cwd) so a subdir run sees the repo-wide file.
+	// Shared adapter-location layers (`.aimesh/adapters.yaml`), common to review and explore.
+	// SharedUser is anchored at AIMESH_HOME; SharedProject at the repository root found by walking up
+	// from cwd.
 	SharedUserPath       string
 	SharedUserLoaded     bool
 	SharedProjectPath    string
 	SharedProjectLoaded  bool
 	SharedProjectHasRoot bool // cwd is inside a repo (a project shared layer can exist)
 
-	// AdapterPathSource maps each adapter whose effective binary Path is set to the layer that supplied
-	// it (one of the adapterPathSource* labels). AdapterPathShadowed lists adapters whose path from one
-	// layer was overridden by a higher layer (surfaced as a diagnostic so a "saved" path that no longer
-	// takes effect is visible). Both are nil when no adapter paths are configured.
+	// AdapterPathSource maps each adapter with a configured binary path to the layer that supplied it.
+	// AdapterPathShadowed lists adapters whose path was overridden by a higher layer. Both are nil
+	// when no adapter paths are configured.
 	AdapterPathSource   map[string]string
 	AdapterPathShadowed []string
 
-	// ACPInstances is the effective set of user-defined ACP adapter instances (from the shared layers),
-	// synthesized into cfg.Adapters + cfg.ModelCatalog at load. Views surface each instance's title/args.
+	// ACPInstances is the effective set of user-defined ACP adapter instances from the shared layers.
 	ACPInstances map[string]adapterlocations.ACPInstance
 }
 
-// Adapter-path provenance labels. Adapter binary paths are sourced SOLELY from the shared
-// `.aimesh/adapters.yaml` layers (config.yaml does not carry them), in scope order user < project.
+// Adapter-path provenance labels, in precedence order user < project.
 const (
 	adapterPathSourceUserShared    = "user (.aimesh/adapters.yaml)"
 	adapterPathSourceProjectShared = "project (.aimesh/adapters.yaml)"
 )
 
-// LoadLayered composes the effective configuration in precedence order (lowest first): shipped
-// defaults ← user (~/.aimesh/review) ← project (<repo-root>/.aimesh/review) ← explicit (--config). These full config
-// layers supply EVERYTHING EXCEPT adapter binary paths. Adapter binary paths are sourced SOLELY from
-// the PATH-ONLY shared `.aimesh/adapters.yaml` layers — user (AIMESH_HOME) then project (repo root,
-// walk-up so a subdir run sees the repo-wide file) — which are applied AFTER dropping any path a
-// config layer happened to include, so `.aimesh/adapters.yaml` is the single source of truth for
-// paths. All non-explicit layers are OPTIONAL (a missing one is not an error); a present-but-malformed
-// layer — config or shared — IS an error, as is an explicit path that is set-but-unreadable/invalid.
-// LoadLayered records per-adapter path provenance + shadow diagnostics in the returned Layers.
+// LoadLayered composes the effective configuration, lowest precedence first: shipped defaults, user
+// (~/.aimesh/review), project (<repo-root>/.aimesh/review), explicit (--config).
+//
+// Adapter binary paths come only from the shared `.aimesh/adapters.yaml` layers (user, then project),
+// applied after clearing any path a config layer carried. Missing layers are skipped; a malformed
+// layer, or an unreadable explicit path, is an error. Path provenance is recorded in Layers.
 func LoadLayered(cwd, explicitPath string) (Config, Layers, error) {
 	cfg := Default()
 	var ly Layers
@@ -767,9 +628,6 @@ func LoadLayered(cwd, explicitPath string) (Config, Layers, error) {
 		ly.ExplicitLoaded = true
 	}
 
-	// Adapter binary paths come ONLY from the shared adapters.yaml layers: drop any path a config
-	// layer (or the seed) carried, then overlay shared-user < shared-project. The same layers also carry
-	// the user-defined ACP adapter instances (captured here, synthesized into cfg below).
 	clearAdapterPaths(&cfg)
 	var sharedLocs []adapterlocations.Locations
 	if sp, err := adapterlocations.UserLocationsPath(); err == nil {
@@ -794,8 +652,6 @@ func LoadLayered(cwd, explicitPath string) (Config, Layers, error) {
 			sharedLocs = append(sharedLocs, loc)
 		}
 	}
-	// User-defined ACP adapter instances: synthesize a typed adapter + a default model-catalog entry
-	// per instance so profiles/lanes/doctor/views see them like any other adapter.
 	ly.ACPInstances = adapterlocations.ACPInstances(sharedLocs...)
 	synthesizeACPInstances(&cfg, ly.ACPInstances)
 
@@ -808,8 +664,8 @@ func LoadLayered(cwd, explicitPath string) (Config, Layers, error) {
 	return cfg, ly, nil
 }
 
-// clearAdapterPaths drops any adapter Path a config layer or the shipped seed carried, so the shared
-// adapters.yaml overlay is the single source of truth for binary paths.
+// clearAdapterPaths drops any adapter Path a config layer carried, so the shared adapters.yaml
+// layers are the only source of binary paths.
 func clearAdapterPaths(cfg *Config) {
 	for name, ad := range cfg.Adapters {
 		if ad.Path != "" {
@@ -819,12 +675,9 @@ func clearAdapterPaths(cfg *Config) {
 	}
 }
 
-// synthesizeACPInstances turns each user-defined ACP instance into a typed adapter + a default
-// model-catalog entry, so the rest of the config (profiles, doctor, views, registry paths) treats it
-// like any other adapter. ModelIdentity is cli_status (an ACP session reports its active model). The
-// `<name>-default` catalog entry lets a lane reference it. The instance Path (if any) also flows to
-// the runnable registry via the shared-path overlay — where the PATH-lookup name is derived (app
-// wiring / acpagent.Registry), which is why no probe name is stored on the typed adapter here.
+// synthesizeACPInstances adds each user-defined ACP instance as an adapter (identity cli_status,
+// since an ACP session reports its active model) and a `<name>-default` catalog entry a lane can
+// reference.
 func synthesizeACPInstances(cfg *Config, instances map[string]adapterlocations.ACPInstance) {
 	if len(instances) == 0 {
 		return
@@ -845,26 +698,21 @@ func synthesizeACPInstances(cfg *Config, instances map[string]adapterlocations.A
 		if title == "" {
 			title = "ACP: " + name
 		}
-		// The default catalog entry requests the model the ACP session reported at validation
-		// (inst.Model) as the EXPECTED model — so identity verification confirms the agent still answers
-		// as that model (cli_status), and halts only on real drift. When Model is unset (saved without a
-		// successful validation), the modelArg is empty and a review using the lane will prompt to
-		// configure/validate the model before use.
+		// The expected model is the one the session reported at validation, so identity verification
+		// halts only on drift. An unvalidated instance has an empty modelArg, which resolution refuses.
 		cfg.ModelCatalog[name+"-default"] = CatalogEntry{
 			DisplayName:    title,
 			CanonicalModel: inst.Model,
-			Authoritative:  boolPtr(true),
-			AdapterDefault: boolPtr(true),
+			Authoritative:  new(true),
+			AdapterDefault: new(true),
 			Adapters:       map[string]AdapterModel{name: {ModelArg: inst.Model}},
 		}
 	}
 }
 
-// applySharedPaths overlays a shared adapters.yaml layer's PATH entries onto cfg. It honors the
-// presence-aware clear (a non-nil empty string is an explicit "use PATH" that clears an inherited
-// path); a nil path is no override. It only touches adapters reviewmesh already defines — a path-only
-// entry for an unknown adapter is inert (recipes are code-owned) and skipped. A higher shared layer
-// overriding a lower one's path records a shadow diagnostic.
+// applySharedPaths overlays a shared adapters.yaml layer's path entries onto cfg. A nil path is no
+// override; an empty path clears an inherited one (use PATH lookup). Entries for adapters cfg does
+// not define are skipped, and overriding a lower layer's path records a shadow diagnostic.
 func applySharedPaths(cfg *Config, loc adapterlocations.Locations, source string, prov map[string]string, shadowed map[string]bool) {
 	for name, e := range loc.Adapters {
 		if e.Path == nil {
@@ -899,16 +747,13 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-// LoadRawMap reads a config file into a generic key→value map AFTER strict schema
-// validation, so a caller can inspect which keys are **explicitly present** (vs seed
-// defaults) — used by the user→project promotion planner. Returns the schema error if the
-// file does not parse strictly (so promotion never reads a malformed source). Thin typed
-// wrapper over the domain-free loadRawMapValidated (rawstore.go), supplying the Config validator.
+// LoadRawMap reads a strictly validated config file into a generic map, so a caller can see which
+// keys are explicitly present rather than seeded.
 func LoadRawMap(path string) (map[string]any, error) {
 	return store.LoadRawMap(path, validateConfigBytes)
 }
 
-// loadOverride reads + strict-parses one config layer file (no Default merge).
+// loadOverride reads and strictly parses one config layer file without merging it.
 func loadOverride(path string) (Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -917,10 +762,8 @@ func loadOverride(path string) (Config, error) {
 	return parseConfigBytes(path, b)
 }
 
-// merge overlays a higher-precedence layer onto a lower one with field-granular
-// deep merge of nested objects (maps merge by key; non-zero scalars/non-nil lists
-// in the override win; sibling fields are preserved). This is the Batch-1 subset
-// of docs/configuration.md → "Configuration resolution & merge".
+// merge overlays a higher-precedence layer onto a lower one: maps merge by key, non-zero scalars and
+// non-nil lists in over win, and sibling fields are preserved (see docs/configuration.md).
 func merge(base, over Config) Config {
 	if over.SchemaVersion != 0 {
 		base.SchemaVersion = over.SchemaVersion
@@ -951,9 +794,8 @@ func merge(base, over Config) Config {
 	}
 	base.Defaults.ProfileForAdapter = mergeStringMap(base.Defaults.ProfileForAdapter, over.Defaults.ProfileForAdapter)
 	base.Surfaces.DefaultModeBySurface = mergeStringMap(base.Surfaces.DefaultModeBySurface, over.Surfaces.DefaultModeBySurface)
-	// A capability grant REPLACES the lower layer's list for that surface rather than unioning it:
-	// a user or project layer must be able to REVOKE a capability by naming an empty list, and a
-	// union would make revocation impossible.
+	// A capability list replaces the lower layer's list, so a higher layer can revoke a grant by
+	// naming an empty list.
 	for surface, caps := range over.Surfaces.CapabilitiesBySurface {
 		if base.Surfaces.CapabilitiesBySurface == nil {
 			base.Surfaces.CapabilitiesBySurface = map[string][]string{}
@@ -982,12 +824,8 @@ func mergeProfile(b, o Profile) Profile {
 	if o.AdapterPreference != nil {
 		b.AdapterPreference = o.AdapterPreference
 	}
-	// REVIEWER-PANEL SPELLING across layers: a layer that supplies one spelling REPLACES the
-	// other, so the effective config never carries both (which validateProfileSpelling refuses
-	// within a layer). Concretely: a user config declaring `reviewers: [...]` for a profile the
-	// seed shipped with `lanes.reviewer` migrates that profile to a panel rather than colliding
-	// with the seed's sugar — and the panel is REPLACED wholesale, never element-merged, because
-	// a seat list is an ordered composition, not a bag of keyed settings.
+	// A layer's reviewer spelling replaces the other, so the merged profile never carries both. The
+	// panel is replaced wholesale because a seat list is an ordered composition.
 	if len(o.Reviewers) > 0 {
 		b.Reviewers = append([]Lane(nil), o.Reviewers...)
 		delete(b.Lanes, string(review.RoleReviewer))
@@ -1064,15 +902,13 @@ func mergeAdapter(b, o Adapter) Adapter {
 	return b
 }
 
-// ProjectConfigPath is the canonical project-scope config location (YAML) under a
-// base directory. (A `config.json` beside it is still read for compatibility via
-// DiscoverProjectConfig/Load.)
+// ProjectConfigPath returns the canonical YAML config path under base. DiscoverProjectConfig also
+// finds `config.yml` and `config.json`.
 func ProjectConfigPath(base string) string {
 	return filepath.Join(ComponentDir(base), "config.yaml")
 }
 
-// WriteYAMLFile writes the config as YAML (camelCase keys, via the json tags), creating
-// parent dirs. Like WriteJSONFile it never contains secrets.
+// WriteYAMLFile writes the config as YAML with the json tag names, creating parent directories.
 func (c Config) WriteYAMLFile(path string) error {
 	jb, err := json.Marshal(c)
 	if err != nil {
@@ -1089,9 +925,8 @@ func (c Config) WriteYAMLFile(path string) error {
 	return store.WriteFileAtomic(path, yb)
 }
 
-// WriteJSONFile writes the config as indented JSON, creating parent dirs. It never
-// contains secrets (authentication stays with each adapter's own CLI), so writing
-// it is safe (the ConfigAccess write path used by the setup wizard).
+// WriteJSONFile writes the config as indented JSON, creating parent directories. Config holds no
+// secrets; authentication stays with each adapter's CLI.
 func (c Config) WriteJSONFile(path string) error {
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -1100,24 +935,11 @@ func (c Config) WriteJSONFile(path string) error {
 	return store.WriteFileAtomic(path, append(b, '\n'))
 }
 
-// ApplyPatchToFile is the single config-mutation write path: it strictly parses the
-// existing config at path (if present), applies a ConfigPatch to the decoded map (creating
-// nested maps, preserving unrelated fields, erroring rather than overwriting a malformed
-// shape), ensures `schemaVersion`, and writes the result only after re-validating that it
-// reloads strictly. It creates the file/dir if absent and never writes secrets. An
-// unparseable existing file is refused and left byte-for-byte unchanged. This is the only
-// place that turns a structured `ConfigPatch` into bytes on disk.
+// ApplyPatchToFile applies patch to the config file at path, creating it if absent. Unrelated fields
+// are preserved, and the result is written only after it re-validates strictly. An unparseable
+// existing file is refused and left unchanged.
 func ApplyPatchToFile(path string, patch ConfigPatch) error {
 	return store.ApplyPatchToFile(path, patch, validateConfigBytes)
-}
-
-// SetAdapterPathInFile updates ONLY `adapters.<adapter>.path`, preserving every other
-// field. Thin compatibility wrapper over ApplyPatchToFile (the shared config-patch write
-// path). The caller validates the adapter name and binary path first.
-func SetAdapterPathInFile(path, adapter, binPath string) error {
-	return ApplyPatchToFile(path, ConfigPatch{Ops: []SetOp{
-		{Path: []string{"adapters", adapter, "path"}, Value: binPath},
-	}})
 }
 
 func mergeStringMap(b, o map[string]string) map[string]string {
@@ -1127,8 +949,6 @@ func mergeStringMap(b, o map[string]string) map[string]string {
 	if b == nil {
 		b = map[string]string{}
 	}
-	for k, v := range o {
-		b[k] = v
-	}
+	maps.Copy(b, o)
 	return b
 }

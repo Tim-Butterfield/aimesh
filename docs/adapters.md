@@ -105,11 +105,16 @@ A `Recipe` (`meshcore/model/shell/shell.go`) captures four or five concerns:
   disturbing authentication. Only `NO_UPDATE_NOTIFIER=1` is applied universally: it is npm-specific and
   identity-inert. Anything stronger is **per recipe** (`Recipe.Env`), because "non-interactive" hints
   are not universally safe — `CI=1` in particular reshapes or suppresses some CLIs' stderr chrome, which
-  is where some recipes read the identity they RECORD. Today `CI=1` is set only for `gemini-cli` and
-  `cursor-cli`, whose recipes extract no identity from the CLI's own output at all. (`codex-cli` now
-  also extracts none, so it has become eligible — but adding it is a behavior change that has not been
-  exercised against the real CLI, so it stays unset until it is.) An adapter never builds its
-  environment from scratch.
+  is where some recipes read the identity they record. `CI=1` is set only for `gemini-cli` and
+  `cursor-cli`, whose recipes extract no identity from the CLI's own output. It is not set for
+  `claude-code` (its envelope under `CI=1` is unexercised), `agy-cli` or `devin-cli` (their self-report is
+  parsed from stdout), `ollama` (no defined effect) or `codex-cli` (unexercised against the real CLI).
+  An adapter never builds its environment from scratch.
+- **Prompt delivery:** `codex-cli`, `claude-code` and `gemini-cli` receive the prompt on standard input,
+  because the OS bounds argv (1 MiB in total on macOS; about 128 KiB for a single argument on Linux) and
+  an oversized argv fails at exec time with empty stderr. The other recipes pass the prompt in argv, where
+  a prompt beginning with `-` would be parsed as a flag; none of them passes `--`, so the adapter refuses
+  such a prompt before spawning (exit 126).
 - **Timeout/cancellation:** each call runs under a context bounded by the per-call timeout. On timeout
   or host cancellation the adapter terminates the process group (signal, then force-kill after a grace
   period) and returns a Class F result (one retry).
@@ -248,9 +253,9 @@ real-CLI confirmation. See [model-identity.md](model-identity.md#manual-identity
 - **Binary:** `claude`, detected on `PATH` or a configured path.
 - **Invoke argv:**
   ```
-  claude -p <prompt> --permission-mode plan --disallowedTools "Edit Write NotebookEdit" --output-format json [--model <modelArg>] [--effort <effort>] [--add-dir <copyRoot>]
+  claude -p --permission-mode plan --disallowedTools "Edit Write NotebookEdit" --output-format json [--model <modelArg>] [--effort <effort>] [--add-dir <copyRoot>]   < prompt on stdin
   ```
-  `--model`, `--effort`, and `--add-dir` are appended only when set. Pinning `--model` makes claude-code
+  `-p` takes no prompt argument; claude reads the piped prompt. `--model`, `--effort`, and `--add-dir` are appended only when set. Pinning `--model` makes claude-code
   use the requested model rather than the user's externally-configured default.
 - **Artifact delivery:** `reads_from_dir`, via `--add-dir <copyRoot>`.
 - **Evidence tier:** `envelope` — the strongest tier. `--output-format json` emits a `modelUsage` object
@@ -270,9 +275,9 @@ real-CLI confirmation. See [model-identity.md](model-identity.md#manual-identity
 - **Binary:** `codex`, detected on `PATH` or a configured path.
 - **Invoke argv:**
   ```
-  codex exec -s read-only --skip-git-repo-check -m <modelArg> [-c model_reasoning_effort=<low|medium|high>] <prompt>
+  codex exec -s read-only --skip-git-repo-check -m <modelArg> [-c model_reasoning_effort=<low|medium|high>]   < prompt on stdin
   ```
-  The effort override is emitted only when effort is set. `--skip-git-repo-check` is required: Codex
+  With no prompt argument `codex exec` reads its instructions from stdin. The effort override is emitted only when effort is set. `--skip-git-repo-check` is required: Codex
   refuses to run in a non-git directory, and calls legitimately run in one (exploremesh contains each
   call in a fresh empty temp cwd). Harmless inside a repo, so unconditional.
 - **Model availability is account-dependent.** The same slug can work on one auth type and be rejected
@@ -348,7 +353,7 @@ name-bound, tier-encoded model slugs.
 ### gemini-cli — verified-local (identity not captured)
 
 - **Binary:** `gemini`, detected on `PATH` or a configured path.
-- **Invoke argv:** `gemini --model <modelArg> --approval-mode plan --skip-trust -p <prompt>`.
+- **Invoke argv:** `gemini --model <modelArg> --approval-mode plan --skip-trust`, with the prompt on stdin (gemini appends `-p` input to stdin, so the piped prompt is the prompt).
 - **`--skip-trust` is REQUIRED, not optional.** Without it Gemini refuses to answer in any directory it
   has not been told to trust, exiting **55** with no output. Callers legitimately run in untrusted
   directories — exploremesh contains each call in a fresh empty temp cwd, which is never trusted — so

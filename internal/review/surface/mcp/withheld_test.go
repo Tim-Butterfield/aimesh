@@ -5,12 +5,8 @@ import (
 	"testing"
 )
 
-// TestRemediate_ApplyWithoutAllowWritesNamesTheLaunchFlag.
-//
-// A write is protected by two gates: the server must be LAUNCHED with --allow-writes, and every apply
-// must additionally pass allowWrite. Those failures need opposite responses — one is a message to hand
-// a human, the other the model fixes itself — so the launch refusal names the flag and points at what the
-// caller can still do: ask for the diff.
+// An apply needs the server launched with --allow-writes and allowWrite on the call. The launch
+// refusal is for a human, so it names the flag and suggests requesting the diff instead.
 func TestRemediate_ApplyWithoutAllowWritesNamesTheLaunchFlag(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}
@@ -34,8 +30,7 @@ func TestRemediate_ApplyWithoutAllowWritesNamesTheLaunchFlag(t *testing.T) {
 	}
 }
 
-// TestRemediate_PatchNeedsNoWriteGrant: the diff is available on every server, and asking for it needs
-// neither --allow-writes nor allowWrite, because a patch changes no project content.
+// A patch needs neither --allow-writes nor allowWrite, since it changes no project content.
 func TestRemediate_PatchNeedsNoWriteGrant(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}

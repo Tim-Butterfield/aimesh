@@ -42,9 +42,8 @@ func countingPanel(t *testing.T) (*Manager, *int32) {
 	return m, &calls
 }
 
-// TestDryRun_SpendsNothingAndDisclosesTheShape is the whole feature in one assertion pair: zero
-// adapter invocations, and a shape that names every seat that WOULD have been invoked. Without the
-// stop, the same request runs a real three-seat review.
+// TestDryRun_SpendsNothingAndDisclosesTheShape checks that a dry run makes zero adapter invocations
+// and returns a shape naming every seat that would have been invoked.
 func TestDryRun_SpendsNothingAndDisclosesTheShape(t *testing.T) {
 	m, calls := countingPanel(t)
 	ws, _ := makeWorkspace(t)
@@ -139,9 +138,8 @@ func TestDryRun_WritesTheShapeArtifactAndTheResolvedPlan(t *testing.T) {
 	}
 }
 
-// TestDryRun_PricesTheModeItWasGiven: `--apply --dry-run` prices an APPLY run — it does not quietly
-// become a report run. The mode is the expensive variable (apply can iterate), so a dry run that
-// dropped it would answer a question nobody asked.
+// TestDryRun_PricesTheModeItWasGiven checks that `--apply --dry-run` prices an apply run, not a report
+// run. The mode matters because only apply iterates.
 func TestDryRun_PricesTheModeItWasGiven(t *testing.T) {
 	m, calls := countingPanel(t)
 	ws, _ := makeWorkspace(t)
@@ -177,9 +175,8 @@ func TestDryRun_PricesTheModeItWasGiven(t *testing.T) {
 	}
 }
 
-// TestDryRun_StillRefusesEveryKnowableConfigError: the stop is AFTER preflight, not instead of it. A
-// dry run that reported a tidy shape for a panel whose binary is missing would be worse than no dry
-// run: it would certify a run that cannot start.
+// TestDryRun_StillRefusesEveryKnowableConfigError checks that the dry-run stop comes after preflight,
+// so a dry run never reports a shape for a run that cannot start.
 func TestDryRun_StillRefusesEveryKnowableConfigError(t *testing.T) {
 	m, calls := countingPanel(t)
 	ws, _ := makeWorkspace(t)
@@ -214,10 +211,8 @@ func TestDryRun_UnavailableAdapterIsReportedForFree(t *testing.T) {
 	}
 }
 
-// TestDryRun_RunStateValidatesAgainstItsPublishedSchema: "planned" is a new value in an enum that
-// `additionalProperties: false` schema publishes. A status the schema does not list makes the
-// schema a false description of what this repo writes — for the one run shape whose whole purpose
-// is to be read by a machine before it commits money.
+// TestDryRun_RunStateValidatesAgainstItsPublishedSchema checks that a dry run's run-state.json, with
+// status "planned", validates against the published run-state schema.
 func TestDryRun_RunStateValidatesAgainstItsPublishedSchema(t *testing.T) {
 	root := repoRootFromPackage(t)
 	sch, cerr := jsonschema.CompileFile(filepath.Join(root, "docs", "schema", "run-state.schema.json"))
@@ -241,18 +236,15 @@ func TestDryRun_RunStateValidatesAgainstItsPublishedSchema(t *testing.T) {
 	}
 }
 
-// TestDryRun_RefusesAnInadmissibleWorkspace: the stop must not be reached at all for a workspace
-// the copy would reject. Measured 2026-08-11 — a dry run pointed at a directory under a protected
-// path printed a full panel and a 2..10 model-call range for a root that the very next step refused with
-// workspace_excluded_ancestor. A shape for a run that cannot start is worse than no shape: it is a
-// confident answer to "could this run?" that is wrong.
+// TestDryRun_RefusesAnInadmissibleWorkspace checks that a dry run refuses a workspace the copy would
+// reject (here, one under a protected directory) instead of reporting a shape for it.
 func TestDryRun_RefusesAnInadmissibleWorkspace(t *testing.T) {
 	m, calls := countingPanel(t)
-	// A root INSIDE a protected family. Exclusion is judged on components relative to the root, so
-	// naming one as the root is what would strip its protection — hence the refusal.
+	// A root inside a protected family. Exclusion is judged on components relative to the root, so
+	// naming one as the root would strip its protection.
 	//
-	// `.vscode`, deliberately, and NOT `.aimesh`: run artifacts are readable without a flag, so
-	// `.aimesh` is not a refusal and would make this test assert nothing.
+	// `.vscode` rather than `.aimesh`: run artifacts are readable without a flag, so `.aimesh` would not
+	// be refused and the test would assert nothing.
 	ws := filepath.Join(t.TempDir(), ".vscode", "temp", "sample")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
@@ -275,15 +267,10 @@ func TestDryRun_RefusesAnInadmissibleWorkspace(t *testing.T) {
 	}
 }
 
-// TestDryRun_PricesWhatTheCallsWouldCarry is the second half of the same disclosure, and it is
-// written as the defect that produced it: two workspaces with an IDENTICAL panel, identical caps
-// and therefore an identical call range, whose runs would look at completely different things.
-// Measured 2026-08-11, `--dry-run .` and `--dry-run internal/review/manager/run` printed
-// byte-identical disclosures — a cost estimate that could not tell a monorepo from one package.
+// TestDryRun_PricesWhatTheCallsWouldCarry checks that the shape discloses the payload: two workspaces
+// with an identical panel and call range, but different files, must produce different payloads.
 //
-// The call counts are asserted EQUAL on purpose: it is what makes the payload the only thing
-// carrying the difference, and a future change that let the counts diverge here would make the
-// test pass for the wrong reason.
+// The call counts are asserted equal so the payload is the only thing carrying the difference.
 func TestDryRun_PricesWhatTheCallsWouldCarry(t *testing.T) {
 	m, calls := countingPanel(t)
 	big := t.TempDir()
@@ -337,7 +324,7 @@ func TestDryRun_PricesWhatTheCallsWouldCarry(t *testing.T) {
 }
 
 // TestDryRun_ShapeArtifactCarriesThePayload: run-shape.json is the machine-readable half of the
-// disclosure, and it is the SAME object the projection publishes as `shape` (validated against the
+// disclosure, and it is the same object the projection publishes as `shape` (validated against the
 // published schema by TestCLIDryRun_ProjectionValidatesAgainstItsPublishedSchema). What this pins
 // is that the artifact on disk carries the payload at all — an agent that reads the run directory
 // rather than stdout must not get the cheaper half of the answer.

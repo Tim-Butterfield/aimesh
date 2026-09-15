@@ -1,40 +1,22 @@
 package evidence
 
-// This file holds the DERIVED EVIDENCE SCHEMA: a RELATIONAL CORE plus exactly ONE
-// variable-depth structure (`lineage_edges`). Both halves of that sentence were decisions:
+// This file holds the evidence database schema: relational tables with fixed shapes, so the database can
+// enforce their relationships, plus one variable-depth table, `lineage_edges`, which traces an element of
+// the result back to the responses it came from.
 //
-//   - RELATIONAL, NOT A PROPERTY GRAPH. Rounds, envelopes, mentions, canonical entities, ballots, decisions
-//     and claims all have fixed, known shapes with fixed relationships. Modeling them as generic
-//     (node, edge, property) triples would throw away every constraint the database could otherwise enforce
-//     for free — and the constraints are the point of exporting at all.
-//   - ONE lineage table, because exactly one thing here IS variable-depth: how an element of the terminal
-//     result traces back through the rounds to the blind responses it came from. That is a recursive-CTE
-//     traversal, and it is the only one.
-//
-// Two schema rules follow from the derived-export contract and are applied without exception below:
-//
-//   - GOVERNANCE VALUES ARE REAL TYPED COLUMNS. A claim's k, its denominators, its label, its rules version
-//     and its pinned hashes are columns — because the reason to export at all is to make governance SQL
-//     runnable, and `json_extract(payload, '$.kOfPanel.k')` is not that. JSON appears in exactly two places,
-//     both ORIGINAL PAYLOADS the export does not interpret: an envelope's response and the declared task.
-//   - FK INTEGRITY ENFORCES GOVERNANCE INVARIANTS. The load-bearing one: a
-//     `ballot_entries` row references `canonical_entities` AT THE CONFIRMED REVISION, so a ballot naming a
-//     candidate that is not in the confirmed universe is a CONSTRAINT VIOLATION at export time — not a
-//     silent pass, and not a check some reader has to remember to run.
-//
-// Every table is STRICT (types are enforced, not advisory) and every foreign key is real —
-// `PRAGMA foreign_keys=ON` is set on the connection and `foreign_key_check` + `integrity_check` run at
-// finalize. A composite foreign key needs a UNIQUE parent key, which every referenced table's PRIMARY KEY
-// provides.
+// Governance values such as a claim's count, denominators, label, rules version and hashes are typed
+// columns, so governance queries are plain SQL. JSON is stored only for payloads the export does not
+// interpret: an envelope's response and the declared task. Foreign keys enforce governance invariants; for
+// example, a ballot entry references a canonical entity at the confirmed revision, so a ballot naming an
+// unconfirmed candidate fails the export. Every table is STRICT, foreign keys are enabled on the connection,
+// and foreign_key_check and integrity_check run at finalize.
 
-// ExportSchemaVersion is the version of the schema below. It is stored in `explorations` (and as the
-// database's user_version) so a consumer can tell which shape it is reading — the same discipline every
-// other machine surface in exploremesh follows.
+// ExportSchemaVersion is the version of the schema below, stored in `explorations` and as the database's
+// user_version.
 const ExportSchemaVersion = 1
 
-// schemaSQL is the complete DDL, executed once at export. It is one string rather than a migration chain on
-// purpose: this database is DERIVED and disposable. It is never migrated in place, because the system of
-// record is the append-only run directory and a stale export is rebuilt, not patched.
+// schemaSQL is the complete DDL, executed once at export. The database is rebuilt from the run directory
+// rather than migrated, so there is no migration chain.
 const schemaSQL = `
 -- The exploration itself: one row, carrying the run-level facts + the frozen panel outcome.
 CREATE TABLE explorations (
@@ -521,9 +503,8 @@ CREATE INDEX idx_claims_query ON governance_claims(exploration_id, query);
 CREATE INDEX idx_envelopes_round ON envelopes(exploration_id, round_index);
 `
 
-// exportTables lists every table in a fixed order. It drives the canonical dump (and therefore the
-// rebuild-and-compare invariant), so it is a declared list rather than a query against sqlite_master: the
-// comparison must fail if a table is ADDED and not accounted for, which a self-discovering dump would hide.
+// exportTables lists every table in a fixed order for the canonical dump. It is declared rather than read
+// from sqlite_master, so a table added without updating the list is noticed.
 var exportTables = []string{
 	"explorations",
 	"mode_contracts",

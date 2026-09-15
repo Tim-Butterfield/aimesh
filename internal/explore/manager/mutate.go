@@ -10,19 +10,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/registry"
 )
 
-// This file is the governed WRITE surface for the shell-adapter PATHS. Each mutation writes the
-// user-scope shared adapters.yaml through adapterlocations.Update (content-hash CAS), re-resolves the
-// layered adapter config, and bumps the generation. A validation/usage failure returns an error and
-// persists NOTHING.
-//
-// ROSTER writes are not here: they all go through the profile seam in profiles.go (SaveProfile /
-// SetDefaultProfile / DeleteProfile), which persists a whole named profile. There is deliberately no
-// per-slot roster mutator — a second write path to the same bytes could only ever address the DEFAULT
-// profile, so the seam that can express every profile is the only one.
+// This file holds the writes for shell adapter paths. Each writes the user-scope shared adapters.yaml
+// through adapterlocations.Update and re-resolves the adapter configuration; a failed validation writes
+// nothing. Roster changes go through the profile writes in profiles.go.
 
 // ConfigureAdapterPath records a validated binary path for a shell adapter in the user-scope shared
-// adapters.yaml (the single seam adapter paths live in), then re-resolves. `fake` needs no path and is
-// rejected.
+// adapters.yaml, then re-resolves. The `fake` adapter needs no path and is rejected.
 func (m *Manager) ConfigureAdapterPath(name, binPath string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -46,14 +39,12 @@ func (m *Manager) ConfigureAdapterPath(name, binPath string) ([]string, error) {
 	if err := m.reresolveLocked(); err != nil {
 		return nil, err
 	}
-	m.generation++
 	return []string{fmt.Sprintf("Recorded adapters.%s.path in %s.", name, m.sharedPath)}, nil
 }
 
-// RemoveAdapter clears a shell adapter's saved path from the user-scope shared adapters.yaml. It is
-// BLOCKED (a *BlockedError carrying the using slots) while the roster references the adapter, `fake` can
-// never be removed, and an adapter with no saved path to clear is reported (nothing to do), never a
-// phantom write.
+// RemoveAdapter clears a shell adapter's saved path from the user-scope shared adapters.yaml. It returns
+// a *BlockedError while a roster slot uses the adapter, refuses `fake`, and reports an error when there is
+// no saved path to clear.
 func (m *Manager) RemoveAdapter(name string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -86,6 +77,5 @@ func (m *Manager) RemoveAdapter(name string) ([]string, error) {
 	if err := m.reresolveLocked(); err != nil {
 		return nil, err
 	}
-	m.generation++
 	return []string{fmt.Sprintf("Cleared the saved path for %s.", m.adapterDisplay(name))}, nil
 }

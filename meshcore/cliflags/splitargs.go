@@ -5,26 +5,13 @@ import (
 	"strings"
 )
 
-// SplitArgs separates flag tokens (and the values of value-taking flags) from POSITIONAL
-// arguments, so a command may be typed with its flags before or after its operand.
+// SplitArgs separates flag tokens (with the values of value-taking flags) from positional arguments,
+// so flags may come before or after an operand. Go's flag parser stops at the first non-flag token,
+// which would silently ignore later flags.
 //
-// THE PROBLEM IT SOLVES. Go's flag parser stops at the first non-flag token and treats everything
-// after it as positional. So `cmd "some question" --criteria a,b` parses ZERO flags and silently
-// drops `--criteria` — the user typed it, the help text documents it, and nothing says it was
-// ignored. Meanwhile `cmd --path src .` has the opposite failure: `src` is taken for the operand
-// and the real operand is lost. Both read to a user as the tool not working.
-//
-// Pre-splitting the argv fixes both: flags (with their values) go to fs.Parse, operands come back
-// separately, and order stops mattering.
-//
-// WHICH FLAGS TAKE A VALUE IS ASKED OF THE FLAG SET, never listed by the caller. A hand-maintained
-// list is a list that falls behind — and when it does, a flag's VALUE is misread as the operand and
-// the parser blames the flag ("flag needs an argument"), which points at the wrong thing. Everything
-// except a bool consumes the next token, and a bool announces itself through `IsBoolFlag()`, the
-// same interface Style reads to decide whether to render a value placeholder.
-//
-// A token this flag set does not define is assumed to take NO value, so fs.Parse reports it by name
-// rather than silently swallowing whatever followed it.
+// Whether a flag takes a value is read from the flag set: every flag except a boolean (IsBoolFlag)
+// consumes the next token. An undefined flag is assumed to take no value, so fs.Parse reports it by
+// name.
 func SplitArgs(fs *flag.FlagSet, args []string) (flags, positionals []string) {
 	takesValue := func(tok string) bool {
 		f := fs.Lookup(strings.TrimLeft(tok, "-"))

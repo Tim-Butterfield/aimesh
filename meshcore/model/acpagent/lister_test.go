@@ -7,8 +7,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// The generic ACP adapter satisfies the OPTIONAL model.Lister capability, so the lane editor can offer
-// model discovery for a configured ACP instance (reading the session's advertised availableModels).
+// The generic ACP adapter satisfies the optional model.Lister capability, reading the session's
+// advertised availableModels.
 func TestAdapter_ImplementsLister(t *testing.T) {
 	var _ model.Lister = (*Adapter)(nil)
 }

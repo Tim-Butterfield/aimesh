@@ -12,8 +12,8 @@ import (
 )
 
 // TestInvoke_WorkDir_Containment proves the shell adapter runs the CLI in the caller's isolated
-// WorkDir (cmd.Dir), not the process cwd — the containment mechanism exploremesh relies on. A CLI that
-// prints its working directory must report the isolated dir, and without WorkDir it must NOT.
+// WorkDir (cmd.Dir) rather than the process cwd. A CLI that prints its working directory reports the
+// isolated directory only when WorkDir is set.
 func TestInvoke_WorkDir_Containment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX `sh -c pwd`")

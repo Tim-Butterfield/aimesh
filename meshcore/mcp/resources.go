@@ -16,26 +16,15 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// This file is MCP `resources/*`: the read side of the protocol, and the reason a governed write can
-// actually be collected.
+// This file implements MCP `resources/*`, through which a caller collects the artifacts a run wrote.
 //
-// It exists because of a concrete, host-verified failure in an application built on this transport. A
-// governed write completed, produced a diff, and returned the artifact's run-record-relative NAME plus
-// its sha256 — and there was no mechanism by which the caller could obtain the bytes. The run directory
-// is deliberately dropped (host paths do not belong on a wire that ends in a third party's inference
-// log), stdout is the JSON-RPC transport, and `resources/*` was unimplemented. The workflow finished and
-// delivered nothing.
+// Two rules shape it:
 //
-// Two rules shape the design:
-//
-//   - A RESOURCE URI CARRIES NO HOST PATH. That was a deliberate decision and it is kept. A URI is
-//     `aimesh://run/<runId>/<artifact>`: two opaque identifiers the SERVER resolves internally against a
-//     table it built itself. Nothing on the wire says where anything lives.
-//   - A CALLER NAMES A REGISTRATION, NEVER A PATH. `resources/read` takes a URI, not a filename; the URI
-//     must already be in the store, and the store holds the (directory, run-relative name) pair that was
-//     recorded when the artifact was written. There is no request shape that reaches a file the server did
-//     not itself publish, so "a resource outside the run's own artifacts" is not refused by a check — it
-//     is unaddressable.
+//   - A resource URI carries no host path. A URI is `aimesh://run/<runId>/<artifact>`: two opaque
+//     identifiers the server resolves against a table it built.
+//   - A caller names a registration, never a path. `resources/read` accepts only a URI already in the
+//     store, which holds the (directory, run-relative name) pair recorded when the artifact was written,
+//     so an unpublished file is unaddressable rather than refused by a check.
 
 // ResourceURIScheme is the scheme of every URI this package mints.
 const ResourceURIScheme = "aimesh"
@@ -49,27 +38,17 @@ type Resource struct {
 	MimeType    string `json:"mimeType,omitempty"`
 	Size        int64  `json:"size,omitempty"`
 
-	// Digest is the artifact's recorded content digest, in the receipt's "sha256:<hex>" form, or "" for
-	// an artifact published without one. It is NOT a wire field: under the modern era it is folded into
-	// the URI instead (see digestedResourceURI), which is what makes it part of the cache key rather
-	// than a hint the client is free to ignore.
+	// Digest is the artifact's recorded content digest in "sha256:<hex>" form, or "" when it has none.
+	// It is not a wire field: on the modern era it is folded into the URI (see digestedResourceURI),
+	// making it part of the cache key.
 	Digest string `json:"-"`
 }
 
-// resourceDigestParam is the query parameter that content-addresses a resource URI under the modern era.
-//
-// WHY THE DIGEST IS IN THE URI AND NOT IN A TTL. `ttlMs: 0` is a hint, not a mechanism —
-// server/utilities/caching says "If `ttlMs` is `0`, the response **SHOULD** be considered immediately
-// stale", and then says "Clients **MAY** serve stale responses if errors occur during re-fetching". A
-// zero TTL asks nicely and explicitly permits serving stale bytes when a re-fetch fails. The cache key,
-// by contrast, is enforced: "Clients **MUST NOT** serve a cached response for a request whose method or
-// parameters differ from the request that produced it." Putting the digest in the `uri` parameter makes
-// a cached read serviceable ONLY for the exact digest it was fetched under, so a stale hit is by
-// construction the correct bytes for that identity.
-//
-// The guarantee stated honestly: this is a SERVER-SIDE READ guarantee — we never serve bytes that do not
-// match the digest the receipt recorded, and a mismatch is a loud refusal. It was never a client-side
-// freshness guarantee and cannot be made one.
+// resourceDigestParam is the query parameter that content-addresses a resource URI on the modern era.
+// The digest goes in the URI rather than relying on `ttlMs: 0`, because clients may serve stale
+// responses when a re-fetch fails but must not serve a cached response for different parameters, so a
+// cached read is always the correct bytes for its digest. Separately, the server refuses to serve bytes
+// that do not match the recorded digest.
 const resourceDigestParam = "sha256"
 
 // digestedResourceURI returns uri with the artifact's digest attached as a query parameter, or uri
@@ -98,17 +77,16 @@ func splitResourceDigest(uri string) (base, digest string) {
 	return base, q.Get(resourceDigestParam)
 }
 
-// ResourceContents is one block of a `resources/read` result. Only text contents are produced here: every
-// artifact this repo publishes is a diff, a JSON record or a log, and base64-wrapping text would make it
-// harder to read for no gain.
+// ResourceContents is one block of a `resources/read` result. Only text contents are produced, since
+// published artifacts are diffs, JSON records and logs.
 type ResourceContents struct {
 	URI      string `json:"uri"`
 	MimeType string `json:"mimeType,omitempty"`
 	Text     string `json:"text,omitempty"`
 }
 
-// ResourceProvider is the application seam. A nil provider means the `resources` capability is NOT
-// declared and `resources/*` stays a -32601 — the honest answer for a server with nothing to publish.
+// ResourceProvider is the application seam. A nil provider means the `resources` capability is not
+// declared and `resources/*` returns -32601.
 type ResourceProvider interface {
 	// ListResources returns every resource currently published. It is called per request, so a provider
 	// whose set changes (runs finishing, runs evicted) needs no invalidation protocol.
@@ -117,39 +95,25 @@ type ResourceProvider interface {
 	ReadResource(ctx context.Context, uri string) ([]ResourceContents, error)
 }
 
-// CodeResourceNotFound is the code `resources/read` returns for a URI this server does not publish.
+// CodeResourceNotFound is the code `resources/read` returns for a URI this server does not publish. It
+// shares -32002 with CodeNotInitialized, as the MCP specification assigns that value to "Resource not
+// found"; the two cannot be confused, since one occurs only before the handshake and the other only
+// after. The modern revision forbids emitting -32002 and names -32602 instead, so on that era this code
+// is a declared deviation.
 //
-// It is the same numeric value as CodeNotInitialized, because the MCP specification assigns -32002 to
-// "Resource not found" and this transport had already taken it for the pre-initialization refusal. The two
-// are not ambiguous in practice — one can only occur BEFORE the handshake and the other only AFTER it, and
-// each message names its own case — but the sharing is stated here rather than left for a reader to notice.
-//
-// NOT SUNSET-PATH — and this counter-marker is the point. MCP26-SUNSET's checklist has a row
-// "the pre-init `-32002` refusal … deleted, not renumbered". That row means CodeNotInitialized. It
-// does NOT mean this constant, which is a live `resources/read` code and is reachable on both eras.
-// A remover who greps `-32002` and deletes what it finds would take the wrong one.
-//
-// Two things are nonetheless owed here at removal, and are recorded so they are not rediscovered:
-// `2026-07-28` forbids emitting `-32002` at all ("Implementations of this protocol version MUST NOT
-// emit these codes: `-32002` …"), so on the modern era this code is a declared deviation, and the
-// replacement the same page names is `-32602`. Changing it is a wire-visible change to a live code
-// and is deliberately not bundled into the sunset deletion.
+// This live code is not part of the MCP26-SUNSET removal, which deletes only CodeNotInitialized.
 const CodeResourceNotFound = -32002
 
 // --- the run-scoped artifact store ---
 
-// maxResourceBytes bounds ONE artifact read. A patch large enough to exceed it is refused rather than
-// truncated: a syntactically valid partial diff is worse than an error, which is the same reason the
-// receipt carries a link and a hash instead of inline content.
+// maxResourceBytes bounds one artifact read. A larger artifact is refused rather than truncated, because
+// a valid partial diff is worse than an error.
 const maxResourceBytes int64 = 4 << 20 // 4 MiB
 
 // RunStore publishes a run's artifacts as MCP resources, addressed by an opaque run id plus a logical
-// artifact name. It is domain-free: it knows a run has artifacts, not what any of them mean.
-//
-// The store holds the artifact's DIRECTORY and its directory-relative name. A read goes through
-// workspace.ReadUnder — the same identity-bound, no-follow, regular-file-only, bounded read the containment
-// layer uses — so an artifact whose path was swapped for a symlink between registration and collection is
-// refused rather than followed.
+// artifact name. It holds each artifact's directory and directory-relative name, and reads through
+// workspace.ReadUnder, the identity-bound, no-follow, bounded read of the containment layer, so an
+// artifact swapped for a symlink after registration is refused.
 type RunStore struct {
 	mu   sync.Mutex
 	byID map[string]*storedArtifact
@@ -163,7 +127,7 @@ type storedArtifact struct {
 	title       string
 	description string
 	mimeType    string
-	dir         string // the run directory — NEVER published
+	dir         string // the run directory, never published
 	rel         string // the run-relative artifact name
 	size        int64
 	sha256      string
@@ -173,7 +137,7 @@ type storedArtifact struct {
 // Artifact declares one artifact to publish. Dir + Rel are the server's own private resolution; nothing
 // about either reaches the wire.
 type Artifact struct {
-	// Name is the LOGICAL artifact name a URI addresses ("patch", "manifest"). It must be a single
+	// Name is the logical artifact name a URI addresses ("patch", "manifest"). It must be a single
 	// path-free token: it is the last segment of the URI, not a file name.
 	Name string
 	// Title / Description are for a human reading a client's resource picker.
@@ -183,9 +147,8 @@ type Artifact struct {
 	// Dir is the directory the artifact lives in; Rel is its directory-relative name.
 	Dir string
 	Rel string
-	// SHA256 is the digest recorded when the artifact was WRITTEN, in the receipt's own
-	// "sha256:<hex>" form. When present it is re-verified on every read: an artifact that no longer
-	// digests to what its receipt says is refused, because the receipt is the thing a caller trusts.
+	// SHA256 is the digest recorded when the artifact was written, in "sha256:<hex>" form. When
+	// present it is re-verified on every read, and an artifact that no longer matches is refused.
 	SHA256 string
 }
 
@@ -195,27 +158,8 @@ func ResourceURI(runID, name string) string {
 	return ResourceURIScheme + "://run/" + url.PathEscape(runID) + "/" + url.PathEscape(name)
 }
 
-// ParseResourceURI splits a resource URI back into its run id and artifact name.
-func ParseResourceURI(uri string) (runID, name string, ok bool) {
-	u, err := url.Parse(strings.TrimSpace(uri))
-	if err != nil || !strings.EqualFold(u.Scheme, ResourceURIScheme) || u.Host != "run" {
-		return "", "", false
-	}
-	parts := strings.Split(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	runID, rerr := url.PathUnescape(parts[0])
-	name, nerr := url.PathUnescape(parts[1])
-	if rerr != nil || nerr != nil || runID == "" || name == "" {
-		return "", "", false
-	}
-	return runID, name, true
-}
-
 // Publish registers an artifact and returns its URI. A name that is not a single path-free token is
-// refused (empty URI): the URI's last segment is an IDENTIFIER, and letting a path shape through would
-// make the address describe a layout.
+// refused with an empty URI, since the URI's last segment is an identifier.
 func (st *RunStore) Publish(runID string, a Artifact) string {
 	runID, a.Name = strings.TrimSpace(runID), strings.TrimSpace(a.Name)
 	if runID == "" || a.Name == "" || strings.ContainsAny(a.Name, `/\`) || strings.TrimSpace(a.Dir) == "" {
@@ -281,12 +225,9 @@ func (st *RunStore) ListResources(context.Context) ([]Resource, error) {
 	return out, nil
 }
 
-// ReadResource implements ResourceProvider. The URI must already be published; there is no request shape
-// that reaches a file this store did not itself register.
-// A URI may carry the artifact's digest (the modern era's content-addressed form, see
-// resourceDigestParam) or not (the legacy form). BOTH resolve to the same artifact and both run the same
-// server-side digest check; a digest that names a version this store no longer holds is refused rather
-// than answered with the current bytes under the old identity.
+// ReadResource implements ResourceProvider. Only a published URI resolves. A URI may carry the
+// artifact's digest (the modern form, see resourceDigestParam) or not (the legacy form); both run the
+// same server-side digest check, and a digest this store no longer holds is refused.
 func (st *RunStore) ReadResource(_ context.Context, uri string) ([]ResourceContents, error) {
 	base, asked := splitResourceDigest(uri)
 	st.mu.Lock()
@@ -309,7 +250,7 @@ func (st *RunStore) ReadResource(_ context.Context, uri string) ([]ResourceConte
 	}
 	b, err := workspace.ReadUnder(a.dir, a.rel, maxResourceBytes)
 	if err != nil {
-		// The refusal names the RULE, never the path: the path is precisely what this surface withholds.
+		// The refusal names the rule, never the path.
 		return nil, &RequestError{
 			Code: CodeInternal,
 			Message: fmt.Sprintf("resource %q could not be read: %s (reasonCode %s)",
@@ -327,13 +268,12 @@ func (st *RunStore) ReadResource(_ context.Context, uri string) ([]ResourceConte
 			}
 		}
 	}
-	// The URI is echoed AS THE CALLER ADDRESSED IT, digest and all: the cache key is the request's `uri`
-	// parameter, so a response that answered a digest-bearing request with the bare URI would invite the
-	// caller to key its cache on an identity it never asked for.
+	// The URI is echoed as the caller addressed it, digest included, since the cache key is the
+	// request's `uri`.
 	return []ResourceContents{{URI: strings.TrimSpace(uri), MimeType: a.mimeType, Text: string(b)}}, nil
 }
 
-// ruleOf renders a workspace refusal's RULE (what was disallowed), falling back to the error text.
+// ruleOf renders a workspace refusal's rule, falling back to the error text.
 func ruleOf(err error) string {
 	if r, ok := workspace.AsRefusal(err); ok && r.Rule != "" {
 		return r.Rule
@@ -362,20 +302,15 @@ func (s *Server) listResources(ctx context.Context, env *RequestEnv, id json.Raw
 	if list == nil {
 		list = []Resource{}
 	}
-	// No paging: the set is a handful of artifacts per retained run, and a cursor nothing can page
-	// through would be a declaration this server does not honor.
+	// No paging: the set is a handful of artifacts per retained run.
 	return okResp(id, s.result(env, map[string]any{"resources": advertisedResources(env, list)}))
 }
 
-// advertisedResources is the ADDRESS a resource is published under, per era.
+// advertisedResources returns the addresses resources are published under for the request's era. On the
+// modern era each URI carries its content digest (see resourceDigestParam); legacy addresses are
+// unchanged. The bare URI still reads on both eras.
 //
-// Modern: the URI carries the artifact's content digest, so the digest is part of the cache key (see
-// resourceDigestParam). Legacy: unchanged. The bare URI still READS under both eras — we simply stop
-// ADVERTISING it under modern — so no client is stranded by the change, and the legacy golden is
-// untouched because legacy emits no caching hints at all and nothing is invited to cache.
-//
-// SUNSET-PATH (MCP26-SUNSET): the dual-URI handling collapses to the
-// digest form and this function becomes unconditional.
+// SUNSET-PATH (MCP26-SUNSET): the dual-URI handling collapses to the digest form.
 func advertisedResources(env *RequestEnv, list []Resource) []Resource {
 	if env == nil || env.Era != EraModern {
 		return list
@@ -388,8 +323,8 @@ func advertisedResources(env *RequestEnv, list []Resource) []Resource {
 	return out
 }
 
-// readResourceURI decodes and validates a `resources/read` request. Split out so admission STEP 5 can
-// apply the identical check before the era latch.
+// readResourceURI decodes and validates a `resources/read` request; admission step 5 applies the same
+// check before the latch.
 func (s *Server) readResourceURI(id json.RawMessage, params json.RawMessage) (string, *rpcResponse) {
 	var p readResourceParams
 	if len(params) > 0 {
@@ -416,8 +351,7 @@ func (s *Server) readResource(ctx context.Context, env *RequestEnv, id json.RawM
 	}
 	contents, err := s.Resources.ReadResource(ctx, uri)
 	if err != nil {
-		var re *RequestError
-		if errors.As(err, &re) {
+		if re, ok := errors.AsType[*RequestError](err); ok {
 			return errResp(id, re.Code, re.Message, re.Data)
 		}
 		return errResp(id, CodeInternal, "resources/read failed: "+err.Error())

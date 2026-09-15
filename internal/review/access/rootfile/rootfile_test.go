@@ -36,11 +36,8 @@ func TestRead_ReadsThroughRoot(t *testing.T) {
 	}
 }
 
-// THE A2/A3 THREAT. The confinement layer resolved a path and approved it; by the time the
-// bytes are fetched, that path names a SYMLINK to a file outside the root. A path-string read
-// (os.ReadFile on the resolved string) follows it and hands the outside content to the
-// caller, which puts it in a model prompt. Reading through the root handle refuses it, on the
-// object that was actually opened.
+// A path approved by confinement is replaced with a symlink to a file outside the root before it is
+// read. A path-string read would follow it; reading through the root handle refuses it.
 func TestRead_RefusesFinalComponentSwappedToSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs developer mode/elevation on Windows")
@@ -57,7 +54,7 @@ func TestRead_RefusesFinalComponentSwappedToSymlink(t *testing.T) {
 	if err := os.Symlink(outside, abs); err != nil {
 		t.Fatal(err)
 	}
-	// Sanity: this is exactly what the OLD path-string read would have returned.
+	// Precondition: a path-string read returns the outside content.
 	if b, err := os.ReadFile(abs); err != nil || string(b) != "SECRET" {
 		t.Fatalf("precondition: a path-string read should yield the outside content, got %q / %v", b, err)
 	}
@@ -73,8 +70,8 @@ func TestRead_RefusesFinalComponentSwappedToSymlink(t *testing.T) {
 	}
 }
 
-// An INTERMEDIATE component swapped to a symlink that leaves the root is refused too: os.Root
-// resolves every component against the open boundary and will not follow one out.
+// An intermediate component swapped for a symlink that leaves the root is refused: os.Root resolves
+// every component against the open boundary.
 func TestRead_RefusesIntermediateComponentEscape(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs developer mode/elevation on Windows")
@@ -99,10 +96,8 @@ func TestRead_RefusesIntermediateComponentEscape(t *testing.T) {
 	}
 }
 
-// The BOUNDARY itself can be swapped between the identity capture and the open. os.Root
-// confines traversal inside whatever boundary it opened; it does not decide which one that
-// is. The identity binding (os.SameFile on the opened handle) is what closes that window —
-// and the hook is what lets the window be entered deterministically instead of raced.
+// The boundary itself is swapped between identity capture and open. The identity binding
+// (os.SameFile on the opened handle) refuses it; the test hook enters that window deterministically.
 func TestReadUnder_RefusesSwappedBoundary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs developer mode/elevation on Windows")
@@ -151,9 +146,8 @@ func TestReadUnder_RefusesSwappedBoundary(t *testing.T) {
 	}
 }
 
-// A hardlinked regular file has more than one NAME. The denylist matches path COMPONENTS, so
-// it cannot see the other name — an innocuous `docs/design.md` may be a second name for
-// `~/.ssh/id_rsa`, and these bytes are headed for a prompt. Refused, with the link count.
+// A hardlinked file may be a second name for a protected file the denylist cannot see, so it is
+// refused with the link count.
 func TestRead_RefusesHardlinkedFile(t *testing.T) {
 	if _, ok := linkCount(mustStat(t, mkFile(t))); !ok {
 		t.Skip("link count is not knowable on this platform")
@@ -182,8 +176,8 @@ func TestRead_RefusesNonRegular(t *testing.T) {
 	}
 }
 
-// The longest containing root wins: when a caller consented to both a tree and a subtree
-// inside it, the NARROWER consent is the boundary the read is confined to.
+// The longest containing root wins: given a tree and a subtree inside it, the read is confined to
+// the subtree.
 func TestBoundary_PrefersLongestContainingRoot(t *testing.T) {
 	root, abs := mkRoot(t)
 	narrow := filepath.Join(root, "docs")
@@ -196,10 +190,8 @@ func TestBoundary_PrefersLongestContainingRoot(t *testing.T) {
 	}
 }
 
-// SINGLE-FILE CONSENT. A human may name exactly one path, and the scope resolver then records
-// that FILE as a root — there is no consented directory above it. The boundary falls back to
-// the file's own canonical parent, so the read is still handle-based rather than degrading to
-// a path-string read.
+// When the only root is the file itself, the boundary is the file's parent directory, so the read is
+// still handle-based.
 func TestBoundary_FallsBackToParentForSingleFileConsent(t *testing.T) {
 	_, abs := mkRoot(t)
 	dir, rel, err := boundary([]string{abs}, abs)

@@ -2,12 +2,10 @@ package workspace
 
 import "os"
 
-// isReparse reports whether a filesystem entry is a symlink or any other reparse
-// point (on Windows: junctions, mount points, and other reparse points) — i.e.
-// anything that can redirect outside the workspace and therefore must never be
-// followed when copying, or written through when committing. The Windows reparse
-// attribute is checked in reparse_windows.go; on other OSes the symlink/irregular
-// mode bits are sufficient (reparse_other.go is a no-op).
+// isReparse reports whether a filesystem entry is a symlink or other reparse point (on Windows,
+// junctions and mount points), which can redirect outside the workspace and so is never followed when
+// copying or written through when committing. The Windows reparse attribute is checked in
+// reparse_windows.go; elsewhere the mode bits suffice.
 func isReparse(info os.FileInfo) bool {
 	if info == nil {
 		return false
@@ -18,16 +16,8 @@ func isReparse(info os.FileInfo) bool {
 	return reparseAttr(info)
 }
 
-// reparseAttr is the reparse-ATTRIBUTE probe, held in a var for one reason: on unix the
-// attribute half of isReparse is unreachable (reparse_other.go returns false), so the guards
-// that depend on it are otherwise provably untestable — deleting the `isReparse` call in the
-// copy walk fails nothing there, because a POSIX symlink is caught by the `IsRegular` filter
-// one line below regardless. A Windows JUNCTION is not: it carries the
-// reparse attribute WITHOUT the symlink mode bit, so it looks like an ordinary entry to every
-// other check in this package, and that guard is the only thing standing between it and a
-// copy that follows it out of the workspace.
-//
-// Substituting it lets a test simulate exactly that entry on any platform. It is the same
-// pattern `streamAliasing` already uses here and in meshcore/scope for the other Windows-only
-// aliasing rule; production code never assigns to it.
+// reparseAttr is the reparse-attribute check, held in a variable so tests can simulate a Windows
+// junction on any platform. A junction carries the reparse attribute without the symlink mode bit, so
+// only this check stops a copy from following it out of the workspace. Production code never assigns
+// to it.
 var reparseAttr = hasReparseAttr

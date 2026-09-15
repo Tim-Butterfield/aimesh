@@ -20,8 +20,7 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// authorityWorkspace returns a reviewable workspace plus a design doc kept OUTSIDE it (the
-// other common shape: the spec lives in a docs repo, not the tree under review).
+// authorityWorkspace returns a reviewable workspace and a design document stored outside it.
 func authorityWorkspace(t *testing.T, spec string) (ws, specPath string) {
 	t.Helper()
 	ws = jsonWorkspace(t)
@@ -32,8 +31,8 @@ func authorityWorkspace(t *testing.T, spec string) (ws, specPath string) {
 	return ws, specPath
 }
 
-// `--authority` + a matching `--authority-hash` runs, and the machine projection carries the
-// inclusion manifest — the CLI half of "authority lands on CLI and ACP together".
+// --authority with a matching --authority-hash runs, and the JSON projection carries the inclusion
+// manifest.
 func TestCLIAuthority_JSONProjectionCarriesManifest(t *testing.T) {
 	hermeticReview(t, "valid")
 	spec := "# Spec\n\nfail closed.\n"
@@ -60,8 +59,7 @@ func TestCLIAuthority_JSONProjectionCarriesManifest(t *testing.T) {
 	}
 }
 
-// The projection ALWAYS carries the authority array, so "judged against nothing" is stated
-// rather than inferred from a missing key.
+// The projection always carries the authority array, so "judged against nothing" is explicit.
 func TestCLIAuthority_ProjectionAlwaysPresent(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, out, errs := run(t, "review", "--report", "--json", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -73,8 +71,7 @@ func TestCLIAuthority_ProjectionAlwaysPresent(t *testing.T) {
 	}
 }
 
-// A hash pin that does not match HALTS with the machine reason code — the CLI's error
-// carrier for the same refusal ACP reports as -32602.
+// A mismatched hash pin halts with the machine reason code.
 func TestCLIAuthority_HashMismatchHalts(t *testing.T) {
 	hermeticReview(t, "valid")
 	ws, specPath := authorityWorkspace(t, "current\n")
@@ -156,8 +153,7 @@ func TestCLIAuthority_ManifestRanges(t *testing.T) {
 	}
 }
 
-// Usage guards: the two declaration forms do not mix, and a pin that names nothing is a typo
-// — and a typo'd pin pins NOTHING, which is exactly what a pin exists to prevent.
+// The two declaration forms do not mix, and a pin that names no declared document is refused.
 func TestCLIAuthority_UsageGuards(t *testing.T) {
 	hermeticReview(t, "valid")
 	ws, specPath := authorityWorkspace(t, "spec\n")
@@ -185,8 +181,8 @@ func TestCLIAuthority_UsageGuards(t *testing.T) {
 	}
 }
 
-// Flags may appear before OR after the positional path — the authority flags take a value, so
-// splitArgs must know about them or the path would be swallowed.
+// Flags may appear before or after the positional path, so splitArgs must know the authority flags
+// take a value.
 func TestCLIAuthority_FlagOrderIndependent(t *testing.T) {
 	hermeticReview(t, "valid")
 	ws, specPath := authorityWorkspace(t, "spec\n")
@@ -203,7 +199,7 @@ func TestCLIAuthority_FlagOrderIndependent(t *testing.T) {
 	}
 }
 
-// strconvQuote JSON-quotes a path (Windows separators need escaping in a JSON string).
+// strconvQuote JSON-quotes a path, escaping Windows separators.
 func strconvQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)

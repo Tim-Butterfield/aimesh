@@ -19,18 +19,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/pathexpand"
 )
 
-// runMCP runs reviewmesh as a local MCP (Model Context Protocol) stdio server.
+// runMCP runs reviewmesh as a local MCP stdio server, configured only from its launch arguments:
+// adapters, the write grant, an optional --root ceiling and the bounded-execution grants. Each call
+// supplies its panel, models and workspace.
 //
-// The server is configured from its launch arguments alone — never from saved aimesh configuration:
-// the adapters it may use (`--adapter`), whether aimesh may apply changes (`--allow-writes`), an
-// optional `--root` ceiling, and the bounded-execution grants. Every run's panel, models and workspace
-// come from the call.
-//
-// STDOUT PURITY is enforced here and nowhere else, because here is where it can be: the protocol
-// stream is the process's real stdout, and the server spawns provider CLIs. Before serving,
-// `os.Stdout` is REPOINTED at stderr and the captured original becomes the protocol stream. Any stray
-// print — from this process, a library, or a child that inherited the descriptor — then lands on
-// stderr instead of corrupting a JSON-RPC frame.
+// Before serving, os.Stdout is pointed at stderr and the original becomes the protocol stream, so a
+// stray print from this process or a child cannot corrupt a JSON-RPC frame.
 func runMCP(args []string, stdout, errw io.Writer) int {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(errw)
@@ -56,27 +50,22 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 	return int(fault.OK)
 }
 
-// RegisterMCPFlags declares reviewmesh's OWN mcp flags on fs and returns the builder for the
-// configured server. It is exported for `aimesh mcp`, which registers both domains' flags on one
-// flag set and then builds only the domains it was asked to serve.
-//
-// sh, adapters and writes are registered once by the command that owns fs and are passed in, so a
-// command serving both domains never registers a name twice.
+// RegisterMCPFlags declares reviewmesh's own mcp flags on fs and returns the server builder. `aimesh
+// mcp` registers both domains' flags on one flag set and builds only the domains it serves; sh,
+// adapters and writes are registered once by the owner of fs.
 func RegisterMCPFlags(fs *flag.FlagSet, sh *mcpflags.Shared, adapters *launchflags.Adapters, writes *launchflags.Writes) func(errw io.Writer) (*mcp.Server, int) {
 	var roots setFlags
 	fs.Var(&roots, "root", "an absolute directory every call's declared workspace and roots must lie inside (repeatable). Without it, a call may declare any absolute directory that is not the filesystem root, a home directory, a system tree or a protected directory")
 	allowBroadRoot := fs.Bool("allow-broad-root", false, "permit a --root that is normally refused as over-broad (/, a home directory, a system/shared tree)")
-	// The OPERATOR opt-ins: given at launch, never as a tool parameter. This server's caller is a MODEL,
-	// and a model must not be able to widen what containment admits or to name a command this process
-	// executes.
+	// Operator opt-ins are launch flags, never tool parameters, because the caller is a model.
 	resolveWritePolicy := registerWritePolicyFlags(fs, "mcp")
 	return func(errw io.Writer) (*mcp.Server, int) {
 		return buildMCPServer(sh, adapters, writes, roots, *allowBroadRoot, resolveWritePolicy, errw)
 	}
 }
 
-// buildMCPServer resolves the launch configuration and returns the configured server. A nil server
-// means the int is the exit code to return.
+// buildMCPServer resolves the launch configuration and returns the server. When the server is nil, the
+// int is the exit code.
 func buildMCPServer(sh *mcpflags.Shared, adapters *launchflags.Adapters, writes *launchflags.Writes, roots []string,
 	allowBroadRoot bool, resolveWritePolicy func(io.Writer) (writePolicy, bool), errw io.Writer) (*mcp.Server, int) {
 
@@ -108,8 +97,7 @@ func buildMCPServer(sh *mcpflags.Shared, adapters *launchflags.Adapters, writes 
 		fmt.Fprintln(errw, "aimesh review mcp:", err)
 		return nil, int(fault.CodeOf(err))
 	}
-	// Stated on stderr at launch as well as in `review_doctor`, because an operator reading a host log
-	// should not have to call a tool to learn the server cannot run anything yet.
+	// Also stated on stderr, so a host log shows the server cannot run anything yet.
 	if set.Empty() {
 		fmt.Fprintf(errw, "aimesh review mcp: no adapter named — every review is refused until the host configuration adds --adapter <name> (or %s).\n", launchflags.EnvVar)
 	}
@@ -137,9 +125,8 @@ func buildMCPServer(sh *mcpflags.Shared, adapters *launchflags.Adapters, writes 
 	return srv, int(fault.OK)
 }
 
-// launchView is the production implementation of mcp.Config: the named adapters and their availability
-// at the moment of the call. It hands the MCP surface only logical facts; the projection types carry no
-// path field at all.
+// launchView implements mcp.Config: the named adapters and their availability when asked. It exposes
+// no paths.
 type launchView struct {
 	set launchflags.Set
 }

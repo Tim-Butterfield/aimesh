@@ -3,6 +3,7 @@ package mcpserve
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
@@ -48,8 +49,7 @@ func (f *fakeTasks) CancelTask(id string) bool {
 
 // --- the routing contract ---
 
-// ListResources concatenates: a client asking what this server publishes must see BOTH domains' runs,
-// not whichever provider happens to be first.
+// ListResources lists both domains' resources.
 func TestResources_ListConcatenatesBothDomains(t *testing.T) {
 	a := &fakeResources{list: []proto.Resource{{URI: "a1"}, {URI: "a2"}}}
 	b := &fakeResources{list: []proto.Resource{{URI: "b1"}}}
@@ -63,15 +63,13 @@ func TestResources_ListConcatenatesBothDomains(t *testing.T) {
 	}
 }
 
-// ReadResource routes by ASKING each provider, not by parsing the URI. A not-found from one is only
-// "not mine" — returning it would make the second domain's resources unreachable.
+// ReadResource routes by asking each provider, not by parsing the URI.
 func TestResources_ReadRoutesByOwnershipNotByParsing(t *testing.T) {
 	a := &fakeResources{owns: map[string]string{"review://run/1": "review body"}}
 	b := &fakeResources{owns: map[string]string{"anything-at-all": "explore body"}}
 	c := composeResources([]proto.ResourceProvider{a, b})
 
-	// Owned by the SECOND provider, and its URI shares no prefix, scheme or shape with the first's —
-	// which is the point: routing must not depend on the identifier looking like anything.
+	// Owned by the second provider, with a URI shaped nothing like the first's.
 	got, err := c.ReadResource(context.Background(), "anything-at-all")
 	if err != nil {
 		t.Fatalf("a URI owned by the second provider must be reachable: %v", err)
@@ -91,8 +89,7 @@ func TestResources_ReadRoutesByOwnershipNotByParsing(t *testing.T) {
 	}
 }
 
-// The one that matters most: a cancel must reach the domain that owns the run. Delivered to the wrong
-// registry it would be reported as acknowledged while the real run kept spending.
+// A cancel must reach the domain that owns the run, or a running run would keep spending.
 func TestTasks_CancelReachesTheOwningDomain(t *testing.T) {
 	a := &fakeTasks{owns: map[string]bool{"20260809T010101-abc": true}}
 	b := &fakeTasks{owns: map[string]bool{"run-def": true}}
@@ -108,8 +105,7 @@ func TestTasks_CancelReachesTheOwningDomain(t *testing.T) {
 		t.Errorf("the cancel reached the WRONG domain: %v", a.cancelled)
 	}
 
-	// An unknown id is not acknowledged. Reporting true here would tell a caller their run is
-	// stopping when nothing was signalled.
+	// An unknown id is not acknowledged.
 	if c.CancelTask("never-existed") {
 		t.Error("an unknown task id must not be acknowledged")
 	}
@@ -130,8 +126,7 @@ func TestTasks_LookupRoutesToTheOwner(t *testing.T) {
 	}
 }
 
-// A single provider is passed through rather than wrapped: --only serves one domain, and a composite
-// of one would add a hop that can only ever forward.
+// A single provider is used directly rather than wrapped.
 func TestCompose_SingleProviderIsNotWrapped(t *testing.T) {
 	r := &fakeResources{}
 	if got := composeResources([]proto.ResourceProvider{r}); got != proto.ResourceProvider(r) {
@@ -188,8 +183,7 @@ func TestDomain_Serves(t *testing.T) {
 	}
 }
 
-// A selected-but-unconfigured domain is an error at build time, not a server that quietly starts with
-// half its tools.
+// A selected domain that is not configured is a build error.
 func TestBuild_RefusesASelectedDomainThatIsNotConfigured(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -200,15 +194,14 @@ func TestBuild_RefusesASelectedDomainThatIsNotConfigured(t *testing.T) {
 		{"both selected, both absent", &Server{Only: DomainAll}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := tc.s.Core(); err == nil {
+			if _, err := tc.s.build(); err == nil {
 				t.Error("a selected domain that is not configured must be an error")
 			}
 		})
 	}
 }
 
-// The composed instructions must name what is actually served — a review-only server describing
-// explore tools would send a model looking for tools that are not in the list.
+// The composed instructions describe only the domains served.
 func TestInstructions_DescribeOnlyWhatIsServed(t *testing.T) {
 	all := (&Server{Only: DomainAll}).instructions()
 	if !contains(all, "review_") || !contains(all, "explore") {
@@ -225,7 +218,7 @@ func TestInstructions_DescribeOnlyWhatIsServed(t *testing.T) {
 	if contains(exp, "review_report") {
 		t.Error("explore-only instructions must not advertise review tools")
 	}
-	// The guide pointer is unconditional: it is where the expensive-to-get-wrong rules live.
+	// Every variant points at the agent guide.
 	for _, s := range []string{all, rev, exp} {
 		if !contains(s, "agents_md") {
 			t.Error("every variant must point at agents_md")
@@ -233,13 +226,4 @@ func TestInstructions_DescribeOnlyWhatIsServed(t *testing.T) {
 	}
 }
 
-func contains(hay, needle string) bool {
-	return len(hay) >= len(needle) && (func() bool {
-		for i := 0; i+len(needle) <= len(hay); i++ {
-			if hay[i:i+len(needle)] == needle {
-				return true
-			}
-		}
-		return false
-	})()
-}
+func contains(hay, needle string) bool { return strings.Contains(hay, needle) }

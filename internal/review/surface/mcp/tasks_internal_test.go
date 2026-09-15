@@ -7,19 +7,12 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// The TASKS PROJECTION over this server's run registry. The MUTATION each test would catch is named on
-// it.
-//
-// These are INTERNAL tests deliberately: the thing under test is the mapping from a `*record` to the
-// extension's vocabulary, and driving it over the wire would additionally exercise the transport,
-// which meshcore/mcp/tasks_test.go already covers. What is proven here is the half only this package
-// can be wrong about — which run state becomes which task status, and what `ttlMs` says.
+// These internal tests cover the mapping from a run record to task status and ttlMs; the transport is
+// covered by meshcore/mcp/tasks_test.go. Each test names the mutation it would catch.
 
 func provider(s *Server) taskProvider { return taskProvider{s} }
 
-// TestTaskProjection_RunningIsWorkingWithAnUnlimitedTTL. A running record is NEVER evicted, so there
-// is no lifetime bound to advertise and `null` is the honest value. `0` would declare a task the
-// server may discard immediately — a handle we told the client to throw away.
+// A running record is never evicted, so its ttl is null.
 // MUTATION: return a non-nil ttl for the running branch of resolveTask.
 func TestTaskProjection_RunningIsWorkingWithAnUnlimitedTTL(t *testing.T) {
 	s := &Server{}
@@ -46,9 +39,7 @@ func TestTaskProjection_RunningIsWorkingWithAnUnlimitedTTL(t *testing.T) {
 	}
 }
 
-// TestTaskProjection_HaltedIsCompletedWithIsErrorNeverFailed is the state-table row the design flags
-// as the one to get wrong, and the extension states it as a MUST: "The `failed` status MUST NOT
-// represent non-JSON-RPC errors like tool results with `isError: true`."
+// A halted run is completed with isError, never failed.
 // MUTATION: map StateHalted to proto.TaskFailed.
 func TestTaskProjection_HaltedIsCompletedWithIsErrorNeverFailed(t *testing.T) {
 	s := &Server{}
@@ -74,10 +65,7 @@ func TestTaskProjection_HaltedIsCompletedWithIsErrorNeverFailed(t *testing.T) {
 	}
 }
 
-// TestTaskProjection_PartialRefusalIsCompletedWithIsError — the OTHER row that maps to
-// `completed` + `isError`. Two of our outcomes share one extension status, deliberately: at the
-// extension's level of description both are "the request completed and the tool reports a problem".
-// The distinction that matters lives one level down, in structuredContent.
+// A partial refusal is also completed with isError; structuredContent distinguishes it from a halt.
 // MUTATION: map an isError record with state complete to TaskFailed.
 func TestTaskProjection_PartialRefusalIsCompletedWithIsError(t *testing.T) {
 	s := &Server{}
@@ -101,9 +89,7 @@ func TestTaskProjection_PartialRefusalIsCompletedWithIsError(t *testing.T) {
 	}
 }
 
-// TestTaskProjection_CancelledIsCancelledAndCarriesNoResult. `CancelledTask` has no `result` field
-// in the extension's type. The durable answer to "what did it write" is the run directory's receipt,
-// which is where it has always been — a cancelled call may receive no response at all.
+// A cancelled run is a cancelled task with no result.
 // MUTATION: attach payloadFor(rec) on the cancelled branch.
 func TestTaskProjection_CancelledIsCancelled(t *testing.T) {
 	s := &Server{}
@@ -120,9 +106,7 @@ func TestTaskProjection_CancelledIsCancelled(t *testing.T) {
 	}
 }
 
-// TestTaskProjection_TerminalTTLIsTheRealRetentionAndDecreases. `ttlMs` is TASK LIFETIME FROM
-// CREATION, not a caching hint. It carries the registry's real `finishedTTL` remaining, and the
-// extension explicitly permits it to change over the task's life.
+// A terminal task's ttlMs is the registry's remaining finishedTTL, which decreases over time.
 // MUTATION: return a constant ttl for the terminal branch.
 func TestTaskProjection_TerminalTTLIsTheRealRetentionAndDecreases(t *testing.T) {
 	s := &Server{}
@@ -149,10 +133,7 @@ func TestTaskProjection_TerminalTTLIsTheRealRetentionAndDecreases(t *testing.T) 
 	}
 }
 
-// TestTaskProjection_ExpiredTerminalTaskIsGone. Eviction in the registry is LAZY, so without this a
-// task could stay resolvable long past the `ttlMs` we advertised and every later poll would have to
-// report 0. The extension permits discarding an expired task and answering "cannot be found", which
-// is what makes "never 0 while resolvable" true by construction rather than by a floor we invented.
+// An expired terminal task is not found, so a resolvable task never reports ttlMs 0.
 // MUTATION: delete the `remaining <= 0` branch in resolveTask.
 func TestTaskProjection_ExpiredTerminalTaskIsGone(t *testing.T) {
 	s := &Server{}
@@ -172,13 +153,8 @@ func TestTaskProjection_ExpiredTerminalTaskIsGone(t *testing.T) {
 	}
 }
 
-// TestTaskProjection_CancelDeliversToTheRunAndAcknowledgesTerminalIdsToo.
-//
-// The acknowledgement means the signal reached the run's context and NOTHING MORE. What the run does
-// with it is decided once, under a lock, at `writeWindow.enter` — a cancel that wins yields
-// `cancelled`, a cancel that loses yields `completed`, and the extension explicitly permits the
-// second. This test therefore asserts DELIVERY and asserts nothing about the terminal status; a test
-// that did would be pinning a guarantee we do not make.
+// CancelTask delivers the signal to the run and acknowledges terminal ids too. The terminal status
+// depends on whether cancellation wins the write window, so the test asserts only delivery.
 // MUTATION: drop the `rec.cancel()` call, or return false for a terminal record.
 func TestTaskProjection_CancelDeliversToTheRunAndAcknowledgesTerminalIdsToo(t *testing.T) {
 	s := &Server{}
@@ -192,7 +168,7 @@ func TestTaskProjection_CancelDeliversToTheRunAndAcknowledgesTerminalIdsToo(t *t
 	if delivered != 1 {
 		t.Fatalf("cancel deliveries = %d, want 1 — the acknowledgement means the signal reached the run's context, and it must actually have", delivered)
 	}
-	// A TERMINAL id is still a KNOWN id: cancelling it is a no-op, not an error.
+	// A terminal id is still known: cancelling it is a no-op.
 	rec.finish(StateComplete, map[string]any{"state": StateComplete}, "done", false)
 	if !provider(s).CancelTask(rec.ID) {
 		t.Error("cancelling a finished task must be acknowledged; -32602 is for an id that names nothing")
@@ -205,8 +181,7 @@ func TestTaskProjection_CancelDeliversToTheRunAndAcknowledgesTerminalIdsToo(t *t
 	}
 }
 
-// TestTaskHandOff_OnlyARunningRunBecomesAHandle. A finished run's real result is strictly better
-// than a handle to it, and the extension leaves the choice to the server per request.
+// Only a running run is handed off as a task.
 // MUTATION: drop the state check in taskHandOff.
 func TestTaskHandOff_OnlyARunningRunBecomesAHandle(t *testing.T) {
 	s := &Server{}
@@ -214,9 +189,7 @@ func TestTaskHandOff_OnlyARunningRunBecomesAHandle(t *testing.T) {
 	rec, _ := s.runs.admit("run-x", toolReport, "report", "", "", func() {})
 	rec.finish(StateComplete, map[string]any{"state": StateComplete}, "done", false)
 
-	// A nil Call cannot create a task, which is also the fail-closed answer: `Call.CreateTask` is
-	// the single enforcement point for "never return a task to a non-declaring client", and it
-	// answers false for anything it cannot verify.
+	// A nil Call cannot create a task; Call.CreateTask answers false for anything it cannot verify.
 	if taskHandOff(nil, rec) {
 		t.Fatal("a finished run produced a task handle")
 	}

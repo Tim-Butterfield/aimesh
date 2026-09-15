@@ -2,9 +2,8 @@ package clihint
 
 import "testing"
 
-// TestForFailure pins the single derivation used by BOTH the human hint and the persisted
-// audit signal: a text match wins; a watchdog kill with no match is a timeout; anything
-// else is unclassified (the caller renders its own generic guidance).
+// ForFailure is the one derivation behind both the human hint and the recorded signal: a text match
+// wins, a watchdog kill with no match is a timeout, and anything else is unclassified.
 func TestForFailure(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -30,13 +29,9 @@ func TestForFailure(t *testing.T) {
 	}
 }
 
-// TestForFailure_TheEchoedPromptIsNotEvidence is the regression for the misclassification measured on
-// 2026-08-11: a real codex seat failed on an unsupported model, and the run reported `folder_trust`
-// and told the user to fix folder trust — because codex echoes the prompt to stderr, the prompt
-// embedded this repo's own source, and that source says "trusted" a lot.
-//
-// The shape below is the real one: a large echo containing OUR vocabulary, with the adapter's actual
-// error at the very end.
+// A prompt echoed to stderr is not evidence. codex echoes the prompt, and a prompt that embeds source
+// mentioning "trusted" would otherwise classify an unsupported-model failure as folder trust. The
+// fixture is a large echo with the adapter's real error at the end.
 func TestForFailure_TheEchoedPromptIsNotEvidence(t *testing.T) {
 	prompt := `You are a reviewer. Review the artifact(s) below.
 
@@ -48,8 +43,8 @@ func TestForFailure_TheEchoedPromptIsNotEvidence(t *testing.T) {
 	stderr := "OpenAI Codex v0.147.0\n--------\nmodel: gpt-5-codex\n--------\nuser\n" + prompt +
 		"\n\nERROR: {\"type\":\"error\",\"error\":{\"message\":\"The 'gpt-5-codex' model is not supported on your account.\"}}\n"
 
-	// Without the prompt, our own words win — this asserts the BUG still reproduces, so the test
-	// cannot silently stop covering anything if the matchers change.
+	// Without the prompt the echo still misleads, so the test keeps covering the case if the matchers
+	// change.
 	if got := ForFailure(Failure{Stderr: stderr, ExitCode: 1}); got != FolderTrust {
 		t.Fatalf("precondition: unsubtracted classification = %q, want %q (the echo should still mislead)", got, FolderTrust)
 	}

@@ -49,8 +49,8 @@ func TestCompareExplorerPrompt_RendersTheDeclaredSpaceAndFieldNames(t *testing.T
 	}
 	// The machine-readable blocks are decodable exactly as a reader (or a fake) would decode them.
 	var options []string
-	idx := strings.Index(p, CompareOptionSetMarker)
-	if err := json.NewDecoder(strings.NewReader(p[idx+len(CompareOptionSetMarker):])).Decode(&options); err != nil {
+	_, after, _ := strings.Cut(p, CompareOptionSetMarker)
+	if err := json.NewDecoder(strings.NewReader(after)).Decode(&options); err != nil {
 		t.Fatalf("the declared option set block must be decodable JSON: %v", err)
 	}
 	if len(options) != 2 || options[0] != "alpha" {

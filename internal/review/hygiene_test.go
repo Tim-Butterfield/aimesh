@@ -52,11 +52,9 @@ func TestRootPackageHygiene(t *testing.T) {
 	}
 }
 
-// TestDocsNoStaleProductPhrases guards user-facing docs against wording that contradicts the current
-// product decisions (settled after the SPA redesign + visible-key cleanup): the normal UI shows no
-// raw keys as secondary `key:` detail, the normal ACP flow is not "pick a profile + framing", and
-// `fake` is an adapter (not the default profile). These EXACT stale phrases must not reappear in
-// README.md or docs/*.md. It does NOT ban legitimate technical identifiers in config/schema examples.
+// TestDocsNoStaleProductPhrases keeps README.md and docs/*.md free of phrases that contradict current
+// behavior: raw keys are not shown as secondary detail, ACP does not pick a profile and framing, and
+// `fake` is an adapter rather than the default profile. Technical identifiers in examples are allowed.
 func TestDocsNoStaleProductPhrases(t *testing.T) {
 	banned := []string{
 		"pick any saved profile + framing", // ACP framing is an Advanced diagnostic, not a normal control

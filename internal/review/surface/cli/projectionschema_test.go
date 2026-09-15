@@ -12,15 +12,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
 )
 
-// TestCLIJSON_ARealRunValidatesAgainstItsPublishedSchema keeps the published projection schema in step
-// with real output.
-//
-// A DRY RUN projection has no findings, no panel provenance, and none of the run-level qualifiers,
-// because a dry run stops before its first model call, so validating only that shape exercises almost
-// none of `docs/schema/review-projection.schema.json` — while the schema is
-// `additionalProperties: false` and would REJECT every real run that gained a key.
-//
-// This runs a real review and validates what a consumer actually receives.
+// A real review's JSON projection validates against docs/schema/review-projection.schema.json. A dry
+// run's projection lacks findings and qualifiers, so it would exercise little of a schema that forbids
+// additional properties.
 func TestCLIJSON_ARealRunValidatesAgainstItsPublishedSchema(t *testing.T) {
 	hermeticReview(t, "valid")
 	root := repoRootFromPackage(t)
@@ -35,8 +29,7 @@ func TestCLIJSON_ARealRunValidatesAgainstItsPublishedSchema(t *testing.T) {
 	if verr := sch.ValidateJSON([]byte(out)); verr != nil {
 		t.Fatalf("a REAL run's projection does not validate against docs/schema/review-projection.schema.json: %v\n%s", verr, out)
 	}
-	// Non-vacuity: the run must actually have produced the findings this schema is mostly about.
-	// Without this the test would pass just as happily over an empty result.
+	// The run must produce findings, or the test would pass over an empty result.
 	var view runview.View
 	if err := json.Unmarshal([]byte(out), &view); err != nil {
 		t.Fatalf("stdout is not the projection: %v", err)
@@ -46,12 +39,8 @@ func TestCLIJSON_ARealRunValidatesAgainstItsPublishedSchema(t *testing.T) {
 	}
 }
 
-// TestProjectionSchema_CoversEveryOptionalBlock validates a projection carrying ALL of them at once.
-//
-// The real-run test above cannot reach these: a single-seat fake panel produces no dissent, no shared
-// model, no capacity loss, no narrowed scope and no verification pass, so the schema for those blocks
-// would go unchecked until a user hit it. Assembling the view directly is the cheap, deterministic way
-// to hold `additionalProperties: false` honest for every key this projection can emit.
+// A projection assembled with every optional block validates. A single-seat fake run cannot produce
+// dissent, shared models, capacity loss, narrowed scope or verification.
 func TestProjectionSchema_CoversEveryOptionalBlock(t *testing.T) {
 	root := repoRootFromPackage(t)
 	sch, cerr := jsonschema.CompileFile(filepath.Join(root, "docs", "schema", "review-projection.schema.json"))

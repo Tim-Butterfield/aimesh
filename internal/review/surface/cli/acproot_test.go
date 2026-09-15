@@ -1,8 +1,7 @@
 package cli
 
-// `aimesh review acp --root` — the operator's optional ceiling on the paths ACP turns declare. These
-// tests pin the launch-time guards, which run BEFORE any server is started or any stdin is read
-// (nothing here blocks on a stdio loop).
+// These tests cover the launch-time guards on `aimesh review acp --root`, which run before any server
+// starts or stdin is read.
 
 import (
 	"os"
@@ -13,8 +12,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// A bad --root FAILS THE LAUNCH with a usage exit and a message naming the problem — it never
-// starts a server that would then refuse every request one at a time.
+// A bad --root fails the launch with a usage exit and a message naming the problem.
 func TestACPRoots_BadRootSetFailsLaunch(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	ssh := filepath.Join(t.TempDir(), ".ssh")

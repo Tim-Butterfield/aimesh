@@ -18,33 +18,18 @@ type ResolveRequest struct {
 	Surface         string      // "cli" | "ci" | ...
 	AdapterOverride map[review.Role]string
 	ModelOverride   map[review.Role]string
-	// Available is the set of adapter names whose binary is actually runnable now
-	// (name → true). Supplied by the Manager from the adapter registry so the
-	// auto-detect fallback (firstAvailableAdapter) skips configured-but-missing
-	// adapters. When nil, availability is not consulted (config-only resolution).
+	// Available is the set of adapters runnable now. The adapter fallback skips any not in it;
+	// nil means availability is not consulted.
 	Available map[string]bool
-	// ReviewerPanel is an AD-HOC blind-primary panel composed by the invocation (CLI
-	// `--reviewer`, ACP `_meta.reviewmesh.panel`). When set it REPLACES the profile's panel
-	// entirely — it never merges with it, so "what runs" is one authored list, not a diff a
-	// user has to compute.
-	//
-	// COMPOSE-NOT-CONFIGURE applies to the ADAPTER: each seat may only name an adapter the
-	// configuration defines, and an unknown one is a config error before any spend, exactly as it
-	// is for a profile-authored seat. The MODEL is different — a composed seat may name a model the
-	// catalog does not define, and it is handed to the adapter verbatim and recorded as
-	// pass-through. The adapter is what carries trust and identity-evidence capability; requiring a
-	// model STRING to be pre-registered establishes nothing the identity layer does not establish
-	// independently, and it made panels the operator wanted unexpressible without editing global
-	// config mid-task. A profile's own lanes stay held to the catalog: a config file declares the
-	// vocabulary it is then read against.
+	// ReviewerPanel is a panel composed by the invocation (CLI `--reviewer`, an MCP or ACP panel).
+	// It replaces the profile's panel entirely. Each seat must name a configured adapter; its model
+	// may be any string, which is passed to the adapter verbatim and recorded as pass-through.
 	ReviewerPanel []review.SeatSpec
-	// ComposedRoles are the single-slot role seats (author_remediator, cross_check, verifier) a
-	// CALL composed on a surface that reads no saved configuration (MCP, ACP). When non-nil the
-	// request resolves against a profile built from these seats and ReviewerPanel alone: no saved
-	// or shipped profile is consulted, author_remediator is required, a role absent here is a step
-	// the run does not take, and each seat passes its model through exactly as a composed panel
-	// seat does. It is a separate field from AdapterOverride/ModelOverride on purpose — those carry
-	// the CLI's `--set` overrides of a saved profile's lanes, which stay held to the catalog.
+	// ComposedRoles are the single-role seats (author_remediator, cross_check, verifier) a call
+	// composed on a surface that reads no saved configuration (MCP, ACP). When non-nil, resolution
+	// uses only these seats and ReviewerPanel: author_remediator is required, an absent role is a
+	// step the run skips, and every model passes through verbatim. The CLI's `--set` overrides use
+	// AdapterOverride and ModelOverride instead and stay held to the catalog.
 	ComposedRoles map[review.Role]review.SeatSpec
 }
 
@@ -65,9 +50,7 @@ func minMode(a, b review.Mode) review.Mode {
 	return b
 }
 
-// maxMode returns the higher-privilege of two modes. It exists for exactly one caller —
-// SurfaceCeiling, where a granted policy capability RAISES a ceiling — so that "raise" is a single
-// named operation rather than an inline comparison somewhere in the write path.
+// maxMode returns the higher-privilege of two modes.
 func maxMode(a, b review.Mode) review.Mode {
 	if modeRank[a] >= modeRank[b] {
 		return a
@@ -75,8 +58,8 @@ func maxMode(a, b review.Mode) review.Mode {
 	return b
 }
 
-// Resolve turns config + request into a RunPlan, or a Config fault if a profile,
-// model, or adapter cannot be resolved.
+// Resolve turns the configuration and request into a RunPlan, or returns a Config fault when a
+// profile, model or adapter cannot be resolved.
 func (c Config) Resolve(req ResolveRequest) (review.RunPlan, error) {
 	prof, _, err := c.requestProfile(req)
 	if err != nil {
@@ -90,21 +73,16 @@ func (c Config) Resolve(req ResolveRequest) (review.RunPlan, error) {
 		lane := prof.Lanes[roleName]
 		role := review.Role(roleName)
 
-		// A COMPOSED PANEL REPLACES THE PROFILE'S REVIEWER LANE, so that lane is not resolved here:
-		// a caller who composed a panel needs no configured reviewer lane, and the alias below is
-		// rebuilt from seat 1.
+		// A composed panel replaces the reviewer lane; the alias below is rebuilt from seat 1.
 		if role == review.RoleReviewer && len(req.ReviewerPanel) > 0 {
 			continue
 		}
 
 		adapter, model, effort := lane.Adapter, lane.Model, ""
 		if composed {
-			// A call-composed role seat passes its model through, like a composed panel seat.
 			effort = req.ComposedRoles[role].Effort
 		} else {
-			// A saved profile's lane (and a CLI `--set` override of it) is held to the catalog: the
-			// config declares the vocabulary it is read against, and an unknown key there is a typo
-			// worth catching.
+			// A saved lane and its `--set` override are held to the catalog.
 			if ov := req.AdapterOverride[role]; ov != "" {
 				adapter = ov
 			}
@@ -119,13 +97,9 @@ func (c Config) Resolve(req ResolveRequest) (review.RunPlan, error) {
 		plan.Lanes[role] = res
 	}
 
-	// REVIEWER-PANEL COMPATIBILITY ALIAS. `Lanes[reviewer]` is the panel's FIRST SEAT so every
-	// role-shaped consumer (preflight, doctor, privacy, the ACP plan view) keeps working with a
-	// panel it does not know about. It is filled here only when the panel is not already the
-	// legacy `lanes.reviewer` — i.e. when the profile uses the `reviewers` spelling or the
-	// invocation composed an ad-hoc panel — so a legacy profile's resolution is byte-identical
-	// to a pre-panel build. The SeatID stays EMPTY on the alias: the roster (ResolvePanel) is
-	// the only place a seat is named.
+	// Lanes[reviewer] is the panel's first seat, for role-shaped consumers (preflight, doctor,
+	// privacy, the ACP plan view). It is set here when the panel comes from `reviewers` or the
+	// invocation; its SeatID stays empty because only ResolvePanel names seats.
 	if len(req.ReviewerPanel) > 0 || prof.HasPanelSpelling() {
 		seats, perr := c.ResolvePanel(req)
 		if perr != nil {
@@ -136,16 +110,9 @@ func (c Config) Resolve(req ResolveRequest) (review.RunPlan, error) {
 		plan.Lanes[review.RoleReviewer] = first
 	}
 
-	// effective mode = min(requested, surface ceiling). The ceiling is the surface's configured mode
-	// entry, RAISED by any policy capability the config grants that surface — one evaluation point,
-	// in SurfaceCeiling, so a capability can never become an exception that bypasses the ceiling
-	// somewhere else.
+	// The effective mode is the requested mode capped at the surface ceiling. An unspecified mode
+	// is `report` on every surface: asking for a review is not consent to edit files.
 	cap := c.SurfaceCeiling(req.Surface)
-
-	// AN UNSPECIFIED MODE IS `report`, ON EVERY SURFACE. Naming the command is consent to REVIEW; it
-	// is not consent for a model to edit files. The default and the ceiling answer different
-	// questions: the ceiling is the most this surface may ever do, the default is what it does when
-	// not told.
 	requested := req.Mode
 	if requested == "" {
 		requested = review.ModeReport
@@ -154,35 +121,16 @@ func (c Config) Resolve(req ResolveRequest) (review.RunPlan, error) {
 	return plan, nil
 }
 
-// resolveSeat resolves ONE (adapter, model, effort) assignment — a role lane or a panel seat —
-// into a LaneResolution. It is the single resolution rule: a panel seat and a role lane can
-// never diverge in how an adapter is defaulted, a catalog entry is looked up, an empty modelArg
-// is refused, or a devin-cli slug is rendered, because there is only one implementation.
-// `label` names the thing being resolved in every error message (a role name, or "reviewer seat
-// 2 of 3"), so a failure points at the exact slot the user has to fix.
+// nearestCatalogKey returns the catalog key model most plausibly meant, or "" when nothing is close.
 //
-// effortOverride, when non-empty, wins over the catalog defaults — that is how a panel seat
-// composes the SAME model at a different reasoning effort as an independent vantage.
-// nearestCatalogKey names the catalog key `model` most plausibly meant, or "" when nothing is close.
+// Catalog keys embed effort ("claude-opus-5-high") while callers often pass model and effort
+// separately, so the match is a key that extends model by exactly one hyphen-separated segment:
 //
-// It answers ONE measured confusion rather than trying to be a spell-checker. Catalog keys EMBED
-// effort ("claude-opus-5-high"), while the flag documents model and effort as separate fields — so
-// the documented shape names a key that does not exist, and the key that does exist is the one the
-// user wrote plus a suffix. That is a PREFIX relationship, checked exactly:
+//	"claude-opus-5"      → "claude-opus-5-high"
+//	"gpt"                → ""  ("-5-codex" is two segments: a different model)
+//	"claude-opus-5-high" → ""  (already a key)
 //
-//	model=claude-opus-5  →  claude-opus-5-high
-//
-// The remainder must be exactly ONE hyphen-separated segment — the shape of an omitted effort label.
-// That bound is what keeps the guess honest, and it was arrived at by a test catching the two ways a
-// looser rule is wrong:
-//
-//	"gpt"                → NOT "gpt-5-codex"            (remainder "-5-codex" is two segments: a
-//	                                                     different model that merely starts the same)
-//	"claude-opus-5-high" → NOTHING                      (an exact key needs no correction, even
-//	                                                     though "claude-opus-5-high-ext" prefixes it)
-//
-// Case-insensitive, shortest match first. A confident wrong name is worse than no suggestion in a
-// message whose entire value is being right.
+// Matching is case-insensitive, and the shortest key wins.
 func (c Config) nearestCatalogKey(model string) string {
 	want := strings.ToLower(strings.TrimSpace(model))
 	if want == "" {
@@ -190,7 +138,7 @@ func (c Config) nearestCatalogKey(model string) string {
 	}
 	for key := range c.ModelCatalog {
 		if strings.EqualFold(key, want) {
-			return "" // it IS a key; nothing to suggest
+			return "" // already a key
 		}
 	}
 	best := ""
@@ -206,11 +154,13 @@ func (c Config) nearestCatalogKey(model string) string {
 	return best
 }
 
-// composed is true when the CALLER supplied this seat at the surface (`--reviewer`, an MCP `panel`)
-// rather than a profile declaring it: an unknown model key is then passed through to the adapter
-// instead of refused. verbatim is true for a request composed on a surface that reads no saved
-// configuration (MCP, ACP): the model string is passed through even when it matches a catalog key, so a
-// caller's identifier is never rewritten through the catalog.
+// resolveSeat resolves one (adapter, model, effort) assignment, a role lane or a panel seat, into a
+// LaneResolution. label names the slot in error messages (a role, or "reviewer seat 2 of 3"), and a
+// non-empty effortOverride wins over catalog defaults.
+//
+// composed means the caller supplied the seat, so a model that is not a catalog key passes through
+// instead of being refused. verbatim (MCP, ACP) passes the model through even when it matches a
+// catalog key.
 func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, adapter, model, effortOverride string, available map[string]bool, composed, verbatim bool) (review.LaneResolution, error) {
 	if adapter == "" {
 		adapter = firstAvailableAdapter(c, prof.AdapterPreference, available)
@@ -239,11 +189,6 @@ func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, ad
 	}
 	entry, ok := c.ModelCatalog[model]
 	if !ok {
-		// A COMPOSED seat passes the model through. See LaneResolution.ModelPassThrough for why
-		// this splits on who wrote the seat rather than on what the string looks like: the adapter
-		// (validated fail-closed just above) is what carries trust, and requiring a model string to
-		// be pre-registered establishes nothing the identity layer does not establish independently
-		// — which is why exploremesh's `--explorer` has always worked this way.
 		if composed {
 			return review.LaneResolution{
 				Role: role, Execution: execution, Adapter: adapter,
@@ -253,9 +198,6 @@ func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, ad
 		}
 		hint := ""
 		if near := c.nearestCatalogKey(model); near != "" {
-			// The measured confusion this answers: catalog keys EMBED effort, so the documented
-			// shape (model=claude-opus-5, effort=high) names a key that does not exist while
-			// "claude-opus-5-high" does. Naming it turns a round trip into an edit.
 			hint = fmt.Sprintf(" — did you mean %q?", near)
 		}
 		return review.LaneResolution{}, fault.New(fault.Config, fmt.Sprintf("model %q (%s) not in modelCatalog%s", model, label, hint)).
@@ -271,9 +213,7 @@ func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, ad
 			WithReason("lane_model_arg_empty")
 	}
 
-	// Effort/thinking: an explicit per-seat effort wins, else the per-adapter model setting,
-	// else the catalog entry's default. Opaque to the core; the recipe decides whether/how to
-	// pass it.
+	// Effort precedence: the seat's own, then the per-adapter setting, then the catalog default.
 	effort := effortOverride
 	if effort == "" {
 		effort = am.Effort
@@ -282,10 +222,7 @@ func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, ad
 		effort = entry.Effort
 	}
 
-	// devin-cli is **name-bound**: its `--model` slug encodes the effort. Render the
-	// configured display name (am.ModelArg) + effort into the final lowercase-hyphenated
-	// slug here (adapter-specific resolution), so the recipe receives a ready arg and
-	// emits no separate effort flag.
+	// devin-cli's model slug encodes the effort, so render the display name and effort into it here.
 	modelArg := am.ModelArg
 	if adapter == "devin-cli" {
 		rendered, rerr := adapterpkg.RenderDevinModelArg(am.ModelArg, effort)
@@ -304,33 +241,25 @@ func (c Config) resolveSeat(prof Profile, role review.Role, label, execution, ad
 	}, nil
 }
 
-// ResolvePanel resolves the ORDERED blind-primary panel for a request: the invocation's ad-hoc
-// panel when it supplied one, else the selected profile's `reviewers` (with `lanes.reviewer`
-// normalized as a panel of one).
+// ResolvePanel resolves the ordered blind-primary panel: the invocation's panel when it supplied
+// one, else the selected profile's ReviewerSeats.
 //
-// It is FAIL-CLOSED and runs BEFORE any spend. Refused: an empty panel, a panel above
-// review.MaxReviewerSeats, a duplicate seat identity (an identical adapter+model+effort
-// triple adds no independent vantage, so counting it twice would inflate agreement), and any
-// seat that does not resolve. There is no clamping and no dropping anywhere in this function:
-// the count a caller asked for is the count that runs, or the run does not start.
+// It refuses, before any spend, an empty panel, one above review.MaxReviewerSeats, a duplicate seat
+// identity (which would inflate agreement), and any seat that does not resolve. Seats are never
+// dropped or clamped.
 func (c Config) ResolvePanel(req ResolveRequest) ([]review.LaneResolution, error) {
 	prof, profName, perr := c.requestProfile(req)
 	if perr != nil {
-		// A composed panel needs no saved profile for its seats, so a missing one only matters when
-		// the panel comes from the profile, or when the call composed its roles and got them wrong.
+		// A composed panel needs no saved profile, unless the call's composed roles are invalid.
 		if req.ComposedRoles != nil || len(req.ReviewerPanel) == 0 {
 			return nil, perr
 		}
 		prof = Profile{}
 	}
 
-	// The seat list, from the invocation when it composed one, else from the profile.
 	type seatIn struct {
 		adapter, model, effort, execution string
-		// composed marks a seat the CALLER wrote at the surface. Only these pass an unknown model
-		// through; a profile's own lanes are held to the catalog, because a config file declares
-		// the vocabulary it is then read against.
-		composed bool
+		composed                          bool // written by the caller, so an unknown model passes through
 	}
 	var seats []seatIn
 	if len(req.ReviewerPanel) > 0 {
@@ -351,12 +280,7 @@ func (c Config) ResolvePanel(req ResolveRequest) ([]review.LaneResolution, error
 			WithReason("panel_too_large")
 	}
 
-	// EVERY unresolvable seat is reported, not just the first.
-	//
-	// Resolution is pure configuration lookup — it starts no process and spends nothing — so the
-	// blockers are all knowable in one pass. Returning on the first one made an N-seat panel with N
-	// bad seats cost N round trips: fix, re-run, discover the next. An operator (or a model driving
-	// the CLI) should learn everything wrong with their panel from one refusal.
+	// Every unresolvable seat is reported in one refusal; resolution spends nothing.
 	out := make([]review.LaneResolution, 0, len(seats))
 	var failures []error
 	for i, s := range seats {
@@ -365,9 +289,8 @@ func (c Config) ResolvePanel(req ResolveRequest) ([]review.LaneResolution, error
 		if exec == "" {
 			exec = "adapter"
 		}
-		// Per-lane --set overrides address the ROLE, so they apply to a one-seat panel only:
-		// there is no unambiguous way to point `--set reviewer.adapter=x` at one of N seats,
-		// and silently applying it to all of them would collapse the panel's independence.
+		// `--set reviewer.*` overrides apply only to a one-seat profile panel; applying them to every
+		// seat would collapse the panel's independence.
 		adapter, model := s.adapter, s.model
 		if len(seats) == 1 && len(req.ReviewerPanel) == 0 {
 			if ov := req.AdapterOverride[review.RoleReviewer]; ov != "" {
@@ -389,9 +312,7 @@ func (c Config) ResolvePanel(req ResolveRequest) ([]review.LaneResolution, error
 		return nil, unresolvableSeats(failures, len(seats))
 	}
 
-	// Duplicate detection runs AFTER every seat resolved, because an identity cannot be computed for
-	// a seat that did not resolve — reporting "seats 2 and 4 clash" while seat 3 is unresolvable
-	// would be describing a panel that does not exist yet.
+	// Duplicates are checked after resolution, since identity is computed from resolved seats.
 	seen := map[string]int{}
 	for i, res := range out {
 		identity := review.SeatSpec{Adapter: res.Adapter, Model: res.Model, Effort: res.Effort}.Identity()
@@ -405,12 +326,8 @@ func (c Config) ResolvePanel(req ResolveRequest) ([]review.LaneResolution, error
 	return out, nil
 }
 
-// unresolvableSeats folds every seat failure into one refusal.
-//
-// The REASON CODE is the first failure's, deliberately: it is the same code this function returns
-// today for the same configuration, so anything keying on `--json` reasonCode keeps working, and a
-// caller that fixes what the message lists gets past all of them at once. The enumeration lives in
-// the message, where a human or a model reads it.
+// unresolvableSeats folds every seat failure into one refusal whose message lists them all and
+// whose reason code is the first failure's.
 func unresolvableSeats(failures []error, total int) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d of %d reviewer seat(s) cannot be resolved. Every blocker is listed so one pass fixes them all:", len(failures), total)
@@ -424,9 +341,8 @@ func unresolvableSeats(failures []error, total int) error {
 	return out
 }
 
-// SeatID is the stable identifier of the i-th (0-based) panel seat. Seat 1 keeps the bare role
-// name so a panel of one is indistinguishable from the historical single reviewer everywhere it
-// is recorded.
+// SeatID returns the identifier of the i-th (0-based) panel seat: "reviewer" for the first, then
+// "reviewer-2", "reviewer-3", ….
 func SeatID(i int) string {
 	if i == 0 {
 		return string(review.RoleReviewer)
@@ -462,9 +378,7 @@ func (c Config) requestProfile(req ResolveRequest) (Profile, string, error) {
 	}
 	name := c.selectProfile(req.Profile, req.Available)
 	prof, ok := c.Profiles[name]
-	// The shipped-but-hidden fake-smoke profile is an INTERNAL test harness: without the internal
-	// gate (fake.Enabled — set by tests/golden/the ACP-validation parent, never by users) it fails
-	// resolution with the SAME unknown-profile error as any other unrecognized name.
+	// The hidden fake profile resolves only under the internal test gate; otherwise it is unknown.
 	if ok && IsHiddenProfile(name) && !fake.Enabled() {
 		ok = false
 	}
@@ -489,9 +403,8 @@ func (c Config) selectProfile(invocation string, available map[string]bool) stri
 	return c.Defaults.ProfileForAdapter["*"]
 }
 
-// firstAvailableAdapter returns the first adapter in pref that is configured,
-// enabled, and (when available != nil) actually runnable now. This is the
-// auto-detect fallback used only when a lane does not name an explicit adapter.
+// firstAvailableAdapter returns the first adapter in pref that is configured, enabled and, when
+// available is non-nil, runnable. It is used only when a lane names no adapter.
 func firstAvailableAdapter(c Config, pref []string, available map[string]bool) string {
 	for _, name := range pref {
 		a, ok := c.Adapters[name]

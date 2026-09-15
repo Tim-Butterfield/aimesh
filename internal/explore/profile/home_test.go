@@ -64,8 +64,7 @@ func TestProjectProfilesPath_RootAnchored(t *testing.T) {
 	}
 }
 
-// DefaultProfilesPath (the write target the workbench + a no-flag run share) prefers the project scope
-// inside a repo and the user scope outside one — the SAME resolution the roster uses (§F10).
+// DefaultProfilesPath prefers the project scope inside a repo and the user scope outside one.
 func TestDefaultProfilesPath_ProjectInsideRepo_UserOutside(t *testing.T) {
 	home, nonRepo := isolate(t)
 	repo := repoAt(t, t.TempDir())
@@ -124,7 +123,11 @@ func TestDiscover_Precedence(t *testing.T) {
 // that is a per-invocation input the caller resolves, not a location we search.
 func TestDiscover_IgnoresARosterFileBesideIt(t *testing.T) {
 	home, cwd := isolate(t)
-	if err := roster.Save(filepath.Join(componentDir(home), roster.FileName), twoValid()); err != nil {
+	rosterFile := filepath.Join(componentDir(home), roster.FileName)
+	if err := os.MkdirAll(filepath.Dir(rosterFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rosterFile, []byte("explorers: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if p, ok := Discover(cwd); ok {

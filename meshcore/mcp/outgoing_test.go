@@ -14,13 +14,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// These tests cover the direction this transport could not speak at all: SERVER→CLIENT requests, and the
-// one method that needs them — `roots/list`.
-//
-// Without them a server could only push notifications, and a client's
-// `notifications/roots/list_changed` would reach nothing. Everything below asserts the plumbing, not
-// the policy; the policy (client roots only narrow, never a union) is asserted at the reviewmesh
-// surface, which is the server that takes paths.
+// These tests cover server-to-client requests and `roots/list`, the method that uses them. They assert
+// the plumbing only; the policy that client roots only narrow belongs to the application that takes
+// paths.
 
 // rootsClient is a driving client that ANSWERS the server's requests. The client in server_test.go
 // deliberately discards any frame whose id it did not mint, which is exactly what made a server→client

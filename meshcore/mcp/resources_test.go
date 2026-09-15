@@ -111,10 +111,6 @@ func TestResources_URIsAndFramesCarryNoHostPath(t *testing.T) {
 	if got, want := uri, "aimesh://run/run-abc/patch"; got != want {
 		t.Fatalf("resource URI = %q, want the opaque run-scoped form %q", got, want)
 	}
-	runID, name, ok := mcp.ParseResourceURI(uri)
-	if !ok || runID != "run-abc" || name != "patch" {
-		t.Fatalf("ParseResourceURI(%q) = (%q, %q, %v)", uri, runID, name, ok)
-	}
 
 	c, stop := serve(t, newServer(func(s *mcp.Server) { s.Resources = &store }))
 	defer stop()

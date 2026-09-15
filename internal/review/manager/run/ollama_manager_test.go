@@ -93,7 +93,7 @@ func TestOllamaManagerPath_FakeBinaryReportSucceeds(t *testing.T) {
 }
 
 // hostModelManager wires reviewer→fake and author_remediator→ollama(shell) so the
-// host-adjudication MODEL call is exercised deterministically via a fake binary.
+// host-adjudication model call is exercised deterministically via a fake binary.
 func hostModelManager(t *testing.T, hostRecipe shell.Recipe, hostBin string, reviewerScenario fake.Scenario) *Manager {
 	t.Helper()
 	cfg := config.WithOllamaModel(config.WithExampleProfiles(config.Default()), "stub:tag")
@@ -160,8 +160,8 @@ func TestHostAdjudication_MissingHaltsClassG(t *testing.T) {
 	mustExist(t, filepath.Join(out.RunDir, "calls", "c-0001-host", "retry-1", "prompt.md")) // host retried
 }
 
-// The ADJUDICATING host is the strictest lane there is — it decides which findings are valid — and even
-// there a mismatched identity only produces a caveat. The adjudication itself is what a reader assesses.
+// The adjudicating host decides which findings are valid, and even there a mismatched identity only
+// produces a caveat.
 func TestHostAdjudication_IdentityMismatchIsACaveat(t *testing.T) {
 	recipe := shell.Recipes()["ollama"]
 	recipe.ParseIdentity = func(_, _ []byte, _ model.Call) string { return "wrong-host-model" }
@@ -196,11 +196,9 @@ func TestHostAdjudication_NoFindingsSkipsHostCall(t *testing.T) {
 	}
 }
 
-// TestOllamaTwoCall_RealHostSmoke proves the local two-call path with a REAL Ollama
-// host adjudicator: a deterministic fake reviewer emits one finding and the real local
-// model adjudicates it. Gated (REVIEWMESH_RUN_REAL_OLLAMA_MANAGER_SMOKE=1 +
-// REVIEWMESH_OLLAMA_MODEL=<tag>) — success depends on the model emitting schema-valid
-// host-adjudication JSON; the deterministic fake-binary tests are the acceptance proof.
+// TestOllamaTwoCall_RealHostSmoke runs the local two-call path with a real Ollama host adjudicator over
+// a fake reviewer's finding. It is gated on REVIEWMESH_RUN_REAL_OLLAMA_MANAGER_SMOKE=1 and
+// REVIEWMESH_OLLAMA_MODEL=<tag>; the fake-binary tests are the deterministic coverage.
 func TestOllamaTwoCall_RealHostSmoke(t *testing.T) {
 	if os.Getenv("REVIEWMESH_RUN_REAL_OLLAMA_MANAGER_SMOKE") == "" || os.Getenv("REVIEWMESH_OLLAMA_MODEL") == "" {
 		t.Skip("gated: set REVIEWMESH_RUN_REAL_OLLAMA_MANAGER_SMOKE=1 and REVIEWMESH_OLLAMA_MODEL=<tag>")
@@ -241,7 +239,7 @@ func TestOllamaProfile_UnavailableFailsPreflight(t *testing.T) {
 
 func TestPreflight_AllLanesChecked(t *testing.T) {
 	// reviewer on fake (available), author_remediator on ollama (unavailable):
-	// preflight must fail because SOME lane selects an unavailable adapter.
+	// preflight must fail because some lane selects an unavailable adapter.
 	cfg := config.WithOllamaModel(config.WithExampleProfiles(config.Default()), "x:tag")
 	cfg.Profiles["mixed-test"] = config.Profile{
 		Lanes: map[string]config.Lane{

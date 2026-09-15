@@ -11,10 +11,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the `io.modelcontextprotocol/tasks` EXTENSION on the wire.
-//
-// Each test states the MUTATION it would catch — the one-line change to the code that makes it fail —
-// because naming and running the mutation is what shows a test can go red.
+// This file tests the `io.modelcontextprotocol/tasks` extension on the wire. Each test names the
+// mutation, a one-line code change, that would make it fail.
 
 // --- a fake provider, so the transport is the unit under test ---
 
@@ -73,7 +71,9 @@ func workingView() mcp.TaskView {
 }
 
 // ttl returns a pointer to n, for the terminal-lifetime field.
-func ttl(n int64) *int64 { return &n }
+//
+//go:fix inline
+func ttl(n int64) *int64 { return new(n) }
 
 // tasksMeta is a modern `_meta` that DECLARES the tasks extension.
 func tasksMeta() map[string]any {
@@ -93,9 +93,8 @@ func tasksParams(params map[string]any) map[string]any {
 	return params
 }
 
-// taskServer builds a server whose `slow` tool answers with a TASK HANDLE when the caller declared
-// the extension, and with the ordinary job-shaped result when it did not. That branch is the whole
-// contract a real application implements, so the fake implements it the same way.
+// taskServer builds a server whose `slow` tool answers with a task handle when the caller declared the
+// extension, and with the ordinary job-shaped result otherwise, as a real application does.
 func taskServer(f *fakeTasks, handle string) *mcp.Server {
 	return newServer(func(s *mcp.Server) {
 		s.Tasks = f
@@ -111,9 +110,8 @@ func taskServer(f *fakeTasks, handle string) *mcp.Server {
 
 // --- the advertisement ---
 
-// TestTasks_DiscoverAdvertisesTheExtension is the ONE wire delta the extension makes visible to a
-// client that never opts in, and it is required rather than incidental: advertising the extension in
-// `server/discover` is HOW a client learns it may declare it.
+// TestTasks_DiscoverAdvertisesTheExtension pins the one change a non-declaring client sees: the
+// extension advertised in `server/discover`, which is how a client learns it may declare it.
 // MUTATION: delete the `caps["extensions"] = …` block in era.go's discover.
 func TestTasks_DiscoverAdvertisesTheExtension(t *testing.T) {
 	f := newFakeTasks()
@@ -151,7 +149,7 @@ func TestTasks_NoProviderAdvertisesNothing(t *testing.T) {
 // --- never return a task to a non-declaring client ---
 
 // TestTasks_ADeclaringClientGetsACreateTaskResult pins the `tools/call` answer: `resultType: "task"`
-// (a MUST, and the only result that may carry it) plus the Task fields.
+// plus the Task fields.
 // MUTATION: change `ResultTypeTask` to `ResultTypeComplete` in createTaskResponse.
 func TestTasks_ADeclaringClientGetsACreateTaskResult(t *testing.T) {
 	f := newFakeTasks()
@@ -173,8 +171,7 @@ func TestTasks_ADeclaringClientGetsACreateTaskResult(t *testing.T) {
 	if resp.Result["status"] != mcp.TaskWorking {
 		t.Errorf("status = %v, want %q", resp.Result["status"], mcp.TaskWorking)
 	}
-	// `ttlMs` is REQUIRED and nullable. A working task has no lifetime bound, and `null` is the
-	// value that says so — `0` would tell a conforming client to throw the handle away at once.
+	// `ttlMs` is required and nullable; a working task has no lifetime bound, so it is null, not 0.
 	v, present := resp.Result["ttlMs"]
 	if !present {
 		t.Errorf("ttlMs is absent; it is required and nullable, and \"null for unlimited\" is a VALUE")
@@ -214,15 +211,8 @@ func TestTasks_ANonDeclaringClientNeverGetsATask(t *testing.T) {
 	}
 }
 
-// TestTasks_DeclaredExtensionIsFalseOnTheLegacyEra pins the era clause DIRECTLY, and it exists
-// because the wire test below does NOT pin it.
-//
-// Deleting `e.Era != EraModern` from DeclaredExtension leaves
-// TestTasks_ALegacyClientNeverGetsATask PASSING, because a legacy request's
-// env never has `Extensions` filled at all (envFor does not parse them), so the map lookup fails for
-// a second, independent reason. Two redundant guards are the right design — but a test that cannot
-// tell which one is holding is not testing either of them. This one builds the env by hand, with
-// extensions present and the era legacy, so only the era clause can produce the answer.
+// TestTasks_DeclaredExtensionIsFalseOnTheLegacyEra pins the era clause directly. The wire test below
+// passes without it, because legacy envs never carry extensions, so this test builds the env by hand.
 // MUTATION: delete the `e.Era != EraModern` clause in DeclaredExtension.
 func TestTasks_DeclaredExtensionIsFalseOnTheLegacyEra(t *testing.T) {
 	env := &mcp.RequestEnv{
@@ -245,7 +235,7 @@ func TestTasks_DeclaredExtensionIsFalseOnTheLegacyEra(t *testing.T) {
 }
 
 // TestTasks_ALegacyClientNeverGetsATask — a 2025-06-18 client cannot declare a 2026-07-28 extension.
-// It is the END-TO-END half; the clause that makes it true in isolation is pinned by
+// It is the end-to-end half; the clause that makes it true in isolation is pinned by
 // TestTasks_DeclaredExtensionIsFalseOnTheLegacyEra above.
 // MUTATION: make Call.CreateTask skip its DeclaredExtension check.
 func TestTasks_ALegacyClientNeverGetsATask(t *testing.T) {
@@ -276,11 +266,8 @@ func TestTasks_ALegacyClientNeverGetsATask(t *testing.T) {
 
 // --- tasks/get ---
 
-// TestTasksGet_CarriesResultTypeCompleteNotTask is the MUST that is easiest to get backwards.
-// Verbatim from the extension (fetched 2026-08-04): "The `resultType`
-// field MUST be set to `"complete"` on this object as it is the standard result shape for the
-// `tasks/get` request", against "Servers MUST NOT set `resultType` to `"task"` on result types other
-// than `CreateTaskResult`".
+// TestTasksGet_CarriesResultTypeCompleteNotTask pins that a `tasks/get` result uses `resultType:
+// "complete"`; only a CreateTaskResult carries "task".
 // MUTATION: use resultAs(env, ResultTypeTask, …) in getTask.
 func TestTasksGet_CarriesResultTypeCompleteNotTask(t *testing.T) {
 	f := newFakeTasks()
@@ -295,17 +282,14 @@ func TestTasksGet_CarriesResultTypeCompleteNotTask(t *testing.T) {
 	if resp.Result["resultType"] != mcp.ResultTypeComplete {
 		t.Fatalf("resultType = %v, want %q — only a CreateTaskResult may carry \"task\"", resp.Result["resultType"], mcp.ResultTypeComplete)
 	}
-	// `tasks/get` is NOT in `server/utilities/caching`'s closed cacheable set, so no hint is owed —
-	// and emitting half of that model on a result carrying the extension's own `ttlMs` is exactly
-	// how a lifetime field and a freshness field come to be confused for each other.
+	// `tasks/get` is not cacheable, so no caching hint is included.
 	if _, present := resp.Result["cacheScope"]; present {
 		t.Errorf("cacheScope rode a tasks/* result: %v", resp.Result)
 	}
 }
 
-// TestTasksGet_TerminalTTLIsPositiveAndStrictlyDecreases — `ttlMs` is TASK LIFETIME FROM CREATION,
-// not a caching hint, and the extension permits it to change over the task's life. A resolvable task
-// must never advertise `0`: that declares a handle the server may discard immediately.
+// TestTasksGet_TerminalTTLIsPositiveAndStrictlyDecreases — `ttlMs` is the task's lifetime from creation,
+// not a caching hint, and may change over the task's life. A resolvable task never advertises 0.
 // MUTATION: return a constant ttl from the provider, or floor it at 0 instead of 1.
 func TestTasksGet_TerminalTTLIsPositiveAndStrictlyDecreases(t *testing.T) {
 	f := newFakeTasks()
@@ -316,7 +300,7 @@ func TestTasksGet_TerminalTTLIsPositiveAndStrictlyDecreases(t *testing.T) {
 	put := func() {
 		f.put("run-1", mcp.TaskView{
 			Status: mcp.TaskCompleted, CreatedAt: time.Now().Add(-time.Second), LastUpdatedAt: time.Now(),
-			TTLMs: ttl(time.Until(deadline).Milliseconds()), PollIntervalMs: 2000,
+			TTLMs: new(time.Until(deadline).Milliseconds()), PollIntervalMs: 2000,
 			Result: mcp.Result("done", map[string]any{"state": "complete"}),
 		})
 	}
@@ -338,10 +322,8 @@ func TestTasksGet_TerminalTTLIsPositiveAndStrictlyDecreases(t *testing.T) {
 	}
 }
 
-// TestTasksGet_HaltedMapsToCompletedWithIsErrorNotFailed is the state-table row the design flags as
-// the one to get right, and the extension states it as a MUST: "The `failed` status MUST NOT
-// represent non-JSON-RPC errors like tool results with `isError: true`. Errors within protocol method
-// results MUST use `completed` status with error details in the `result` field."
+// TestTasksGet_HaltedMapsToCompletedWithIsErrorNotFailed pins that a domain halt maps to `completed` with
+// `isError: true` in the result, never to `failed`, as the extension requires.
 // MUTATION: map a halted record to TaskFailed in the application's provider.
 func TestTasksGet_HaltedMapsToCompletedWithIsErrorNotFailed(t *testing.T) {
 	f := newFakeTasks()
@@ -365,7 +347,7 @@ func TestTasksGet_HaltedMapsToCompletedWithIsErrorNotFailed(t *testing.T) {
 	if res["isError"] != true {
 		t.Fatalf("result.isError = %v, want true — the halt has to travel, and this is the field it travels in", res["isError"])
 	}
-	// The embedded result is what the original `tools/call` WOULD have returned, envelope included.
+	// The embedded result is what the original `tools/call` would have returned, envelope included.
 	if res["resultType"] != mcp.ResultTypeComplete {
 		t.Errorf("embedded resultType = %v, want %q", res["resultType"], mcp.ResultTypeComplete)
 	}
@@ -378,10 +360,8 @@ func TestTasksGet_HaltedMapsToCompletedWithIsErrorNotFailed(t *testing.T) {
 	}
 }
 
-// TestTasks_UnknownOrExpiredTaskIsInvalidParams. "Invalid or nonexistent `taskId`: -32602 (Invalid
-// params) — Servers MUST return this error for `tasks/get`", SHOULD for update and cancel. It is also
-// the honest answer for a task id from a server that has since restarted, because the registry is in
-// memory and a restart loses it — a silently-empty task would be the alternative.
+// TestTasks_UnknownOrExpiredTaskIsInvalidParams pins -32602 for an unknown task id, which is also what a
+// caller gets after a server restart, since the registry is in memory.
 // MUTATION: return an empty TaskView with ok=true for an unknown id.
 func TestTasks_UnknownOrExpiredTaskIsInvalidParams(t *testing.T) {
 	f := newFakeTasks()
@@ -400,18 +380,12 @@ func TestTasks_UnknownOrExpiredTaskIsInvalidParams(t *testing.T) {
 
 // --- the capability gate ---
 
-// TestTasks_NonDeclaringClientGetsMinus32021 asserts OUR DECLARED BEHAVIOR, not extension
+// TestTasks_NonDeclaringClientGetsMinus32021 asserts this server's declared behavior, not extension
 // conformance.
 //
-// CONFLICT: core 2026-07-28 basic/index MUSTs -32021 for a missing declared capability
-// ("the server MUST return a MissingRequiredClientCapabilityError (-32021) whose
-// data.requiredCapabilities lists the missing capabilities"); ext-tasks
-// specification/draft/tasks MUSTs -32003 for the same condition ("Servers MUST return this error
-// for non-declaring clients issuing tasks/get, tasks/update, and tasks/cancel requests"). We follow
-// core — it is directly on point, and core additionally forbids receivers from ascribing any meaning
-// to -32003, so emitting -32003 to a conforming modern client would not merely break a SHOULD NOT,
-// it would fail to communicate. The deviation is declared in docs/mcp.md. This asserts our declared behavior, NOT extension conformance. Revisit if
-// ext-tasks moves.
+// Conflict note: the core specification requires -32021 for a missing client capability, while the
+// tasks extension specifies -32003. This server follows the core specification, which also forbids
+// clients from assigning meaning to -32003. docs/mcp.md records the deviation.
 //
 // MUTATION: delete the validateModernCapabilities call from admit.
 func TestTasks_NonDeclaringClientGetsMinus32021(t *testing.T) {
@@ -442,7 +416,7 @@ func TestTasks_NonDeclaringClientGetsMinus32021(t *testing.T) {
 
 // TestTasks_TheCapabilityRefusalDoesNotLatchTheEra — the admission order is the design, and a request
 // we are about to refuse has no business choosing the process's era. A `tasks/get` refused for a
-// missing capability must leave a following LEGACY client servable.
+// missing capability must leave a following legacy client servable.
 // MUTATION: move validateModernCapabilities to after latchEra (or into serveModern).
 func TestTasks_TheCapabilityRefusalDoesNotLatchTheEra(t *testing.T) {
 	f := newFakeTasks()
@@ -477,7 +451,7 @@ func TestTasks_MethodsAreAbsentWithoutAProvider(t *testing.T) {
 
 // TestTasksUpdate_IsAnEmptyAcknowledgement. We request no mid-flight input, so no task ever reaches
 // `input_required` and every `inputResponses` key is unknown — which the extension says to ignore.
-// The acknowledgement carries `resultType: "complete"` (a MUST) and nothing else.
+// The acknowledgement carries `resultType: "complete"` and nothing else.
 // MUTATION: return the task object from updateTask instead of an empty result.
 func TestTasksUpdate_IsAnEmptyAcknowledgement(t *testing.T) {
 	f := newFakeTasks()
@@ -501,13 +475,8 @@ func TestTasksUpdate_IsAnEmptyAcknowledgement(t *testing.T) {
 	}
 }
 
-// TestTasksCancel_AcknowledgesAndPromisesOnlyDelivery.
-//
-// THE ACKNOWLEDGEMENT IS NOT A PROMISE ABOUT THE TERMINAL STATUS. The extension: "Honor them when
-// possible, but cancellation is cooperative — the task may still reach a non-`cancelled` terminal
-// status." This test therefore asserts the ack and the DELIVERY, and deliberately asserts NOTHING
-// about the status the task goes on to reach — a test that did would be pinning a guarantee we do
-// not make.
+// TestTasksCancel_AcknowledgesAndPromisesOnlyDelivery asserts the acknowledgement and the delivery only;
+// cancellation is cooperative, so it asserts nothing about the terminal status.
 // MUTATION: make cancelTask return the task object, or skip the CancelTask call.
 func TestTasksCancel_AcknowledgesAndPromisesOnlyDelivery(t *testing.T) {
 	f := newFakeTasks()
@@ -531,8 +500,7 @@ func TestTasksCancel_AcknowledgesAndPromisesOnlyDelivery(t *testing.T) {
 		t.Fatalf("cancel delivery = %v, want exactly one delivery to run-1 — the ack means the signal reached the run's context, and it must actually have", got)
 	}
 
-	// A TERMINAL task is still a KNOWN id, so cancelling it is a no-op and not an error. -32602 is
-	// for an id that names nothing.
+	// A terminal task is still a known id, so cancelling it is acknowledged, not an error.
 	f.put("run-2", mcp.TaskView{Status: mcp.TaskCompleted, CreatedAt: time.Now(), LastUpdatedAt: time.Now(), TTLMs: ttl(1000)})
 	resp2, _ := c.call(t, "tasks/cancel", tasksParams(map[string]any{"taskId": "run-2"}))
 	if resp2.Error != nil {
@@ -540,12 +508,8 @@ func TestTasksCancel_AcknowledgesAndPromisesOnlyDelivery(t *testing.T) {
 	}
 }
 
-// TestTasks_NotificationsCancelledCannotCancelATask is the extension's flat prohibition — "The
-// `notifications/cancelled` notification MUST NOT be used for task cancellation" — and here it holds
-// BY CONSTRUCTION rather than by a special case: once the CreateTaskResult has been returned, the
-// originating tools/call is complete and its id has left the in-flight table, so the notification
-// finds nothing and reaches nothing. It is a guard for the property, and the mutation that proves it is
-// real is named below.
+// TestTasks_NotificationsCancelledCannotCancelATask pins that `notifications/cancelled` cannot cancel a
+// task: once the CreateTaskResult is returned, the originating call is no longer in flight.
 // MUTATION: have the `slow` handler keep its Call registered and route handleCancelled into the
 // provider's CancelTask — the assertion on f.cancels() then fails.
 func TestTasks_NotificationsCancelledCannotCancelATask(t *testing.T) {
@@ -558,8 +522,7 @@ func TestTasks_NotificationsCancelledCannotCancelATask(t *testing.T) {
 	if resp.Result["taskId"] != "run-1" {
 		t.Fatalf("setup: want a task handle, got %v", resp.Result)
 	}
-	// The id of the tools/call that produced the handle. That call is COMPLETE — cancelling it is
-	// meaningless, and the extension forbids using this notification for the task.
+	// The id of the tools/call that produced the handle, which is complete.
 	var callID int
 	_ = json.Unmarshal(resp.ID, &callID)
 	c.notify("notifications/cancelled", map[string]any{"requestId": callID, "reason": "user"})
@@ -573,14 +536,9 @@ func TestTasks_NotificationsCancelledCannotCancelATask(t *testing.T) {
 	}
 }
 
-// TestTasks_NonDeclaringTranscriptHasExactlyOneDelta is the SAFETY PROPERTY that lets the extension
-// ship additively, and it is written as an ALLOWLIST OF ONE rather than as unqualified byte-identity.
-//
-// Unqualified byte-identity is impossible and it would be wrong to demand it: advertising the
-// extension in `server/discover` is HOW a client learns it may opt in, so that delta is REQUIRED by
-// the extension. Everything else must be untouched, and "everything else" is checked by diffing two
-// live transcripts — the same request sequence against a server WITH a task provider and against one
-// WITHOUT — rather than by re-recording the current bytes, which would pass by construction.
+// TestTasks_NonDeclaringTranscriptHasExactlyOneDelta pins that a non-declaring client sees exactly one
+// change, the extension advertisement in `server/discover`, by diffing live transcripts from servers
+// with and without a task provider.
 //
 // MUTATION: make taskHandOff ignore the client's declaration, or add any second field to the
 // discover capabilities under `if s.Tasks != nil`.
@@ -610,7 +568,7 @@ func TestTasks_NonDeclaringTranscriptHasExactlyOneDelta(t *testing.T) {
 	f.put("run-1", workingView())
 	withTasks, stopA := serve(t, taskServer(f, "run-1"))
 	defer stopA()
-	// The SAME server minus the provider: same tool, same handler, same everything.
+	// The same server without the provider.
 	withoutTasks, stopB := serve(t, newServer(func(s *mcp.Server) {
 		s.Register(mcp.Tool{Name: "slow", InputSchema: json.RawMessage(`{"type":"object","properties":{}}`)},
 			func(ctx context.Context, c *mcp.Call) (*mcp.CallToolResult, error) {

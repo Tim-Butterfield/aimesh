@@ -9,32 +9,15 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
 )
 
-// This file is the OPT-IN send-time check that a result actually satisfies the schema its own tool
-// advertised.
-//
-// Both servers validate their payloads against their declared `outputSchema` in the BUILD — a table test
-// walks every result builder at every state and judges it against the literal schema. That check exists
-// because the drift it catches was real: three payloads violated the very `oneOf` their tool declared (a
-// cancelled call returned the running shape with `state` overwritten, a still-running job omitted a
-// required governance field, and one tool's terminal payload was declared under another's schema).
-// Build-time validation is the right default — it costs a caller nothing and it fails CI, not a call.
-//
-// What it cannot do is speak for a payload the tests do not construct: a field whose value depends on a
-// provider's output, a branch reached only by a rare halt. So this is the runtime half, and it is OFF by
-// default because it is not free (see the cost note on Server.StrictSchema).
-//
-// On a violation the call FAILS LOUDLY rather than sending a non-conforming payload. The refusal names the
-// tool and quotes the validator, so the offending branch is identifiable from the wire alone; it carries
-// NO structuredContent, because the only structured payload available is the one just judged invalid and
-// attaching it would ship exactly what the check refused.
+// This file implements the opt-in send-time check that a result satisfies its tool's declared
+// outputSchema. Build-time tests validate every result builder against its schema; this check covers
+// payloads the tests do not construct, such as values that depend on provider output. It is off by
+// default because of its cost (see Server.StrictSchema). A violation fails the call with an error that
+// names the tool and quotes the validator, without structuredContent, since the only payload available
+// is the invalid one.
 
-// StrictSchemaEnv turns the check on without a command line.
-//
-// The flag alone would not be enough. An MCP server is almost never launched by the person debugging it —
-// it is launched by a HOST from a config file, and the common hosts let an operator set `env` for a
-// server entry but not extra argv. A diagnostic switch the people who most need it cannot reach is a
-// switch in name only, so the env var is not a convenience alias: it is the form that actually works
-// where the failure is observed.
+// StrictSchemaEnv enables the check through the environment, which MCP hosts let an operator set for a
+// server entry even when they do not allow extra arguments.
 const StrictSchemaEnv = "AIMESH_MCP_STRICT_SCHEMA"
 
 // StrictSchemaFromEnv reports whether StrictSchemaEnv asks for the check. It accepts the shapes an
@@ -85,8 +68,8 @@ func (s *Server) outputSchemaFor(name string) (*jsonschema.Schema, error) {
 }
 
 // enforceOutputSchema validates a result's structuredContent against the tool's declared outputSchema when
-// StrictSchema is on. It returns the result to SEND — either the original, or a loud internal-error result
-// naming the offending tool.
+// StrictSchema is on. It returns the result to send: the original, or an internal-error result naming the
+// tool.
 func (s *Server) enforceOutputSchema(tool string, res *CallToolResult) *CallToolResult {
 	if !s.StrictSchema || res == nil || res.StructuredContent == nil {
 		return res

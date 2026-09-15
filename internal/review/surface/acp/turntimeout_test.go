@@ -15,13 +15,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 )
 
-// The TURN BUDGET. Without it an ACP prompt could run until the host gave up — and on a stdio agent
-// that means a panel of model CLIs still spending with nobody waiting for them. Every aimesh agent
-// surface bounds a turn.
-//
-// The budget is enforced by cancelling the run's context, so a timeout takes the SAME path a host
-// cancellation takes: the manager sees ctx.Done at its own boundaries, and the no-write-after-cancel
-// guarantee is the one that already exists rather than a second, parallel one.
+// The turn budget stops a prompt from keeping model CLIs spending after the host stops waiting. It
+// cancels the run's context, so a timeout takes the same path as a host cancellation.
 
 // blockingReviewer runs until its context is cancelled, then reports why.
 type blockingReviewer struct {
@@ -43,10 +38,8 @@ func TestTurnTimeout_CancelsARunThatOutlivesIt(t *testing.T) {
 		Manager: rv, Caps: review.SurfaceCaps{FileRead: true},
 		Adapters: harnessAdapters(t), TurnTimeout: 40 * time.Millisecond,
 	}
-	// A real pipe rather than the shared string-reader harness: the harness's input EOFs
-	// immediately, and EOF cancels every in-flight run by design — which would mask the very thing
-	// under test. Here the connection stays OPEN, exactly as a live host's would, so the only thing
-	// that can end this run is the turn budget.
+	// Use a real pipe: the string-reader harness hits EOF immediately, which cancels in-flight runs and
+	// would mask the timeout. Here the connection stays open, so only the turn budget can end the run.
 	in, inw := io.Pipe()
 	served := make(chan struct{})
 	var out lockedBuffer
@@ -76,8 +69,7 @@ func TestTurnTimeout_CancelsARunThatOutlivesIt(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the turn budget did not cancel the run")
 	}
-	// A timed-out turn is answered with the ordinary halt taxonomy, never left hanging and never
-	// presented as a partial result.
+	// A timed-out turn is answered with the ordinary halt taxonomy, not a partial result.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if strings.Contains(out.String(), `"error"`) {
@@ -108,8 +100,7 @@ func (l *lockedBuffer) String() string {
 	return l.b.String()
 }
 
-// A zero TurnTimeout means the default, not "unbounded": an operator who never passed the flag must
-// still get a bounded turn.
+// A zero TurnTimeout means the default, not unbounded.
 func TestTurnBudget_DefaultsRatherThanDisabling(t *testing.T) {
 	if got := (&Server{}).turnBudget(); got != DefaultTurnTimeout {
 		t.Fatalf("turnBudget() = %v with no configuration, want the %v default", got, DefaultTurnTimeout)
@@ -119,7 +110,7 @@ func TestTurnBudget_DefaultsRatherThanDisabling(t *testing.T) {
 	}
 }
 
-// The flag is documented where an operator looks for it: the review guide, docs/review.md.
+// The flag is documented in docs/review.md.
 func TestTurnTimeout_IsDocumentedInTheReadme(t *testing.T) {
 	b, err := os.ReadFile("../../../../docs/review.md")
 	if err != nil {

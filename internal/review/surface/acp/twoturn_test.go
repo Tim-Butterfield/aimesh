@@ -7,18 +7,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// THE ACP TWO-TURN WRITE CONTRACT.
+// ACP has no lookup method and session/resume replays nothing, so a write whose response is lost
+// would leave a host with no handle. Turn 1 reports and returns the run handle and a fingerprint per
+// accepted finding; turn 2 writes and must carry that handle.
 //
-// ACP has no lookup surface — not one of its methods accepts a run identifier or returns anything
-// about a prior run, and `session/resume` deliberately replays nothing. So a write whose response is
-// lost would leave a host holding nothing at all. The answer is the same two-phase rule MCP has,
-// expressed in ACP's own unit: turn 1 reports and its RESPONSE hands back the run handle plus a
-// fingerprint per accepted finding; turn 2 writes and must carry that handle.
-//
-// The `select` tests below pin both directions of the narrowing filter: a non-empty `select` is
-// HONOURED on a write turn, and an explicitly-empty list is REFUSED rather than let through a
-// `len(...) > 0` guard into a full-set write — which is the exact widening the declaration exists to
-// prevent, arriving by the one input easiest to leave unchecked.
+// The select tests cover both directions: a non-empty select is honored on a write turn, and an
+// empty list is refused rather than widening to the full set.
 
 func TestACPWrite_ApplyWithoutARunHandleIsRefusedBeforeAnyWork(t *testing.T) {
 	msg, data, ok := requireRunHandle(review.ModeApply, "", nil)
@@ -28,8 +22,7 @@ func TestACPWrite_ApplyWithoutARunHandleIsRefusedBeforeAnyWork(t *testing.T) {
 	if data["reasonCode"] != "write_without_run_handle" {
 		t.Fatalf("reasonCode = %v — a host must be able to branch on this without parsing the message", data)
 	}
-	// The refusal has to teach the sequence, not merely reject: the caller is a model or a host that
-	// cannot guess a two-turn protocol from a "no".
+	// The refusal must teach the two-turn sequence, not merely reject.
 	for _, want := range []string{"report", "runDir", "fromRun"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("the teaching error must name %q; got %q", want, msg)
@@ -38,9 +31,8 @@ func TestACPWrite_ApplyWithoutARunHandleIsRefusedBeforeAnyWork(t *testing.T) {
 }
 
 func TestACPWrite_ReportAndPatchTurnsNeedNoRunHandle(t *testing.T) {
-	// A report turn writes nothing. A patch turn writes a diff artifact into the run directory it is
-	// itself creating, so neither can leave a caller holding nothing — demanding a handle from them
-	// would be ceremony, and ceremony is what teaches callers to paste values that mean nothing.
+	// A report turn writes nothing and a patch turn writes only into its own run directory, so neither
+	// needs a handle.
 	for _, m := range []review.Mode{review.ModeReport, review.ModePatch} {
 		if _, _, ok := requireRunHandle(m, "", nil); !ok {
 			t.Fatalf("mode %q must not require a run handle", m)
@@ -54,22 +46,18 @@ func TestACPWrite_ApplyWithARunHandleProceeds(t *testing.T) {
 	}
 }
 
-// TestACPWrite_SelectIsHonouredOnAWriteTurn — `select` is a REAL filter here, so acceptance is
-// what must be pinned: a server that declared it and dropped it would silently widen a host's write
-// set, which is why the field can never be merely declared.
+// select is a real filter: a server that dropped it would silently widen the write set.
 func TestACPWrite_SelectIsHonouredOnAWriteTurn(t *testing.T) {
 	if _, _, ok := requireRunHandle(review.ModeApply, "/runs/prior-report-run", []string{"sha1:abc"}); !ok {
 		t.Fatal("a `select` list on an apply turn carrying a run handle must be accepted — selective apply is implemented")
 	}
-	// A patch turn produces a write PRODUCT (the diff), so narrowing it is meaningful there too.
+	// A patch turn produces a diff, so narrowing it is meaningful too.
 	if _, _, ok := requireRunHandle(review.ModePatch, "", []string{"sha1:abc"}); !ok {
 		t.Fatal("`select` must be accepted on a patch turn: a diff is a write product, and narrowing it is meaningful")
 	}
 }
 
-// TestACPWrite_EmptySelectIsRefusedNotWidened carries the danger the whole filter exists for:
-// an empty narrowing filter names ZERO findings, and the one
-// outcome a caller can neither detect nor survive is having that read as "apply everything".
+// An empty filter names zero findings and must never read as "apply everything".
 func TestACPWrite_EmptySelectIsRefusedNotWidened(t *testing.T) {
 	for _, empty := range [][]string{{}, {""}, {"  ", ""}} {
 		msg, data, ok := requireRunHandle(review.ModeApply, "/runs/prior-report-run", empty)
@@ -85,9 +73,7 @@ func TestACPWrite_EmptySelectIsRefusedNotWidened(t *testing.T) {
 	}
 }
 
-// TestACPWrite_SelectOnAReportTurnIsRefused — a report turn writes nothing, so a filter over what it
-// writes could not have had an effect. Accepting it would report success for a narrowing that did
-// nothing, which is the same class of lie as dropping the filter.
+// A report turn writes nothing, so accepting select would report a narrowing that had no effect.
 func TestACPWrite_SelectOnAReportTurnIsRefused(t *testing.T) {
 	msg, data, ok := requireRunHandle(review.ModeReport, "", []string{"sha1:abc"})
 	if ok {
@@ -102,9 +88,7 @@ func TestACPWrite_SelectOnAReportTurnIsRefused(t *testing.T) {
 }
 
 func TestACPWrite_AcceptedFingerprintsRideTheReportTurn(t *testing.T) {
-	// This is the channel that makes selective apply expressible on ACP at all: a caller cannot select
-	// on host-computed values it was never told, and with no lookup surface there is no other moment
-	// to tell it.
+	// The report response is the only moment a caller can learn the fingerprints to select on.
 	out := review.RunOutcome{
 		Findings: []review.Finding{
 			{ID: "F-001", Kind: "bug", File: "a.go", Title: "boom"},
@@ -114,7 +98,7 @@ func TestACPWrite_AcceptedFingerprintsRideTheReportTurn(t *testing.T) {
 		Decisions: []review.Decision{
 			{FindingID: "F-001", Valid: true, State: review.StateReportedValid},
 			{FindingID: "F-002", Valid: true, State: review.StateReportedValid,
-				Applyable: boolPtr(false), ApplyRefusalReason: "no_workspace_evidence"},
+				Applyable: new(false), ApplyRefusalReason: "no_workspace_evidence"},
 			{FindingID: "F-003", Valid: false, State: review.StateReportedValid},
 		},
 	}
@@ -126,9 +110,8 @@ func TestACPWrite_AcceptedFingerprintsRideTheReportTurn(t *testing.T) {
 	if fp == "" || !strings.HasPrefix(fp, "sha1:") {
 		t.Fatalf("fingerprint = %q, want the host-computed identity", fp)
 	}
-	// THE SECURITY PROPERTY: the selector is never the model-authored Finding.ID. Keying a write set
-	// on a model-controlled identifier would let a model relabel findings until "apply only this one"
-	// selected something else.
+	// The selector is never the model-authored finding ID, which a model could relabel to change what a
+	// selection names.
 	if fp == "F-001" || strings.Contains(fp, "F-001") {
 		t.Fatalf("the selector must not be the model-authored finding id, got %q", fp)
 	}
@@ -136,5 +119,3 @@ func TestACPWrite_AcceptedFingerprintsRideTheReportTurn(t *testing.T) {
 		t.Fatalf("the row must name the file a human would recognise, got %v", rows[0])
 	}
 }
-
-func boolPtr(b bool) *bool { return &b }

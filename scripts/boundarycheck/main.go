@@ -1,17 +1,14 @@
-// Command boundarycheck enforces the aimesh meshcore boundary: meshcore is the app-neutral engine and
-// must not learn either domain. It fails the build when:
-//   - meshcore imports a domain package (internal/review or internal/explore), or imports net/http;
-//   - the two domains import each other;
-//   - a meshcore EXPORTED identifier contains an app-domain denylist term (strict tier).
+// Command boundarycheck enforces the meshcore boundary. It fails when:
+//   - meshcore imports internal/review, internal/explore or net/http;
+//   - internal/review and internal/explore import each other;
+//   - a meshcore exported identifier contains an app-domain denylist term;
+//   - a sunset-path marker does not cite its removal task id.
 //
-// THE DOMAIN↔DOMAIN CHECK IS THE ONLY THING ENFORCING THAT BOUNDARY. review and explore share one Go
-// module (they are never released independently — a module is a unit of distribution, not
-// organization), so the module graph does not refuse a cross-import; the check below does. Deleting or
-// weakening it silently opens app↔app coupling with nothing else watching.
+// Both domains live in one Go module, so this check is the only thing that prevents a cross-domain
+// import.
 //
-// Denylist tiers: exported identifiers = FAIL (strict); comments in non-test files = WARN
-// (baseline, tighten later); test files = report-only (skipped). Denylist terms are matched
-// as whole camelCase/underscore words, so `preview`/`overview` do NOT match `review`.
+// Denylist terms match whole camelCase or underscore-separated words, so `preview` does not match
+// `review`. Exported identifiers fail, comments in non-test files warn, and test files are skipped.
 package main
 
 import (
@@ -28,7 +25,7 @@ import (
 const (
 	modPrefix   = "github.com/Tim-Butterfield/aimesh"
 	meshcoreMod = modPrefix + "/meshcore"
-	// The two domains are now internal packages of the one root module rather than their own modules.
+	// The domains are internal packages of the root module.
 	reviewPkg  = modPrefix + "/internal/review"
 	explorePkg = modPrefix + "/internal/explore"
 )
@@ -45,29 +42,21 @@ var denylist = map[string]bool{
 	"synthesis": true, "task": true, "reviewmesh": true, "exploremesh": true,
 }
 
-// protocolExemptions permit a denylisted term inside ONE meshcore package because an EXTERNAL
-// STANDARD names the concept there — not because an app domain leaked in. The exemption is keyed
-// by (package path prefix, term) and never by term alone, so the same word stays failing
-// everywhere else in meshcore.
+// protocolExemptions permit a denylist term in one meshcore package because an external standard
+// names the concept there. Entries are keyed by package path prefix and term, so the term still
+// fails everywhere else in meshcore.
 //
-// `task` in `meshcore/mcp`: the MCP `2026-07-28` `io.modelcontextprotocol/tasks` extension defines
-// `tasks/get`, `tasks/cancel`, `CreateTaskResult` and `resultType: "task"`. Naming our types
-// anything else would leave the package implementing a protocol in vocabulary the protocol does not
-// use — and this repo has repeatedly found that verifying code against the spec's own words is what
-// catches errors. exploremesh's DOMAIN `task` (`RawTask`, `task.json`) is unrelated and is still
-// caught in every other meshcore package.
+// `task` in meshcore/mcp: the MCP 2026-07-28 tasks extension defines tasks/get, tasks/cancel and
+// CreateTaskResult, so the package uses the specification's vocabulary.
 //
-// Adding an entry here is a boundary decision: require an external specification that names the
-// term, and scope it to the narrowest package that implements that specification.
+// Add an entry only for a term an external specification names, scoped to the narrowest package
+// that implements it.
 var protocolExemptions = map[string]map[string]bool{
 	"mcp/": {"task": true},
 }
 
-// exemptTerm reports whether term is permitted in this meshcore-relative file by a protocol
-// exemption above.
-// The keys are slash-separated, so file is normalized rather than trusted: a native-separator path
-// would match no prefix and silently drop the exemption, turning a passing check into a failing one
-// on Windows only.
+// exemptTerm reports whether a protocol exemption permits term in the meshcore-relative file. The
+// path is slash-normalized because the keys use forward slashes and Windows paths do not.
 func exemptTerm(file, term string) bool {
 	file = filepath.ToSlash(file)
 	for prefix, terms := range protocolExemptions {
@@ -99,8 +88,7 @@ func main() {
 			}
 		}
 	}
-	// The DOMAIN↔DOMAIN boundary. Both live in the one root module now, so nothing but this refuses a
-	// cross-import — see the package comment.
+	// The domain boundary; see the package comment.
 	if dirExists(filepath.Join(root, reviewDir)) {
 		for _, ip := range listDeps(filepath.Join(root, reviewDir)) {
 			if strings.HasPrefix(ip, explorePkg) {
@@ -139,26 +127,15 @@ func main() {
 
 func dirExists(p string) bool { fi, err := os.Stat(p); return err == nil && fi.IsDir() }
 
-// sunsetRemovalTaskID is the backlog task a sunset-path marker must cite. It is one id today because
-// there is one sunset in flight; make it a set when there is a second.
+// sunsetRemovalTaskID is the task id every sunset-path marker must cite.
 const sunsetRemovalTaskID = "MCP26-SUNSET"
 
-// scanSunsetMarkers enforces CONTRIBUTING.md's rule that code written to serve only a protocol
-// revision we intend to delete is marked "at the moment you write it … a comment naming it
-// sunset-path AND CITING THE REMOVAL TASK ID".
-//
-// WHY THIS IS A BUILD FAILURE RATHER THAN A CONVENTION. The rule was followed in spirit and broken in
-// letter at every one of the 28 sites the migration produced: each said "legacy removal task" and none
-// said `MCP26-SUNSET`. That is invisible until the day it matters, and on that day the removal is a
-// grep — so a marker that the grep does not find is a marker that does not exist. The whole value of
-// marking-at-the-point is that the removal is a checklist rather than a search; a citation-free marker
-// silently converts it back into a search.
-//
-// It scans the whole repo rather than meshcore alone, because sunset-path code lives in both apps'
-// surfaces and their CLIs. Test files are included: a legacy-only test is legacy-only code.
+// scanSunsetMarkers reports every sunset-path marker that does not cite sunsetRemovalTaskID, as
+// CONTRIBUTING.md requires. The removal is found by searching for the id, so a marker without it
+// would be missed. It scans the whole repository, test files included.
 func scanSunsetMarkers(root string) (failures []string) {
 	skipDir := map[string]bool{
-		".git": true, ".aikit": true, "node_modules": true, "testdata": true, "web": true,
+		".git": true, ".aikit": true, "node_modules": true, "testdata": true,
 	}
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -174,9 +151,7 @@ func scanSunsetMarkers(root string) (failures []string) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		// This checker's own source is skipped: it necessarily contains the marker token as a string
-		// literal (and in this comment), and a checker that fails on its own implementation is a
-		// checker nobody can run. It is the only exclusion, and it is a path, not a pattern.
+		// Skip this checker's own source, which contains the marker token as a literal.
 		if strings.HasPrefix(filepath.ToSlash(rel), "scripts/boundarycheck/") {
 			return nil
 		}
@@ -225,12 +200,10 @@ func scanMeshcore(dir string) (failures, warnings []string) {
 			return nil
 		}
 		rel, _ := filepath.Rel(dir, path)
-		// Slash-normalized: rel feeds both the protocolExemptions prefix lookup (keyed "mcp/") and
-		// the reported path. On Windows filepath.Rel yields `mcp\result.go`, which matches no
-		// prefix — so every exempt identifier in meshcore/mcp failed there while passing on Unix.
+		// Slash-normalize rel, which feeds the protocolExemptions prefix lookup and the report.
 		rel = filepath.ToSlash(rel)
 		if strings.HasSuffix(path, "_test.go") {
-			return nil // test files: report-only tier (skipped)
+			return nil // test files are not scanned
 		}
 		file, perr := parser.ParseFile(fset, path, nil, parser.ParseComments)
 		if perr != nil {
@@ -254,10 +227,8 @@ func scanMeshcore(dir string) (failures, warnings []string) {
 			}
 			return true
 		})
-		// Baseline tier: comments in non-test files → warn only. Protocol exemptions apply here
-		// too: a package documenting the specification it implements must be able to name that
-		// specification's concepts, and warning on every mention would bury the app-vocabulary
-		// leaks this tier exists to surface.
+		// Comments only warn. Protocol exemptions apply here too, so a package can name the concepts
+		// of the specification it implements.
 		for _, cg := range file.Comments {
 			for _, w := range wordsIn(cg.Text()) {
 				if denylist[w] && !exemptTerm(rel, w) {

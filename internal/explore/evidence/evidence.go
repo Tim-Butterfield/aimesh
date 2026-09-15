@@ -1,41 +1,27 @@
-// Package evidence is exploremesh's OPTIONAL, DETERMINISTIC SQLite export: it builds a
-// relational evidence database FROM a captured run directory, so auditors can run re-runnable governance SQL
-// over a run.
+// Package evidence exports a captured run directory to a SQLite database for governance queries.
 //
-// The substrate decision this package implements is worth restating, because everything about its shape
-// follows from it. The SYSTEM OF RECORD IS THE APPEND-ONLY RUN DIRECTORY, not this database. Files give
-// immutability, append-only semantics and hash pinning for free; a live database would have to have them
-// disciplined into it, and would import crash/WAL failure modes plus a heavy dependency for a tiny store. So
-// the database is DERIVED — and because it is derived, its derivability is itself a checkable invariant:
-// exporting the same run directory twice must produce identical content, which is what `Verify` and the
-// package's rebuild-and-compare test check.
+// The run directory is the system of record; the database is derived from it. Exporting the same run
+// directory twice must give identical content, which Verify checks. To keep that true:
 //
-// Three properties make that hold, and each one is a rule this package follows without exception:
+//   - nothing non-deterministic is written (no timestamps, absolute paths, map order or autoincrement ids),
+//     and inserts run in a fixed order;
+//   - a malformed artifact fails the export instead of being skipped;
+//   - foreign keys, STRICT tables, foreign_key_check and integrity_check are enforced, so for example a
+//     ballot naming a canonical ID missing from the confirmed revision fails the export.
 //
-//   - NOTHING NON-DETERMINISTIC ENTERS THE DATABASE. No wall-clock timestamp, no absolute path, no map
-//     iteration order, no rowid autoincrement. Every value comes from the run directory and every insert
-//     runs in a fixed order.
-//   - THE EXPORT NEVER REPAIRS ITS INPUT. A malformed artifact is an error, not a skipped file. An export
-//     that quietly dropped what it could not read would produce a database that looks complete and is not.
-//   - INTEGRITY IS ENFORCED, NOT ASSERTED. `PRAGMA foreign_keys=ON`, STRICT tables, and
-//     `foreign_key_check` + `integrity_check` at finalize. The load-bearing example — a ballot row naming a
-//     canonical ID absent from the confirmed revision — is therefore a CONSTRAINT VIOLATION that fails the
-//     export, rather than a discrepancy some later reader might notice.
-//
-// The driver is `modernc.org/sqlite`: pure Go, because the distribution gate is CGO_ENABLED=0. It is
-// confined to this package (and to exploremesh's go.mod); meshcore gains no database dependency, and no
-// other exploremesh command requires SQLite — a run never writes this database implicitly.
+// The driver is the pure-Go modernc.org/sqlite, since builds use CGO_ENABLED=0.
 package evidence
 
 import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
-	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite" (the dist gate is CGO_ENABLED=0)
+	_ "modernc.org/sqlite" // registers the "sqlite" driver
 
 	"github.com/Tim-Butterfield/aimesh/internal/explore/canon"
 	"github.com/Tim-Butterfield/aimesh/internal/explore/govern"
@@ -43,8 +29,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// Summary is what an export produced: the exploration it covers and the row count per table, so a caller can
-// report what was written without re-querying.
+// Summary describes a finished export: the exploration it covers and the row count per table.
 type Summary struct {
 	RunDir        string         `json:"runDir"`
 	DBPath        string         `json:"dbPath"`
@@ -55,25 +40,16 @@ type Summary struct {
 	TotalRows     int            `json:"totalRows"`
 }
 
-// Export builds the derived evidence database at dbPath from the captured run directory at runDir.
+// Export builds the evidence database at dbPath from the run directory at runDir.
 //
-// The destination is GOVERNED (see dest.go): it is resolved through meshcore/scope with the typed path as
-// the allowed root, the non-overridable write denylist still applies, a destination that already exists is
-// refused unless opts.Force says otherwise, a non-regular destination is refused rather than followed, and
-// the database is published by an atomic rename so an interrupted export cannot replace a valid database
-// with a truncated one. The database is derived and disposable — the FILE the user named is not.
+// The destination is checked before anything is read (see resolveDestination) and the database is
+// published with an atomic rename, so an interrupted export never leaves a truncated file.
 func Export(runDir, dbPath string, opts Options) (Summary, error) {
-	// The DESTINATION is checked FIRST — before the run directory is read and before a byte is written.
-	// A refusal must cost the user nothing, and must never be reached with work already done.
 	dest, err := resolveDestination(dbPath, opts)
 	if err != nil {
 		return Summary{}, err
 	}
-	// The run directory is USER-SUPPLIED input (`--run <dir>`), so a missing/incomplete/malformed one is
-	// a CONFIGURATION fault (exit 3), not an internal error — classified here, at the boundary that knows
-	// where the value came from, rather than guessed at by the CLI. Everything after this point is the
-	// export's own machinery: an unclassified failure there really is internal (exit 8), which is exactly
-	// what the taxonomy's catch-all should report.
+	// The run directory is user input, so problems reading it are configuration faults.
 	rec, err := readRun(runDir)
 	if err != nil {
 		return Summary{}, fault.Wrap(fault.Config, "read the run directory", err)
@@ -82,19 +58,13 @@ func Export(runDir, dbPath string, opts Options) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	// Report the path the CALLER named, not the canonicalized host path: the user can only recognize what
-	// they typed, and a resolved path would leak the shape of their machine into a summary and a JSON
-	// projection that are otherwise free of it.
+	// Report the path as the caller wrote it, not the resolved path.
 	sum.DBPath = dbPath
 	return sum, nil
 }
 
-// build writes the whole evidence database at dbPath from an already-read run record.
-//
-// It is UNGUARDED and NON-ATOMIC by design, and it is unexported for exactly that reason: the caller owns
-// the path it is handed. There are precisely two callers, and each owns a path nobody else can see —
-// writeAtomic's temporary file in the destination directory, and Verify's scratch file in a temporary
-// directory of its own. No caller may hand it a path a user named; that is what Export is for.
+// build writes the evidence database at dbPath from rec. It performs no destination checks and is not
+// atomic, so callers must pass a private path: writeAtomic's temporary file or Verify's scratch file.
 func build(runDir string, rec *runRecord, dbPath string) (Summary, error) {
 	db, err := open(dbPath)
 	if err != nil {
@@ -112,17 +82,14 @@ func build(runDir string, rec *runRecord, dbPath string) (Summary, error) {
 	w.writeAll()
 	if w.err != nil {
 		_ = tx.Rollback()
-		// A foreign-key failure here is a governance invariant refusing the input, not a bug in the export —
-		// so the error says which invariant, rather than surfacing a bare "constraint failed" that a reader
-		// would reasonably mistake for an export defect.
+		// A foreign-key failure means the input violates a governance invariant, so say so.
 		if strings.Contains(strings.ToLower(w.err.Error()), "foreign key") {
 			return Summary{}, fmt.Errorf("evidence export REFUSED %s: %w — a foreign-key violation means the run directory does not satisfy a governance invariant (the load-bearing one: a ballot entry, a universe snapshot or a decision entry naming a canonical ID that is ABSENT from the confirmed revision). The export fails rather than recording it", runDir, w.err)
 		}
 		return Summary{}, w.err
 	}
 	if err := tx.Commit(); err != nil {
-		// A deferred foreign-key violation surfaces here. It is the governance invariant doing its job, so the error
-		// says what it means rather than leaving a bare "constraint failed".
+		// Deferred foreign-key violations surface at commit.
 		return Summary{}, fmt.Errorf("commit evidence export (a constraint violation here means the run directory does not satisfy a governance invariant — e.g. a ballot naming a canonical ID absent from the confirmed revision): %w", err)
 	}
 	if err := finalize(db); err != nil {
@@ -143,17 +110,15 @@ func build(runDir string, rec *runRecord, dbPath string) (Summary, error) {
 	return sum, nil
 }
 
-// open connects to the database with foreign keys ON and a FIXED page size + journal mode. The two pragmas
-// beyond foreign_keys are there for the derivability invariant: page size and journal mode both change the
-// bytes on disk, so pinning them is what lets two exports of the same run directory be compared byte for
-// byte rather than only field for field.
+// open opens the database with foreign keys enabled and a fixed page size and journal mode, so two exports
+// of the same run produce the same bytes.
 func open(path string) (*sql.DB, error) {
 	dsn := "file:" + path + "?_pragma=foreign_keys(1)&_pragma=page_size(4096)&_pragma=journal_mode(DELETE)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	// One connection: the export is a single writer, and a pool would make the pragma state per-connection.
+	// Pragmas are per connection, so use exactly one.
 	db.SetMaxOpenConns(1)
 	var fk int
 	if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
@@ -171,8 +136,7 @@ func open(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// finalize runs the integrity gates the export requires. Both are run AFTER the commit, over the finished file, so
-// they check what a reader will actually open.
+// finalize runs foreign_key_check and integrity_check on the committed database.
 func finalize(db *sql.DB) error {
 	rows, err := db.Query("PRAGMA foreign_key_check")
 	if err != nil {
@@ -205,7 +169,7 @@ func finalize(db *sql.DB) error {
 	return nil
 }
 
-// countRows counts one table (the table names come from exportTables, never from user input).
+// countRows returns the row count of table, which must come from exportTables.
 func countRows(db *sql.DB, table string) (int, error) {
 	var n int
 	if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&n); err != nil {
@@ -214,25 +178,20 @@ func countRows(db *sql.DB, table string) (int, error) {
 	return n, nil
 }
 
-// --- the writer ---
-
-// writer holds the transaction, the run record and the first error. Collecting the first error rather than
-// returning one per statement keeps the insert code readable at this volume; writeAll checks it once, and a
-// failed statement stops everything downstream from being written because the transaction is rolled back.
+// writer writes a run record inside one transaction. It keeps the first error, and exec is a no-op once
+// an error is set.
 type writer struct {
 	tx  *sql.Tx
 	rec *runRecord
 	id  string
 	err error
-	// participants is the registry every FK to participants resolves against, built BEFORE anything that
-	// references it (see registerParticipants).
+	// participants holds every identity in the run, keyed by participantID.
 	participants map[string]*participant
-	// mentions maps (envelopeRef, rawText) → mention id.
+	// mentions maps (envelopeRef, rawText) to a mention id.
 	mentions map[mentionKey]string
-	// confirmedRevision is the revision number of the partition the decision + claims were computed at.
+	// confirmedRevision is the partition revision the decision and claims were computed at.
 	confirmedRevision int
-	// elements is the artifact-element set, so a lineage edge can never reference an element that was not
-	// declared (which the foreign key would catch, but catching it here names the cause).
+	// elements is the set of declared lineage element ids.
 	elements map[string]bool
 }
 
@@ -246,7 +205,7 @@ type participant struct {
 
 type mentionKey struct{ envelopeRef, raw string }
 
-// exec runs one statement, keeping the FIRST error.
+// exec runs one statement unless an earlier one failed, and records the first error.
 func (w *writer) exec(query string, args ...any) {
 	if w.err != nil {
 		return
@@ -256,8 +215,8 @@ func (w *writer) exec(query string, args ...any) {
 	}
 }
 
-// writeAll writes every table in dependency order. The order is fixed and explicit — it is both what the
-// foreign keys require and what makes two exports of the same directory produce the same bytes.
+// writeAll writes every table in a fixed dependency order, which both the foreign keys and deterministic
+// output require.
 func (w *writer) writeAll() {
 	w.registerParticipants()
 	w.writeExploration()
@@ -278,15 +237,13 @@ func (w *writer) writeAll() {
 	w.writeLineage()
 }
 
-// registerParticipants collects EVERY identity referenced anywhere in the run into one registry, before any
-// table that points at it is written. It is done as a first pass rather than lazily because a foreign key to
-// an identity that appeared only in, say, a challenge would otherwise fail at the end of a long export with
-// nothing to say about which stage produced it.
+// registerParticipants collects every identity referenced in the run, with its roles, before any table that
+// references participants is written.
 func (w *writer) registerParticipants() {
 	w.participants = map[string]*participant{}
 	add := func(id schema.ExplorerIdentity, role string) {
 		if id.Adapter == "" && id.Model == "" {
-			return // the zero identity is not a participant; it is the absence of one
+			return
 		}
 		key := participantID(id)
 		p, ok := w.participants[key]
@@ -338,8 +295,7 @@ func (w *writer) registerParticipants() {
 	}
 }
 
-// roleOf maps a pre-flight role label onto the export's role vocabulary (the canonicalizer roles are
-// numbered, e.g. `canonicalizer-a`).
+// roleOf maps a pre-flight role label, such as canonicalizer-a, to an export role.
 func roleOf(role string) string {
 	if strings.HasPrefix(role, "canonicalizer") {
 		return "canonicalizer"
@@ -380,8 +336,8 @@ func (w *writer) writeExploration() {
 		string(policy.MissingResponse), string(task))
 }
 
-// writeModeContract records what the contract DID, derived from the directory alone (never from the live
-// registry — an export describes the run it is reading, not the code compiled today).
+// writeModeContract records which stages the run performed, derived from the run directory rather than the
+// current mode registry.
 func (w *writer) writeModeContract() {
 	canonicalized := len(w.rec.Ledger) > 0
 	confirmed := w.rec.Confirmation != nil
@@ -401,9 +357,7 @@ func (w *writer) writeModeContract() {
 		b2i(canonicalized), b2i(confirmed), b2i(balloted))
 }
 
-// fixedSpace reports whether this run was a FIXED-SPACE one, derived from the persisted claims: a
-// fixed-space claim carries the "no partition" statement where an emergent-space claim carries a hash. It is
-// a property of the artifacts, not of the mode name.
+// fixedSpace reports whether any recorded claim carries govern.FixedSpaceNoPartition.
 func (w *writer) fixedSpace() bool {
 	if w.rec.Governance == nil {
 		return false
@@ -448,7 +402,7 @@ func (w *writer) writeParticipants() {
 		w.exec(`INSERT INTO participants (exploration_id, participant_id, roles, adapter, model, effort)
 			VALUES (?,?,?,?,?,?)`, w.id, p.id, strings.Join(sortedBoolKeys(p.roles), ","), p.adapter, p.model, p.effort)
 	}
-	// The FROZEN panel, in its recorded membership order.
+	// The frozen panel, in recorded order.
 	if w.rec.Governance == nil {
 		return
 	}
@@ -482,8 +436,8 @@ func (w *writer) writeRounds() {
 	}
 }
 
-// writeCalls records the model calls the directory evidences: the identity pre-flight probes, one call per
-// recorded envelope, and the terminal collation. A call the directory does not evidence is NOT invented.
+// writeCalls records the model calls the run directory shows: pre-flight probes, one call per envelope, and
+// the collation if its output exists.
 func (w *writer) writeCalls() {
 	for _, p := range w.rec.Preflight {
 		key := participantID(p.Requested)
@@ -514,9 +468,7 @@ func (w *writer) writeCalls() {
 				string(env.IdentityEvidence), env.IdentityCaveat)
 		}
 	}
-	// The terminal collation, recorded ONLY when the directory evidences it: the collator's raw output or the
-	// terminal artifact is on disk. A run that halted before the collate call gets no row — an export must
-	// not assert a call that never happened.
+	// Record the collate call only if its output was captured.
 	collator := participantID(w.rec.Manifest.Collator)
 	if w.participants[collator] != nil && w.hasArtifact("raw-synthesis.txt", "synthesis.json") {
 		w.exec(`INSERT INTO calls (exploration_id, call_id, role, phase, round_index, participant_id)
@@ -524,13 +476,11 @@ func (w *writer) writeCalls() {
 	}
 }
 
-// hasArtifact reports whether the manifest indexes ANY of the named run-relative files.
+// hasArtifact reports whether the manifest lists any of the named run-relative files.
 func (w *writer) hasArtifact(names ...string) bool {
 	for _, a := range w.rec.Manifest.Artifacts {
-		for _, n := range names {
-			if a.Path == n {
-				return true
-			}
+		if slices.Contains(names, a.Path) {
+			return true
 		}
 	}
 	return false
@@ -580,21 +530,17 @@ func (w *writer) writeDropped() {
 	}
 }
 
-// writeCanonicalization writes the mentions, the revisions, the entities and the map entries. A confirmation
-// revision is a NEW revision row; the superseded provisional one is retained beside it, exactly as on disk.
+// writeCanonicalization writes mentions, revisions, entities and map entries. When confirmation ran, both
+// the provisional and confirmed revisions are written.
 func (w *writer) writeCanonicalization() {
 	w.mentions = map[mentionKey]string{}
 	w.confirmedRevision = w.rec.Manifest.LedgerRevision
 	if w.confirmedRevision == 0 {
 		w.confirmedRevision = 1
 	}
-	provisionalRevision := w.confirmedRevision - 1
-	if provisionalRevision < 1 {
-		provisionalRevision = 1
-	}
+	provisionalRevision := max(w.confirmedRevision-1, 1)
 
-	// MENTIONS first: the confirmed ledger in file order, then any the provisional revision adds. The order
-	// is the file's, so the ids are stable across exports.
+	// Mention ids follow file order (confirmed ledger, then provisional) so they are stable across exports.
 	envelopeRefs := w.envelopeRefSet()
 	next := 0
 	register := func(rows []canon.LedgerRow) {
@@ -622,15 +568,13 @@ func (w *writer) writeCanonicalization() {
 	}
 }
 
-// writeRevision writes one ledger revision: the revision row, its entities (member counts and the
-// single-source flag computed from the ledger itself), and its raw→canonical map entries in file order.
+// writeRevision writes one ledger revision, its entities with member counts and single-source flags
+// computed from rows, and its map entries in file order.
 func (w *writer) writeRevision(revision int, hash, prior string, confirmed bool, rows []canon.LedgerRow) {
 	w.exec(`INSERT INTO canonicalization_revisions (exploration_id, revision, revision_hash,
 		prior_revision_hash, confirmed, agreement_rule_version, row_count) VALUES (?,?,?,?,?,?,?)`,
 		w.id, revision, hash, prior, b2i(confirmed), w.rec.Manifest.AgreementRuleVersion, len(rows))
 
-	// Entities, derived from the ledger: the member count and the single-source flag are ARITHMETIC over the
-	// rows, so they hold for any revision — including a provisional one no confirmation record describes.
 	order := []string{}
 	members := map[string]int{}
 	sources := map[string]map[schema.ExplorerIdentity]bool{}
@@ -651,7 +595,7 @@ func (w *writer) writeRevision(revision int, hash, prior string, confirmed bool,
 	for i, row := range rows {
 		mention := w.mentions[mentionKey{row.EnvelopeRef, row.RawNomination}]
 		if mention == "" {
-			continue // a nomination from an envelope this directory did not record; not invented here
+			continue // the nomination's envelope was not recorded
 		}
 		w.exec(`INSERT INTO canonical_map_entries (exploration_id, revision, seq, mention_id, canonical_id,
 			decided_by_call, decided_by_adapter, decided_by_model, agreed_by_count) VALUES (?,?,?,?,?,?,?,?,?)`,
@@ -660,10 +604,8 @@ func (w *writer) writeRevision(revision int, hash, prior string, confirmed bool,
 	}
 }
 
-// entityNames resolves canonical IDs to their human labels from the persisted artifacts: the confirmed
-// revision's clusters when a confirmation record exists, else the governance claims' subject labels. A name
-// the directory does not carry stays EMPTY rather than being synthesized from a member's wording — picking
-// one nomination's phrasing as the entity's label would be a judgment, and this is an export.
+// entityNames maps canonical IDs to labels from the confirmation clusters, claim subject labels and decision
+// entries, in that order of preference. IDs with no recorded label are left out.
 func (w *writer) entityNames() map[string]string {
 	names := map[string]string{}
 	if w.rec.Confirmation != nil {
@@ -693,8 +635,7 @@ func (w *writer) writeConfirmation() {
 	if c == nil {
 		return
 	}
-	// Challenges, in the order the confirmation record holds them, with a lookup so a resolution can point at
-	// the challenge it resolved.
+	// seqOf lets each resolution reference the challenge it resolved.
 	seqOf := map[string]int{}
 	for i, ch := range c.Challenges {
 		w.exec(`INSERT INTO challenges (exploration_id, seq, challenge_type, canonical_id, other_canonical_id,
@@ -721,18 +662,15 @@ func (w *writer) writeConfirmation() {
 	}
 }
 
-// challengeKey identifies one challenge by value, so a resolution can be matched back to it (the persisted
-// resolution embeds the whole challenge rather than an index).
+// challengeKey identifies a challenge by value, since a recorded resolution embeds its challenge rather than
+// an index.
 func challengeKey(c canon.Challenge) string {
 	return strings.Join([]string{string(c.Type), c.CanonicalID, c.OtherCanonicalID, c.RawNomination,
 		c.Reason, participantID(c.By)}, "\x00")
 }
 
-// writeCriteria merges the two places a criterion can be declared: the FROZEN decision inputs (origin +
-// aggregation method) and the user's DECLARED comparison criteria (direction + role + weight). They do not
-// co-occur in practice — a ballot-bearing mode and a fixed-space comparison are different modes — but the
-// merge is written as a merge rather than as two exclusive branches so neither can silently overwrite the
-// other if they ever do.
+// writeCriteria writes criteria from the frozen decision inputs and from the task's compare criteria,
+// merged by name, plus the frozen criterion snapshot.
 func (w *writer) writeCriteria() {
 	type row struct {
 		name        string
@@ -766,8 +704,6 @@ func (w *writer) writeCriteria() {
 		r := get(c.Name)
 		r.direction, r.role, r.weight = string(c.Direction), string(c.EffectiveRole()), c.Weight
 		if r.declaredIn == "" {
-			// A comparison criterion is declared by the USER in the task, and its evidence is synthesized per
-			// cell by the panel — recorded with the same vocabulary used for every other criterion.
 			r.origin, r.aggregation, r.declaredIn = string(govern.OriginUser), string(govern.AggregationEvidenceSynthesis), "declared_task"
 		}
 	}
@@ -782,7 +718,7 @@ func (w *writer) writeCriteria() {
 				w.id, r.name, r.auth.Actor, r.auth.Timestamp, r.auth.CriterionVersion, r.auth.Scope)
 		}
 	}
-	// The frozen SNAPSHOT: which criteria were in force under which frozen inputs hash.
+	// The criteria in force under the frozen inputs hash.
 	if d := w.rec.Decision; d != nil && d.Frozen.InputsHash != "" {
 		for i, c := range d.Frozen.Inputs.Criteria {
 			w.exec(`INSERT OR IGNORE INTO criterion_snapshots (exploration_id, snapshot_hash, criterion_id, position)
@@ -805,8 +741,8 @@ func (w *writer) writeDecision() {
 		w.confirmedRevision, in.ShortlistSize, in.Quorum, string(in.TieRule), string(in.MissingResponse),
 		in.PolicyHash, in.Presentation.Seed, in.Presentation.RuleVersion, d.Cast, b2i(d.QuorumMet),
 		d.TieOutcome, d.Rendering)
-	// The frozen universe in PRESENTED order. Each row must name an entity of the confirmed revision — the
-	// foreign key is the check, and a doctored order fails the export here.
+	// The frozen universe in presented order. The foreign key requires each ID to exist in the confirmed
+	// revision.
 	for i, id := range in.Presentation.Order {
 		w.exec(`INSERT INTO ballot_universe_snapshots (exploration_id, position, canonical_id, confirmed_revision)
 			VALUES (?,?,?,?)`, w.id, i, id, w.confirmedRevision)
@@ -831,9 +767,7 @@ func (w *writer) writeDecision() {
 	}
 }
 
-// writeClaims writes every emitted governance claim as TYPED COLUMNS plus its exact contributing source
-// rows. Nothing here is a JSON blob: the whole point of the export is that a governance question is a
-// SQL query rather than a JSON traversal.
+// writeClaims writes each governance claim as typed columns, with one row per contributing envelope.
 func (w *writer) writeClaims() {
 	g := w.rec.Governance
 	if g == nil {
@@ -859,7 +793,7 @@ func (w *writer) writeClaims() {
 			c.RulesVersion, c.PolicyHash, c.BaselineRoundID, low, high, direction, note)
 		for _, ref := range c.ContributingSourceIDs {
 			if !envelopeRefs[ref] {
-				continue // a ref to an envelope this directory did not record is not invented as a row
+				continue // the envelope was not recorded
 			}
 			w.exec(`INSERT OR IGNORE INTO governance_claim_sources (exploration_id, claim_id, envelope_ref)
 				VALUES (?,?,?)`, w.id, claimID, ref)
@@ -877,9 +811,8 @@ func (w *writer) writeNarrative() {
 	}
 }
 
-// writeLineage builds the artifact elements and the ONE variable-depth structure over them. The edges
-// run from SOURCE to DERIVED, so a recursive CTE walking children answers "what did this blind response
-// end up contributing to", and the same CTE walking parents answers "what is this result built on".
+// writeLineage writes lineage elements and edges. Edges point from source to derived element, so recursive
+// queries can walk either direction.
 func (w *writer) writeLineage() {
 	w.elements = map[string]bool{}
 	element := func(id, kind, label string, roundIndex any) {
@@ -892,7 +825,7 @@ func (w *writer) writeLineage() {
 	}
 	edge := func(parent, child, relation string) {
 		if !w.elements[parent] || !w.elements[child] {
-			return // never point an edge at an element the export did not declare
+			return // both ends must be declared elements
 		}
 		w.exec(`INSERT OR IGNORE INTO lineage_edges (exploration_id, parent_element_id, child_element_id, relation)
 			VALUES (?,?,?,?)`, w.id, parent, child, relation)
@@ -952,8 +885,7 @@ func (w *writer) writeLineage() {
 	}
 }
 
-// envelopeRefSet is the set of envelope refs this directory actually recorded — the guard that keeps the
-// export from asserting a reference it cannot back.
+// envelopeRefSet returns the set of envelope refs recorded in the run.
 func (w *writer) envelopeRefSet() map[string]bool {
 	out := map[string]bool{}
 	for _, r := range w.rec.Rounds {
@@ -964,25 +896,20 @@ func (w *writer) envelopeRefSet() map[string]bool {
 	return out
 }
 
-// --- small helpers ---
-
-// participantID is the full (adapter, model, effort) attribution key, rendered as one string.
+// participantID returns the adapter|model|effort key for id.
 func participantID(id schema.ExplorerIdentity) string {
 	return id.Adapter + "|" + id.Model + "|" + id.Effort
 }
 
-// entityElementID is a canonical entity's lineage element id, qualified by revision (the same canonical ID
-// can exist at two revisions and they are not the same entity for lineage purposes).
+// entityElementID returns a canonical entity's lineage element id, qualified by revision.
 func entityElementID(revision int, canonicalID string) string {
 	return fmt.Sprintf("entity:%d:%s", revision, canonicalID)
 }
 
-// claimID is a claim's stable id: its versioned query plus its subject, which together identify exactly one
-// emitted claim (a claim is one query about one subject).
+// claimID returns a claim's id: its query and subject.
 func claimID(c govern.Claim) string { return c.Query + "::" + c.Subject }
 
-// effectiveMode is the mode the run executed, from the manifest. A directory written before the manifest
-// carried a mode reports "unknown" rather than guessing one.
+// effectiveMode returns the run's mode from the manifest, then the task, or "unknown".
 func effectiveMode(rec *runRecord) string {
 	if rec.Manifest.Mode != "" {
 		return rec.Manifest.Mode
@@ -993,7 +920,7 @@ func effectiveMode(rec *runRecord) string {
 	return "unknown"
 }
 
-// b2i renders a bool as the INTEGER a STRICT table stores.
+// b2i converts a bool to 0 or 1.
 func b2i(b bool) int {
 	if b {
 		return 1
@@ -1028,7 +955,7 @@ func sortedParticipantKeys(m map[string]*participant) []string {
 	return out
 }
 
-// firstLine is the statement fragment named in an error (a whole INSERT is unreadable in a message).
+// firstLine returns the start of a SQL statement, for use in error messages.
 func firstLine(q string) string {
 	q = strings.TrimSpace(q)
 	if i := strings.IndexAny(q, "\n("); i > 0 {

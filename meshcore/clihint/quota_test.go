@@ -5,11 +5,8 @@ import (
 	"testing"
 )
 
-// TestQuota_ClassifiedFromWhatProvidersActuallySay. Quota is the one failure whose correct response
-// is to WAIT: told anything else — or told nothing — a user goes looking for a configuration fault
-// that is not there. It is surfaced exactly like folder-trust or an update nudge, as a peer signal
-// through the same hint path, because to the person running it they are the same kind of event: the
-// provider is refusing to proceed until something outside aimesh changes.
+// Quota refusals are classified from providers' own wording. Quota is the failure whose remedy is to
+// wait, so it is reported through the same hint path as folder trust.
 func TestQuota_ClassifiedFromWhatProvidersActuallySay(t *testing.T) {
 	for _, tc := range []struct{ name, stderr string }{
 		{"anthropic api error type", `{"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit"}}`},
@@ -28,29 +25,22 @@ func TestQuota_ClassifiedFromWhatProvidersActuallySay(t *testing.T) {
 	}
 }
 
-// TestQuota_FromTheStructuredEnvelope: claude-code reports the upstream HTTP status in its own
-// `api_error_status` field. A status the PROVIDER set cannot be planted by reviewed source the way a
-// phrase can, so it is the strongest channel available and is matched structurally.
+// claude-code reports the upstream HTTP status in `api_error_status`. Workspace text cannot plant a
+// status the provider set, so it is matched structurally.
 func TestQuota_FromTheStructuredEnvelope(t *testing.T) {
 	env := `{"is_error":true,"api_error_status":429,"result":"upstream request failed","type":"result"}`
 	if got := ForFailure(Failure{Stdout: env, ExitCode: 1}); got != QuotaExhausted {
 		t.Errorf("signal = %q, want %q", got, QuotaExhausted)
 	}
-	// A SUCCESSFUL envelope carries api_error_status: null and must classify as nothing at all —
-	// the shape measured on a real run, kept here so a passing call can never be read as a failure.
+	// A successful envelope carries api_error_status: null and classifies as nothing.
 	ok := `{"is_error":false,"api_error_status":null,"result":"{\"findings\":[]}","type":"result"}`
 	if got := ForFailure(Failure{Stdout: ok, ExitCode: 0}); got != "" {
 		t.Errorf("a successful envelope classified as %q", got)
 	}
 }
 
-// TestQuota_FromEachCLIsOwnStructuredStatus. The structured channel is not claude-only, which is what
-// the 2026-08-12 measurement established: forcing a bad model showed codex printing
-// `ERROR: {"type":"error","status":400,...}` and gemini surfacing `code: 404` from its own error
-// object. Those are the same field a 429 arrives in, so the strongest channel covers all three CLIs.
-//
-// The strings below are the MEASURED wire shapes (claude 2.1.227, codex-cli 0.147.0, gemini 0.54.4),
-// with the status changed to the rate-limit one — the part of the shape that varies by failure.
+// Each CLI reports a structured status: codex in an `ERROR: {...,"status":N}` envelope and gemini as
+// `code: N` in its error object. The fixtures are observed wire shapes with the status set to 429.
 func TestQuota_FromEachCLIsOwnStructuredStatus(t *testing.T) {
 	for _, tc := range []struct{ name, stderr, stdout string }{
 		{
@@ -74,11 +64,9 @@ func TestQuota_FromEachCLIsOwnStructuredStatus(t *testing.T) {
 	}
 }
 
-// TestQuota_DoesNotFireOnOurOwnVocabulary is the #49 lesson applied before the fact rather than
-// after it. Reviewed source reaches these matchers whenever echo subtraction is imperfect, and this
-// project's own code and docs discuss rate limiting, quotas and HTTP statuses at length. A matcher
-// that fired on the WORDS rather than on a provider refusing would misreport a real failure as a
-// quota wait — the exact defect shape that told a user to fix folder trust that was never broken.
+// The quota matchers do not fire on text that merely discusses rate limits or statuses. Reviewed source
+// can reach them when echo subtraction is imperfect, and matching those words would misreport a real
+// failure as a quota wait.
 func TestQuota_DoesNotFireOnOurOwnVocabulary(t *testing.T) {
 	for _, text := range []string{
 		"// QuotaExhausted — the provider refused on a rate limit, a usage window, or exhausted credit.",

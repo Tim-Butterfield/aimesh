@@ -93,7 +93,7 @@ func TestDetectLineEnding(t *testing.T) {
 	}
 }
 
-// An LF-terminated replacement (e.g. a remediation marker) prepended into a CRLF file is
+// An LF-terminated replacement (such as a marker comment) prepended into a CRLF file is
 // adapted to CRLF — the file does not become mixed-ending.
 func TestApplyEdit_AdaptsReplacementToCRLFFile(t *testing.T) {
 	live := t.TempDir()
@@ -136,8 +136,8 @@ func TestApplyEdit_AdaptsReplacementToLFFile(t *testing.T) {
 	}
 }
 
-// A hardcoded-LF replacement (the shape the remediation marker takes) prepended into a CRLF
-// source must not produce a mixed-ending file — ApplyEdit adapts it to the file's CRLF convention.
+// A hardcoded-LF marker comment prepended into a CRLF source must not produce a mixed-ending file;
+// ApplyEdit adapts it to the file's CRLF convention.
 func TestApplyEdit_LFReplacementIntoCRLFSource_NotMixed(t *testing.T) {
 	live := t.TempDir()
 	writeFile(t, filepath.Join(live, "x.go"), "package x\r\n\r\nfunc x() {}\r\n")
@@ -146,8 +146,7 @@ func TestApplyEdit_LFReplacementIntoCRLFSource_NotMixed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The same edit the remediation marker produces (empty anchor = prepend), constructed
-	// directly so containment does not depend on the review-domain remediation engine.
+	// A prepend edit (empty anchor), as a marker comment would be.
 	edit := core.Edit{File: "x.go", Anchor: "", Replacement: "// reviewmesh[F1]: note\n", Occurrence: 1}
 	if err := ws.ApplyEdit(h, edit); err != nil {
 		t.Fatal(err)
@@ -248,7 +247,7 @@ func TestDiscard_ReadOnly_DetectsM5Mutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// simulate a reviewer mutating its isolated copy
+	// simulate a model mutating its read-only copy
 	if err := os.WriteFile(h.Abs("a.txt"), []byte("mutated\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -272,8 +271,7 @@ func TestIsExcluded(t *testing.T) {
 		"tmp/run/x":      true,
 		".cache/out":     true,
 		"node_modules/m": true,
-		// A third-party tool's local directory is NOT excluded: only names present on machines
-		// this tool has never seen earn a place in the list.
+		// An arbitrary tool's local directory is not excluded.
 		".aikit/out":    false,
 		"vendor/v":      true,
 		"dir/.DS_Store": true,
@@ -286,8 +284,7 @@ func TestIsExcluded(t *testing.T) {
 	}
 }
 
-// Every exclusion here is a CONTAINMENT rule. Size is not one of them: big.txt is collected
-// whole, because the only reasons to keep a file from a reviewer are reasons it must not be seen.
+// Exclusions are containment rules only; size is not one, so big.txt is collected whole.
 func TestCollectSnippets_ExcludesSkipsBinaryAndCarriesLargeFilesWhole(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "main.go"), "package main\n")
@@ -295,7 +292,10 @@ func TestCollectSnippets_ExcludesSkipsBinaryAndCarriesLargeFilesWhole(t *testing
 	writeFile(t, filepath.Join(root, "big.txt"), strings.Repeat("a", 100)) // carried whole
 	writeFile(t, filepath.Join(root, "bin"), "a\x00b")                     // binary → skipped
 
-	snips := CollectSnippets(root)
+	snips, _, err := CollectSnippetsWithCaveats(root)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
 
 	byPath := map[string]Snippet{}
 	for _, s := range snips {
@@ -327,7 +327,11 @@ func TestCollectSnippets_SkipsSymlinkedDir(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "linkdir")); err != nil {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
-	for _, s := range CollectSnippets(root) {
+	snips, _, err := CollectSnippetsWithCaveats(root)
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	for _, s := range snips {
 		if strings.Contains(s.Path, "linkdir") || strings.Contains(s.Content, "SECRET") {
 			t.Errorf("symlinked dir must not be traversed: %q", s.Path)
 		}
@@ -340,9 +344,8 @@ func TestSafeRel(t *testing.T) {
 			t.Errorf("safeRel(%q) should be allowed", p)
 		}
 	}
-	// Rooted/absolute-like + escape inputs must be refused on EVERY platform (Windows and
-	// non-Windows) — the cross-platform invariant. POSIX-rooted "/x" is rooted even where
-	// filepath.IsAbs would not flag it; "\x"/UNC + drive-letter are rooted likewise.
+	// Rooted, absolute-like and escaping inputs must be refused on every platform, including
+	// "/x", "\x", UNC and drive-letter forms that filepath.IsAbs may not flag.
 	for _, p := range []string{
 		"../x", "../../etc/passwd", "/abs/x", "/etc/passwd",
 		`\abs\x`, `\\server\share\x`, `C:\abs\x`, `C:relative`, "",
@@ -432,9 +435,8 @@ func TestCopy_RejectsExcludedTargets(t *testing.T) {
 }
 
 func TestCopy_AllowsRepoUnderExcludedNamedAncestor(t *testing.T) {
-	// A legitimate repo whose ABSOLUTE path passes through an excluded-named ancestor
-	// (e.g. .../build/myrepo) must NOT be refused — only the target and its immediate
-	// parent are checked, never arbitrary absolute ancestors.
+	// A repository whose absolute path passes through an excluded name (such as .../build/myrepo)
+	// is not refused: only the target and its immediate parent are checked by name.
 	live := filepath.Join(t.TempDir(), "build", "myrepo")
 	writeFile(t, filepath.Join(live, "main.go"), "package main\n")
 	ws := New(t.TempDir())
@@ -486,7 +488,7 @@ func TestDiscard_SymlinkAddedToCopy_M5_NoFollow(t *testing.T) {
 	writeFile(t, filepath.Join(live, "a.txt"), "hello\n")
 	ws := New(t.TempDir())
 	h, _ := ws.Copy(live, true, "ro")
-	// a contained reviewer adds a symlink pointing OUTSIDE its copy
+	// a contained model adds a symlink pointing outside its copy
 	outside := filepath.Join(t.TempDir(), "secret")
 	writeFile(t, outside, "SECRET")
 	if err := os.Symlink(outside, filepath.Join(h.Root, "link.txt")); err != nil {

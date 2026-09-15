@@ -13,12 +13,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/manager/run"
 )
 
-// authorityRecorder captures the authority declaration the Manager was actually handed, so a
-// test can prove BOTH that a valid declaration reaches the core and that an invalid one is
-// refused BEFORE the core (and therefore before any spend).
+// authorityRecorder records the authority declaration the manager received, so a test can show a
+// valid declaration reaches it and an invalid one is refused before any spend.
 type authorityRecorder struct {
-	// The one write-mode test here is refused by authority.Validate BEFORE the from-run branch is
-	// reached, which is exactly what it asserts — so this fake reaches no write either.
+	// The one write-mode test here is refused by authority.Validate before the fromRun branch.
 	noRemediation
 	called bool
 	docs   []review.AuthorityDoc
@@ -55,9 +53,8 @@ func jsonStr(t *testing.T, s string) string {
 	return string(b)
 }
 
-// A well-formed `_meta.reviewmesh.authority[]` reaches the Manager unchanged, and the
-// inclusion manifest comes back in the prompt result — the ACP half of "authority lands on
-// CLI and ACP together".
+// A well-formed _meta.reviewmesh.authority reaches the manager unchanged, and the inclusion
+// manifest comes back in the prompt result.
 func TestACPAuthority_ReachesManagerAndResultCarriesManifest(t *testing.T) {
 	ws, spec := specWorkspace(t)
 	rec := &authorityRecorder{}
@@ -82,10 +79,8 @@ func TestACPAuthority_ReachesManagerAndResultCarriesManifest(t *testing.T) {
 	}
 }
 
-// A MALFORMED `_meta` authority declaration is `-32602` BEFORE any spend. `_meta` is an
-// open extension point, so an unknown key inside reviewmesh's own namespace must fail loudly
-// rather than be dropped: a silently ignored governance field is the failure mode a
-// fail-closed surface exists to prevent.
+// A malformed _meta authority declaration is invalid params before any spend. An unknown key in the
+// reviewmesh namespace fails rather than being dropped.
 func TestACPAuthority_MalformedMetaIsInvalidParamsPreSpend(t *testing.T) {
 	ws, _ := specWorkspace(t)
 	cases := []struct{ name, meta string }{
@@ -110,8 +105,7 @@ func TestACPAuthority_MalformedMetaIsInvalidParamsPreSpend(t *testing.T) {
 	}
 }
 
-// A DENIED authority path is refused pre-spend with the machine reason code, so a host learns
-// why without parsing prose — and the secret never gets near a model call.
+// A denied authority path is refused before any spend with a machine reason code.
 func TestACPAuthority_DeniedPathIsInvalidParamsPreSpend(t *testing.T) {
 	ws, _ := specWorkspace(t)
 	env := filepath.Join(ws, ".env")
@@ -136,10 +130,7 @@ func TestACPAuthority_DeniedPathIsInvalidParamsPreSpend(t *testing.T) {
 	}
 }
 
-// A LARGE document is accepted rather than refused: the byte budget is gone, because what a model
-// can hold is the model's business and this surface's caller may legitimately want a whole
-// specification judged. The pre-spend refusals that remain (scope, provenance, shape) are covered
-// by the tests above; this one guards against the removed one coming back by accident.
+// A large document is accepted: there is no byte budget on authority documents.
 func TestACPAuthority_ALargeDocumentIsAccepted(t *testing.T) {
 	ws, _ := specWorkspace(t)
 	big := filepath.Join(ws, "huge.md")
@@ -175,7 +166,7 @@ func TestACPAuthority_InlineRefusedWhenSurfaceCanWrite(t *testing.T) {
 	}
 }
 
-// Blast radius: a prompt with no `_meta` behaves exactly as before.
+// A prompt with no _meta behaves as a plain review.
 func TestACPAuthority_AbsentMetaIsInert(t *testing.T) {
 	ws, _ := specWorkspace(t)
 	rec := &authorityRecorder{}

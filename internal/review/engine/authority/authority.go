@@ -1,52 +1,27 @@
-// Package authority resolves and renders the AUTHORITY / CONTEXT documents a review is
-// judged against — requirements, design docs, specs: the INTENT the reviewed artifact is
-// compared to.
+// Package authority resolves and renders the authority documents a review is judged against:
+// requirements, design documents and specifications.
 //
-// Authority is context, never a target. It is **prompt-embedded and never placed in the
-// containment copy**, so the write layer cannot reach it by construction rather than by
-// filtering. Everything a caller can express about it (path vs inline, hash pin,
-// completeness) is declared up front as a manifest entry, and everything the host actually
-// embedded is recorded back as an INCLUSION MANIFEST, so the audit record reproduces the
-// exact prompt.
+// Authority is context, never a target. It is embedded in prompts and never placed in the
+// containment copy, so the write layer cannot reach it. What the host embedded is recorded as an
+// inclusion manifest so the audit record reproduces the prompt.
 //
-// Five rules are enforced here, in ONE place, so no surface can implement them differently:
+// The package enforces these rules for every surface:
 //
-//  1. Root scoping. A `path` document resolves through meshcore/scope. WHO named the path
-//     decides what the roots are. On a HUMAN surface (the CLI) the named path IS the
-//     consent, so the workspace and each named authority path are the allowed roots. On an
-//     AGENT surface (ACP) the caller is a peer process, not a human, so the surface supplies
-//     its OUT-OF-BAND trusted roots as `Input.Trust` and a declared path may only NARROW
-//     them: it is a REQUEST path, never a new root. Either way the non-overridable READ
-//     denylist still applies inside those roots, so a `.env` or key file is refused as
-//     "authority" no matter who names it. And the document is then READ THROUGH a root
-//     handle bound to that root (internal/access/rootfile), not re-opened by the resolved
-//     path string: resolution decides what is allowed, the handle decides that the bytes
-//     really came from it, and a component swapped for a symlink in between is refused
-//     rather than followed.
+//  1. Root scoping. A `path` document resolves through meshcore/scope. On the CLI the workspace
+//     and each named path are the roots; on an agent surface the caller supplies trusted roots
+//     (Input.Trust) and a declared path may only narrow them. The read denylist applies either
+//     way, and the document is read through a root handle (access/rootfile) so a component
+//     swapped for a symlink after resolution is refused.
+//  2. Hash pinning. An `expectedHash` must match the bytes read, or the run halts.
+//  3. No silent truncation. A document is embedded in full unless the caller declares ranges,
+//     and the manifest then records `complete: false` with both hashes.
+//  4. Provenance split. Inline `content` authority is report-mode only and excluded from the
+//     host-adjudication prompt, so a client model cannot supply the intent a write run acts on.
+//  5. Injection posture. Authority renders as delimited quoted evidence in every judging phase.
+//     The backstop is the write-path rule: a finding supported only by authority text is never
+//     applied (Set.ApplyRefusal).
 //
-//  2. Hash pinning. When `expectedHash` is given it must match the bytes actually read, or
-//     the run HALTS — this is what stops a document's content changing between the report
-//     run that observed it and the apply run that acts on it.
-//
-//  3. NO SILENT TRUNCATION. A declared document is embedded as declared, at any size — there is
-//     no byte budget, because how much context a model can take is the model's business.
-//     Partial inclusion happens ONLY through caller-declared ranges, and the manifest then
-//     records `complete: false` with both the full-content and embedded-content hashes.
-//
-//  4. Provenance split. `path` authority is allowed in every mode and every judging phase.
-//     INLINE `content` authority is REPORT-MODE ONLY and is EXCLUDED from the
-//     host-adjudication prompt: otherwise, in a write-capable run, the client model supplies
-//     the intent, its peers find "deviations" from it, and the host writes the result with
-//     no human artifact anywhere in the loop.
-//
-//  5. Injection posture. Authority renders as structurally delimited QUOTED EVIDENCE with
-//     the instruction hierarchy restated, and it reaches EVERY judging phase (reviewer,
-//     cross_check, verifier, adjudicator) through the same rendering, so all phases judge
-//     the same intent. The backstop that holds even if injection succeeds is the write-path
-//     rule: an applied hunk must trace to evidence in the workspace copy, so a finding
-//     supported only by authority text is reportable but never applyable (ApplyRefusal).
-//
-// The package does file I/O (it reads path documents) but no model calls and no writes.
+// The package reads files but makes no model calls and no writes.
 package authority
 
 import (
@@ -64,77 +39,61 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// --- how much authority a request may declare ---
-//
-// THERE IS NO BYTE BUDGET. Whether a model can handle a large document is the model's business, and
-// a ceiling this layer enforced would mean a substantial specification could not be judged at all
-// without a flag. The cost is real and multiplicative (authority rides in EVERY seat's prompt, EVERY
-// round), which is why `--dry-run` prices it: the payload names the bytes and the destinations before
-// anything is spent. Pricing it is the answer; refusing it is not.
-//
-// What survives is the COUNT, which bounds something different — how many separate things one
-// run is judged against is a question about the shape of the request, not about size, and eight
-// is far past any real use.
-const (
-	// MaxDocs is the largest number of authority documents one request may declare.
-	MaxDocs = 8
-)
+// MaxDocs is the largest number of authority documents one request may declare. There is no byte
+// limit; `--dry-run` reports the payload size before anything is spent.
+const MaxDocs = 8
 
-// Stable MACHINE reason codes for authority refusals (lower_snake; never sentences).
+// Reason codes for authority refusals.
 const (
-	// ReasonDocInvalid — the declaration itself is malformed (missing/duplicate name, both
-	// or neither of path/content, bad completeness, bad ranges, bad hash format).
+	// ReasonDocInvalid means the declaration is malformed: a missing or duplicate name, both or
+	// neither of path and content, or invalid completeness, ranges or hash.
 	ReasonDocInvalid = "authority_doc_invalid"
-	// ReasonTooManyDocs — more than MaxDocs documents were declared.
+	// ReasonTooManyDocs means more than MaxDocs documents were declared.
 	ReasonTooManyDocs = "authority_too_many_docs"
-	// ReasonInlineModeInvalid — inline `content` authority in a non-report mode.
+	// ReasonInlineModeInvalid means inline `content` authority was declared in a non-report mode.
 	ReasonInlineModeInvalid = "authority_inline_mode_invalid"
-	// ReasonReadFailed — a `path` document could not be read.
+	// ReasonReadFailed means a `path` document could not be read.
 	ReasonReadFailed = "authority_read_failed"
-	// ReasonHashMismatch — the read bytes do not match the caller's `expectedHash` pin.
+	// ReasonHashMismatch means the read bytes do not match the `expectedHash` pin.
 	ReasonHashMismatch = "authority_hash_mismatch"
-	// ReasonRangeOutOfBounds — a caller-declared range falls outside the document.
+	// ReasonRangeOutOfBounds means a declared range falls outside the document.
 	ReasonRangeOutOfBounds = "authority_range_out_of_bounds"
 )
 
-// Write-path refusal reasons (ApplyRefusal). Both mean the same thing to a writer — the
-// hunk cannot be traced to the workspace copy, so it is reportable but never applyable.
+// Write-path refusal reasons returned by Set.ApplyRefusal. Either way the hunk cannot be traced to
+// the workspace copy, so the finding is reported but never applied.
 const (
-	// RefusalAuthorityOnly — the finding names a declared authority document, not a file in
-	// the workspace copy.
+	// RefusalAuthorityOnly means the finding names a declared authority document.
 	RefusalAuthorityOnly = "authority_only"
-	// RefusalNoWorkspaceEvidence — authority was supplied and the finding names a file that
-	// was never shown from the workspace copy, so authority text is its only possible support.
+	// RefusalNoWorkspaceEvidence means authority was supplied and the finding names a file that
+	// was never shown from the workspace copy.
 	RefusalNoWorkspaceEvidence = "no_workspace_evidence"
 )
 
-// ScopeHaltClass is the halt-taxonomy class for a path-confinement refusal (the same class
-// the write layer uses): a MECHANICAL containment check, not a call-result class.
+// ScopeHaltClass is the halt class for a path-confinement refusal, the same class the write layer
+// uses.
 const ScopeHaltClass = "M6"
 
-// Resolved is one authority document as it was actually embedded.
+// Resolved is one authority document as it was embedded.
 type Resolved struct {
 	Name      string
 	Source    string // review.AuthoritySourcePath | AuthoritySourceInline
 	MediaType string
-	// Text is EXACTLY what reaches the prompt (range-assembled when incomplete, with the
-	// omitted spans explicitly marked by Render).
+	// Text is exactly what reaches the prompt; for a ranged inclusion, the concatenated ranges.
 	Text string
-	// Gaps records the omitted byte spans of an incomplete inclusion, aligned with the
-	// segments of Text, so the prompt can SAY what was left out instead of implying
-	// continuity.
+	// Segments are the embedded spans in document order, so Render can mark the omitted gaps.
 	Segments  []segment
 	Inclusion review.AuthorityInclusion
 }
 
-// segment is one embedded span plus the byte gap that preceded it.
+// segment is one embedded span of a document.
 type segment struct {
-	Start, End int    // byte range in the FULL document
+	Start, End int    // byte range in the full document
 	Text       string // the span's text
 }
 
-// Set is the resolved authority for one run. The zero value is a valid EMPTY set: every
-// method is a no-op on it, so the whole feature is inert for a review that declares none.
+// Set is the resolved authority for one run. The zero value is an empty set on which every method
+// is a no-op.
 type Set struct {
 	docs []Resolved
 	refs map[string]bool // normalized names/paths a finding may be naming instead of a file
@@ -143,11 +102,11 @@ type Set struct {
 // Empty reports whether any authority was declared.
 func (s Set) Empty() bool { return len(s.docs) == 0 }
 
-// All returns every resolved document (reviewer / cross_check / verifier phases).
+// All returns every resolved document.
 func (s Set) All() []Resolved { return s.docs }
 
-// PathOnly returns only the root-scoped PATH documents — the provenance split: inline
-// caller-supplied authority is excluded from the host-adjudication prompt.
+// PathOnly returns only the path documents; inline authority is excluded from the host-adjudication
+// prompt.
 func (s Set) PathOnly() []Resolved {
 	out := make([]Resolved, 0, len(s.docs))
 	for _, d := range s.docs {
@@ -167,22 +126,17 @@ func (s Set) Manifest() []review.AuthorityInclusion {
 	return out
 }
 
-// ReviewerBlock is the QUOTED EVIDENCE block for the analysis lanes (reviewer, cross_check,
-// verifier, and the optional host self-review): ALL authority documents.
+// ReviewerBlock renders every authority document for the analysis lanes (reviewer, cross_check,
+// verifier and the optional host self-review).
 func (s Set) ReviewerBlock() string { return Render(s.All()) }
 
-// AdjudicatorBlock is the QUOTED EVIDENCE block for the host-adjudication phase: PATH
-// documents only (the provenance split). It is empty when the only authority was inline.
+// AdjudicatorBlock renders the path documents for the host-adjudication phase. It is empty when the
+// only authority was inline.
 func (s Set) AdjudicatorBlock() string { return Render(s.PathOnly()) }
 
-// ApplyRefusal implements the WRITE-PATH RULE. Given a finding's target file and the set of
-// files that were actually SHOWN to a lane from the workspace copy, it returns a machine
-// refusal reason when the finding's support cannot be traced to the workspace copy, or ""
-// when the rule does not refuse.
-//
-// It is deliberately inert when no authority was declared: without authority the existing
-// apply-safety rules (empty/excluded/unshown path → skipped) are unchanged, so this can
-// never alter the behavior of a review that uses no authority.
+// ApplyRefusal applies the write-path rule. Given a finding's target file and the files shown to a
+// lane from the workspace copy, it returns a refusal reason when the finding's support cannot be
+// traced to the workspace copy, or "" otherwise. It never refuses when no authority was declared.
 func (s Set) ApplyRefusal(file string, shown map[string]bool) string {
 	if len(s.docs) == 0 || strings.TrimSpace(file) == "" {
 		return ""
@@ -199,42 +153,23 @@ func (s Set) ApplyRefusal(file string, shown map[string]bool) string {
 // Input is what Resolve needs.
 type Input struct {
 	Docs []review.AuthorityDoc
-	// Mode is the EFFECTIVE review mode (it gates inline authority).
+	// Mode is the effective review mode; it gates inline authority.
 	Mode review.Mode
-	// Workspace is the human-consented workspace root. It plus each declared authority path
-	// are the allowed roots for reading path documents — UNLESS Trust is set (see below).
+	// Workspace is the workspace root. Without Trust, it and each declared path are the roots
+	// path documents are read from.
 	Workspace string
-	// Trust, when non-nil, is a surface's OUT-OF-BAND trusted-root resolver: the roots a
-	// HUMAN established before any request arrived (`aimesh review acp --root <dir>`, or the
-	// launch cwd). It exists because the "a named path is the consent" rule is true only
-	// when a human did the naming. On an agent surface the caller is a peer process, so a
-	// declared authority path must not be able to authorize itself: with Trust set, the
-	// trusted roots ARE the root set and every `path` document must resolve inside them.
-	// A request can only NARROW the set, never widen it. nil keeps the CLI's human-consent
-	// model (workspace + each named path are roots).
+	// Trust, when non-nil, is the set of roots an agent surface trusts independently of the
+	// request. Every path document must resolve inside them, so a declared path cannot authorize
+	// itself. nil means the CLI rule: the workspace and each named path are roots.
 	Trust *scope.Resolver
-	// AllowLargeDocs waives the EMBEDDING BUDGET — MaxDocBytes and MaxTotalBytes — for this
-	// request. MaxDocs still applies: that one bounds how many separate things a run is
-	// judged against, which is a shape question, not a size one.
-	//
-	// It is an OPERATOR act on every surface (a CLI flag, a LAUNCH flag on acp/mcp), never a
-	// request parameter, because raising it changes what every blind seat's prompt CARRIES
-	// and the party a per-call waiver would hand that to is the model composing the request.
-	//
-	// The budget exists so authority cannot silently crowd out the artifact under review. It
-	// was also, until dry-run pricing existed, the only thing standing between a user and an
-	// unpriced surprise — and that is the part this waiver answers: `--dry-run` now names the
-	// bytes, the files and the destinations before anything is spent, so an operator who has
-	// looked at that and still wants the whole document embedded is not guessing. What does
-	// NOT change is the no-silent-truncation rule: over budget without this flag is still a
-	// refusal that names the document, never a shortened prompt.
+	// AllowLargeDocs is an operator grant carried from the surface's launch or CLI flags. It is
+	// never a request parameter.
 	AllowLargeDocs bool
 }
 
-// Validate performs the PURE, no-I/O checks a surface can make before any spend: the
-// declaration's shape and the provenance/mode rule. It returns a typed *fault.Fault whose
-// reason code a surface maps onto its own error carrier (CLI exit code / JSON-RPC -32602).
-// Resolve calls it first, so a caller may skip it; surfaces call it to fail fast.
+// Validate performs the no-I/O checks a surface can make before any spend: the declaration's shape
+// and the inline-authority mode rule. Errors are *fault.Fault values with reason codes. Resolve calls
+// it first.
 func Validate(docs []review.AuthorityDoc, mode review.Mode) error {
 	if len(docs) == 0 {
 		return nil
@@ -262,8 +197,7 @@ func Validate(docs []review.AuthorityDoc, mode review.Mode) error {
 		case !hasPath && !hasContent:
 			return invalid(fmt.Sprintf("authority document %q declares NEITHER path nor content (exactly one is required)", name))
 		}
-		// Provenance split: inline content is REPORT-MODE ONLY. Refused before any spend on
-		// every surface, so a write-capable run can never be steered by client-supplied intent.
+		// Inline content is report-mode only, so a write run is never steered by client-supplied intent.
 		if hasContent && mode != "" && mode != review.ModeReport {
 			return fault.New(fault.Config, fmt.Sprintf(
 				"inline authority content (%q) is report-mode only (effective mode is %q); supply it as a `path` document so it is a root-scoped, hashable human artifact", name, mode)).
@@ -307,9 +241,8 @@ func validateCompleteness(name string, d review.AuthorityDoc) error {
 	return nil
 }
 
-// Resolve reads, verifies, budgets and assembles the declared authority documents. Every
-// refusal is a typed *fault.Fault carrying a stable machine reason code; nothing is ever
-// silently dropped or shortened.
+// Resolve reads, verifies and assembles the declared authority documents. Every refusal is a
+// *fault.Fault with a reason code; nothing is silently dropped or shortened.
 func Resolve(in Input) (Set, error) {
 	if len(in.Docs) == 0 {
 		return Set{}, nil
@@ -317,13 +250,8 @@ func Resolve(in Input) (Set, error) {
 	if err := Validate(in.Docs, in.Mode); err != nil {
 		return Set{}, err
 	}
-	// Allowed roots. With a TRUSTED resolver (an agent surface) the trusted roots are the
-	// whole root set: a declared path is a request path and may only narrow them — it can
-	// never authorize itself, which is the difference between a human typing a path and a
-	// peer process sending one. Without it (the CLI) the roots are the human-consented
-	// workspace plus each human-named authority path, because naming a path on a human
-	// surface IS the consent. The non-overridable READ denylist still applies INSIDE the
-	// roots either way, so a secret can never be admitted by naming it.
+	// On the CLI, naming a path is consent, so the workspace and each named path are roots. The
+	// read denylist applies inside the roots either way.
 	resolver := in.Trust
 	if resolver == nil {
 		roots := make([]string, 0, len(in.Docs)+1)
@@ -343,10 +271,8 @@ func Resolve(in Input) (Set, error) {
 		resolver = r
 	}
 
-	// wsRoot is the canonical workspace root, used ONLY to compute an authority document's
-	// workspace-RELATIVE path. That matters because the common case is a design doc kept
-	// inside the repo (`docs/design.md`): the reviewer will name it by that relative path, and
-	// the write-path rule has to recognize it as authority rather than as an editable file.
+	// wsRoot lets a document inside the workspace (`docs/design.md`) be recognized by the relative
+	// path a reviewer will use for it.
 	wsRoot := canonicalDir(in.Workspace)
 
 	set := Set{refs: map[string]bool{}}
@@ -369,9 +295,6 @@ func Resolve(in Input) (Set, error) {
 		if err != nil {
 			return Set{}, err
 		}
-		// NO SILENT TRUNCATION, and now no refusal either: the declared document is embedded as
-		// declared. `completeness: ranges` still narrows it when the CALLER wants that, which is the
-		// only thing that ever shortens an authority document.
 		total += len(embedded)
 
 		set.docs = append(set.docs, Resolved{
@@ -384,10 +307,8 @@ func Resolve(in Input) (Set, error) {
 				Complete: len(embedded) == len(full), Ranges: ranges,
 			},
 		})
-		// Every way a finding could NAME this document instead of a workspace file: its
-		// declared name, the path as given, its base name, and — crucially — its path
-		// RELATIVE to the workspace when it lives inside the tree, which is the form a
-		// reviewer sees it under in the containment copy.
+		// Every way a finding could name this document: its declared name, the path as given, its
+		// base name, and its workspace-relative path when it lives inside the tree.
 		set.refs[normalizeRef(name)] = true
 		if p := strings.TrimSpace(d.Path); p != "" {
 			set.refs[normalizeRef(p)] = true
@@ -400,8 +321,7 @@ func Resolve(in Input) (Set, error) {
 	return set, nil
 }
 
-// canonicalDir resolves a directory to its absolute, symlink-free form (best effort: "" when
-// it cannot be resolved, which simply means no workspace-relative reference is derived).
+// canonicalDir returns p as an absolute, symlink-free path, or "" when it cannot be resolved.
 func canonicalDir(p string) string {
 	if strings.TrimSpace(p) == "" {
 		return ""
@@ -416,7 +336,7 @@ func canonicalDir(p string) string {
 	return abs
 }
 
-// relativeTo returns target's path relative to root when target sits INSIDE root, else "".
+// relativeTo returns target's path relative to root when target is inside root, else "".
 func relativeTo(root, target string) string {
 	if root == "" || target == "" {
 		return ""
@@ -428,20 +348,13 @@ func relativeTo(root, target string) string {
 	return rel
 }
 
-// readDoc returns the FULL bytes of one document, its manifest source label, and (for a path
-// document) the canonical path it was read from. A path document goes through the scope
-// resolver; a scope refusal is re-typed as a containment halt carrying the resolver's own
-// machine reason code, so the audit record names the exact rule that refused.
+// readDoc returns one document's full bytes, its manifest source label, and for a path document the
+// canonical path it was read from. Scope and containment refusals become M6 containment halts
+// carrying the refusing rule's reason code.
 //
-// RESOLUTION AND READING ARE TWO JOBS. The resolver decides that this path is ALLOWED; it
-// hands back a canonical string, and a string is not a file. Handing that string to
-// os.ReadFile reopens the path by NAME, so replacing the approved document — or any
-// directory component above it — between the resolution and the read makes the read consume
-// a different object, whose bytes then land in every judging phase's prompt. (A pinned
-// `expectedHash` would catch it, but pins are optional; the mechanism has to hold without
-// one.) So the read goes through rootfile: an identity-bound os.Root on the authorized root,
-// a no-follow open, and validation of the OPENED DESCRIPTOR. A containment refusal from
-// there is the same class of event as a scope denial and is typed identically.
+// The resolver decides a path is allowed; the read then goes through rootfile rather than
+// os.ReadFile, so a document or directory swapped between resolution and read is refused instead of
+// followed.
 func readDoc(resolver *scope.Resolver, d review.AuthorityDoc, name string) (string, string, string, error) {
 	if p := strings.TrimSpace(d.Path); p != "" {
 		abs, serr := resolver.ResolveRead(p)
@@ -469,9 +382,8 @@ func readDoc(resolver *scope.Resolver, d review.AuthorityDoc, name string) (stri
 	return d.Content, review.AuthoritySourceInline, "", nil
 }
 
-// selectBytes assembles the bytes to embed: the whole document for requireFull, or exactly
-// the caller-declared ranges. A range outside the document is a REFUSAL — clamping it would
-// be a silent, unrecorded truncation of the caller's stated intent.
+// selectBytes assembles the bytes to embed: the whole document for requireFull, or exactly the
+// declared ranges. A range outside the document is refused rather than clamped.
 func selectBytes(name string, d review.AuthorityDoc, full string) ([]segment, string, []review.AuthorityRange, error) {
 	if completenessOf(d) == review.CompletenessRequireFull {
 		return []segment{{Start: 0, End: len(full), Text: full}}, full, nil, nil
@@ -492,15 +404,11 @@ func selectBytes(name string, d review.AuthorityDoc, full string) ([]segment, st
 	return segs, b.String(), ranges, nil
 }
 
-// --- rendering ---
-
-// Header is the exact label every judging phase sees above the authority block. Tests pin
-// it: all four phases must show the SAME framing, or they are not judging the same intent.
+// Header is the label every judging phase sees above the authority block.
 const Header = "AUTHORITY CONTEXT — reference only; not under review; never propose or apply changes to it"
 
-// Render produces the structurally delimited QUOTED EVIDENCE block for a set of resolved
-// documents, with the instruction hierarchy restated. It returns "" for no documents, so a
-// prompt with no authority carries no authority block at all.
+// Render produces the delimited quoted-evidence block for docs, with the instruction hierarchy
+// restated. It returns "" for no documents.
 func Render(docs []Resolved) string {
 	if len(docs) == 0 {
 		return ""
@@ -520,9 +428,7 @@ func Render(docs []Resolved) string {
 	return b.String()
 }
 
-// body renders one document's embedded text. Every span the caller's ranges left out is
-// marked EXPLICITLY, so an incomplete inclusion can never read as a continuous document —
-// the whole point of the no-silent-truncation rule.
+// body renders one document's embedded text, marking every span the declared ranges left out.
 func body(d Resolved) string {
 	var b strings.Builder
 	prevEnd := 0
@@ -542,9 +448,8 @@ func body(d Resolved) string {
 	return b.String()
 }
 
-// headerMeta renders the per-document provenance line: where it came from, its type, and —
-// crucially — whether it is COMPLETE, so a model is never shown a partial document that
-// looks whole.
+// headerMeta renders a document's provenance line: its source, media type, and whether it is
+// complete.
 func headerMeta(d Resolved) string {
 	parts := []string{"source=" + d.Source}
 	if d.MediaType != "" {
@@ -568,8 +473,6 @@ func renderRanges(rs []review.AuthorityRange) string {
 	return "[" + strings.Join(out, " ") + "]"
 }
 
-// --- helpers ---
-
 func completenessOf(d review.AuthorityDoc) review.Completeness {
 	if d.Completeness == "" {
 		return review.CompletenessRequireFull
@@ -581,9 +484,8 @@ func invalid(msg string) error {
 	return fault.New(fault.Config, msg).WithReason(ReasonDocInvalid)
 }
 
-// normalizeHash accepts "sha256:<hex>" or a bare 64-char hex digest and returns the lower
-// hex digest ("" when no pin was given). Any other shape is a declaration error — a pin the
-// host cannot check is worse than no pin, so it is never ignored.
+// normalizeHash accepts "sha256:<hex>" or a bare 64-character hex digest and returns the lowercase
+// digest, or "" when no pin was given. Any other shape is an error rather than an ignored pin.
 func normalizeHash(name, raw string) (string, error) {
 	h := strings.TrimSpace(raw)
 	if h == "" {
@@ -605,8 +507,8 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// normalizeRef canonicalizes a name/path for the write-path reference check: slash-normalized,
-// cleaned, lowercased (a case-insensitive match is STRICTER here — it refuses more).
+// normalizeRef canonicalizes a name or path for the write-path reference check. Lowercasing makes
+// the check refuse more, never less.
 func normalizeRef(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -615,7 +517,7 @@ func normalizeRef(s string) string {
 	return strings.ToLower(filepath.ToSlash(filepath.Clean(s)))
 }
 
-// SortedNames returns the declared document names in a stable order (for log fields).
+// SortedNames returns the declared document names in sorted order.
 func (s Set) SortedNames() []string {
 	out := make([]string, 0, len(s.docs))
 	for _, d := range s.docs {

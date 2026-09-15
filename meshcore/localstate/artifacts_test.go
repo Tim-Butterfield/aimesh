@@ -1,9 +1,8 @@
 package localstate
 
-// Where a component's run artifacts land. This is the rule BOTH apps resolve through, and the reason it
-// is one function is a defect it exists to prevent: reviewmesh defaulted to `tmp/reviewmesh` resolved
-// against the process cwd, so a run started anywhere inside a repository created that tree inside the
-// repository — and run artifacts embed verbatim copies of everything the models were shown.
+// Where a component's run artifacts land. Every component resolves through one function, and it never
+// returns a cwd-relative path, because run artifacts embed copies of everything the models were shown
+// and must not land inside a repository by accident.
 
 import (
 	"os"
@@ -27,9 +26,8 @@ func TestRunDir_IsNeverCwdRelative(t *testing.T) {
 	}
 }
 
-// With a project state directory, runs land in the component's own subdirectory of it — ROOT-ANCHORED,
-// so running from a subdirectory finds the same place, and under `runs/` so run output never mixes with
-// the component's config in the same directory.
+// With a project state directory, runs land under the component's `runs/` subdirectory at the repository
+// root, so a run from a subdirectory finds the same place.
 func TestRunDir_ProjectStateDirIsRootAnchored(t *testing.T) {
 	root := t.TempDir()
 	mkdirAll(t, filepath.Join(root, ".git"))
@@ -45,8 +43,7 @@ func TestRunDir_ProjectStateDirIsRootAnchored(t *testing.T) {
 	}
 }
 
-// With NO state directory the user never asked for anything project-local, so runs go outside their tree
-// entirely — and resolving "where" must not CREATE anything.
+// Without a state directory, runs go outside the tree, and resolving the location creates nothing.
 func TestRunDir_FallsOutsideTheTreeAndCreatesNothing(t *testing.T) {
 	root := t.TempDir()
 	mkdirAll(t, filepath.Join(root, ".git"))
