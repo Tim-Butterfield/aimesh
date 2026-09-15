@@ -1,33 +1,19 @@
-// Package mcp is reviewmesh's MCP (Model Context Protocol) surface: reviewmesh runs as a local
-// stdio server so an MCP-speaking agent can drive a governed, blind, multi-model review — and,
-// when the operator has enabled it, apply the accepted findings. The protocol itself is
-// meshcore/mcp; this package owns the tools, the schemas, the job registry, the admission governor
-// and the write window — everything that is reviewmesh grammar.
+// Package mcp serves reviewmesh as a local MCP (Model Context Protocol) stdio server, so an agent can
+// run a governed, blind, multi-model review and, when the operator allows it, apply the accepted
+// findings. The protocol lives in meshcore/mcp; this package owns the tools, schemas, run registry and
+// write window. It mirrors the exploremesh MCP surface where the two overlap.
 //
-// It deliberately mirrors exploremesh's MCP surface (job shape, halts on `isError`, unconditional
-// governance, compose-never-configure), because two servers in one repo that answered the same
-// questions differently would be two contracts a client has to learn. What is NOT shared is the
-// reason this package is the most safety-critical in the repo: ONE of its tools writes to a human's
-// filesystem, on the say-so of a model.
+// One tool writes to the user's filesystem on a model's request, which shapes the design:
 //
-// Everything that follows from that is deliberate:
-//
-//  1. THE SERVER READS NO CONFIGURATION. Its adapters, write grant and optional root ceiling come
-//     from its launch arguments, so it works on a fresh install, and every call composes its own
-//     panel from the adapters named at launch.
-//  2. SCOPE IS DECLARED PER CALL. Unlike exploremesh (which reads no files at all), this server takes
-//     paths. Each call names its absolute workspace (and any extra `roots`); that call is judged
-//     against exactly those paths, inside the operator's `--root` ceiling when one was set. Nothing
-//     is inferred from where the process started, and no call's scope is another call's.
-//  3. WRITING IS DOUBLY GATED, and the gates are different in kind. `output: "apply"` is refused
-//     unless the operator launched the server with `--allow-writes`; `output: "patch"` supplies the
-//     diff on every server. And every apply must pass `allowWrite: true` — a per-call confirmation the
-//     calling model has to state.
-//  4. THE HONEST LIMIT, STATED. The double opt-in and the tool annotations are HINTS that
-//     coordinate with the host's permission layer; they are not an authorization boundary against a
-//     confused or hostile client. What holds regardless is scope confinement, the non-overridable
-//     write denylist, the write-path rule (an applied hunk must trace to workspace evidence), and
-//     `fromRun`'s requirement that the decision set already exist as an inspectable artifact.
+//  1. The server reads no configuration. Adapters, the write grant and an optional root ceiling come
+//     from launch arguments, and every call composes its own panel.
+//  2. Scope is declared per call. Each call names an absolute workspace and any extra roots, judged
+//     inside the operator's --root ceiling when set. Nothing is inferred from the process's cwd.
+//  3. Writing is gated twice. output "apply" requires the --allow-writes launch grant and
+//     allowWrite: true on the call; output "patch" supplies the diff on every server.
+//  4. The gates and tool annotations coordinate with the host's permission layer but are not an
+//     authorization boundary against a hostile client. Scope confinement, the write denylist, the
+//     write-path evidence rule and fromRun's stored decision set hold regardless.
 package mcp
 
 import (
@@ -56,8 +42,7 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
-	// The per-call scope builder is the ACP surface's and is reused unchanged: two scope models in one
-	// binary would be two confinement guarantees to keep in agreement.
+	// The per-call scope builder is shared with the ACP surface, so both enforce one confinement model.
 	"github.com/Tim-Butterfield/aimesh/internal/agentguide"
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/acp"
 	"github.com/Tim-Butterfield/aimesh/internal/review/version"
@@ -76,89 +61,77 @@ const (
 	toolRunResult = "review_run_result"
 )
 
-// maxArgumentBytes bounds one tool call's arguments before anything is decoded — the request-shape
-// half of the admission governor.
+// maxArgumentBytes bounds one tool call's arguments before decoding.
 const maxArgumentBytes = 1 << 20 // 1 MiB
 
-// Inline-workspace bounds. Inline content is MODEL-AUTHORED and is materialized to disk, so it is
-// bounded per entry, in total, and in count — the argument cap alone would let one call write a
-// megabyte of files into a temp directory.
+// Inline-workspace bounds. Inline content is model-authored and written to disk, so it is bounded per
+// entry, in total and in count.
 const (
 	maxInlineEntries    = 200
 	maxInlineEntryBytes = 256 << 10
 	maxInlineTotalBytes = 768 << 10
 )
 
-// defaultTurnTimeout is the wall-clock budget for one run when none is configured (exploremesh's
-// value, so the two servers time out alike).
+// defaultTurnTimeout is the wall-clock budget for one run when none is configured, matching
+// exploremesh.
 const defaultTurnTimeout = 10 * time.Minute
 
-// Reviewer is the Manager capability this surface routes to — the same seam the ACP surface uses
-// for reviews, plus the two-phase remediation entry point. Both surfaces run the identical
-// pipeline; only the transport differs, and a test can substitute a fake.
+// Reviewer is the manager capability this surface routes to: the review entry point shared with ACP
+// plus the remediation entry points. Tests substitute a fake.
 type Reviewer interface {
 	RunContext(ctx context.Context, r run.Request) (review.RunOutcome, error)
 	// ReadDecisionSetByID resolves a run id for a run over workspace to the decision set that run
-	// recorded, VERIFYING the handle against that workspace's run-record locations rather than trusting
-	// it as a path. It returns the set and the canonical run directory. See run.ReadDecisionSetByID.
+	// recorded, verifying the handle against the workspace's run-record locations rather than trusting it
+	// as a path. It returns the set and the canonical run directory.
 	ReadDecisionSetByID(workspace, runID string) (*run.StoredDecisionSet, string, error)
 	Remediate(ctx context.Context, r run.RemediateRequest) (run.RemediateOutcome, error)
 }
 
 // Server is the reviewmesh MCP server.
 type Server struct {
-	// Manager routes a run to the review pipeline; Config supplies the sanitized `review_list`/`review_doctor`
-	// projections.
+	// Manager runs reviews; Config supplies the sanitized review_list and review_doctor projections.
 	Manager Reviewer
 	Config  Config
 
-	// Adapters are the adapters this server was launched with (`--adapter`). A call's seats may name
-	// only these; empty means every run is refused until the operator names one.
+	// Adapters are the adapters this server was launched with (--adapter). A call's seats may name only
+	// these; empty means every run is refused.
 	Adapters launchflags.Set
 
-	// Ceiling is the operator's optional `--root` set: every path a call declares must lie inside it.
-	// Empty means no ceiling.
+	// Ceiling is the operator's optional --root set: every path a call declares must lie inside it. Empty
+	// means no ceiling.
 	Ceiling []string
-	// ClientRoots, when non-empty, are the roots a legacy MCP client declared through `roots/list`. They
-	// only narrow: every path a call declares must also lie inside them.
+	// ClientRoots, when non-empty, are the roots a legacy MCP client declared through roots/list. They only
+	// narrow: every declared path must also lie inside them.
 	ClientRoots []string
 
-	// AllowWrites is the operator's `--allow-writes` grant. Without it aimesh never changes project
-	// content: review_remediate still supplies the diff (`output: "patch"`) and the agent applies it.
+	// AllowWrites is the operator's --allow-writes grant. Without it aimesh never changes project content;
+	// review_remediate still supplies the diff with output "patch".
 	AllowWrites bool
-	// VerifyCommands / VerifyTimeout / VerifyBaseline carry BOUNDED EXECUTION: the project's own
-	// build/test commands, run on the containment copy and recorded. Empty means nothing is executed.
+	// VerifyCommands, VerifyTimeout and VerifyBaseline configure bounded execution: the project's own build
+	// and test commands, run on the containment copy and recorded. Empty means nothing runs.
 	//
-	// THEY ARE LAUNCH SETTINGS WITH NO PER-CALL EQUIVALENT, and this is the strictest case of that
-	// rule in the codebase rather than another instance of it. Every other launch grant decides what
-	// the tool may READ or WRITE; this one decides what it EXECUTES. A caller that could name a
-	// command here would have arbitrary code execution on the operator's machine, dressed as a
-	// review parameter. So the value comes from the operator's own command line and from nowhere
-	// else, and the result is reported back with a note saying it gated nothing.
+	// They are launch settings only. A caller that could name a command would have arbitrary code execution
+	// on the operator's machine.
 	VerifyCommands []string
 	VerifyTimeout  time.Duration
 	VerifyBaseline bool
-	// AllowProtectedPaths admits a workspace under a protected configuration path (.git, .claude,
-	// .vscode, …) and permits writes there. Secrets are NOT included and never are. It is
-	// a LAUNCH setting for a sharper reason than the others: those paths execute code on someone's
-	// next command, so a model that could grant itself this could arrange to run its own code.
+	// AllowProtectedPaths admits a workspace under a protected configuration path (.git, .claude, .vscode,
+	// …) and permits writes there. Secrets stay refused. It is a launch setting because those paths execute
+	// code on a later command.
 	AllowProtectedPaths bool
 
-	// WaitSeconds overrides the inline wait default; TurnTimeout bounds ONE run's wall clock (0 → 10
-	// minutes). This server has NO admission bounds — neither a lifetime run cap nor an in-flight
-	// one; see the note in runs.go for why, and for where the concurrency decision lives now
-	// (`maxParallel`, stated per call).
+	// WaitSeconds overrides the inline wait default. TurnTimeout bounds one run's wall clock (0 means 10
+	// minutes). There are no admission bounds; callers state concurrency per call with maxParallel.
 	WaitSeconds int
 	TurnTimeout time.Duration
 
-	// StrictSchema turns on the OPT-IN send-time check that every `structuredContent` satisfies the
-	// outputSchema its own tool declared. Off by default; see proto.Server.StrictSchema for the cost.
+	// StrictSchema enables an opt-in check that every structuredContent satisfies its tool's outputSchema
+	// before sending. See proto.Server.StrictSchema.
 	StrictSchema bool
 
 	Framing string
-	// Protocol is the era posture this process was launched with (`--protocol dual|legacy`; ""
-	// means dual). It is reported by `review_doctor` and not only announced on stderr, because a host
-	// launches its servers from a config file and MAY discard stderr entirely.
+	// Protocol is the launch era posture (--protocol dual|legacy; "" means dual). review_doctor reports it,
+	// since a host may discard stderr.
 	//
 	// SUNSET-PATH (MCP26-SUNSET): removed with the legacy era.
 	Protocol proto.ProtocolMode
@@ -168,18 +141,15 @@ type Server struct {
 	runs *registry
 	core *proto.Server
 
-	// attached is set when this server registers into an EXTERNAL core (the combined `aimesh mcp`).
-	// It suppresses the SHARED tools the composer registers once for the whole server — registering
-	// agents_md twice would panic, and two copies of one document is the thing internal/agentguide
-	// exists to prevent.
+	// attached is set when this server registers into an external core (the combined aimesh mcp). It skips
+	// the shared tools the composer registers once, such as agents_md.
 	attached bool
 
-	// artifacts publishes finished runs' artifacts as MCP resources. It is what makes a `patch`-mode
-	// remediation collectable: the receipt names the patch and hashes it, and this is where the bytes
-	// are actually fetched from.
+	// artifacts publishes finished runs' artifacts as MCP resources, which is how a patch-mode
+	// remediation's patch is fetched.
 	artifacts proto.RunStore
 
-	// clientMu guards ClientRoots, which a legacy client's `roots/list` answer replaces mid-session.
+	// clientMu guards ClientRoots, which a legacy client's roots/list answer replaces mid-session.
 	clientMu sync.RWMutex
 }
 
@@ -190,10 +160,8 @@ func (s *Server) clientRoots() []string {
 	return append([]string(nil), s.ClientRoots...)
 }
 
-// applyClientRoots records what the legacy `roots/list` round trip answered. Those roots only ever
-// NARROW: every path a later call declares must also lie inside them (see callScope). A client that
-// declares the capability but lists no roots narrows nothing, and a root URI that is not a local
-// `file://` path is ignored rather than guessed at.
+// applyClientRoots records a legacy roots/list answer. The roots only narrow (see callScope). A client
+// that lists no roots narrows nothing, and non-file URIs are ignored.
 func (s *Server) applyClientRoots(roots []proto.Root) {
 	var paths []string
 	skipped := 0
@@ -212,16 +180,15 @@ func (s *Server) applyClientRoots(roots []proto.Root) {
 		len(roots), skipped)
 }
 
-// Serve builds the tool set and serves MCP over the given streams until EOF. On return every
-// in-flight run is cancelled: a disconnected client must not leave a panel of model CLIs running
-// with nobody to receive their output.
+// Serve builds the tool set and serves MCP on in and out until EOF. On return every in-flight run is
+// cancelled, so a disconnected client leaves no model CLIs running.
 func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	s.build()
 	defer s.runs.cancelAll()
 	return s.core.Serve(in, out)
 }
 
-// Core exposes the underlying protocol server (for tests that drive it over an explicit framer).
+// Core returns the underlying protocol server, for tests that drive it over an explicit framer.
 func (s *Server) Core() *proto.Server {
 	s.build()
 	return s.core
@@ -229,19 +196,18 @@ func (s *Server) Core() *proto.Server {
 
 func (s *Server) build() { s.buildInto(nil) }
 
-// Attach registers this domain's tools into an EXTERNAL protocol core — the seam the combined
-// `aimesh mcp` server uses — and returns the two providers the composer must fold in, because a
-// single proto.Server has one Resources field and one Tasks field and both domains need theirs.
+// Attach registers this domain's tools into an external protocol core, as the combined aimesh mcp
+// server does, and returns the resource and task providers the composer must merge.
 //
-// It also applies review's own core wiring (OnRoots) to that shared core. That is harmless to a
-// co-hosted explore: explore reads no paths, so a client's declared roots affect only review's calls.
+// It also sets review's OnRoots handler on the shared core. Explore reads no paths, so client roots
+// affect only review calls.
 func (s *Server) Attach(core *proto.Server) (proto.ResourceProvider, proto.TaskProvider) {
 	s.buildInto(core)
 	return &s.artifacts, taskProvider{s}
 }
 
-// buildInto wires this server. With core == nil it owns a fresh one (the standalone
-// `aimesh review mcp` case); with a core supplied it registers into that instead.
+// buildInto wires this server. With a nil core it creates its own (standalone aimesh review mcp);
+// otherwise it registers into core.
 func (s *Server) buildInto(core *proto.Server) {
 	if s.core != nil {
 		return
@@ -251,8 +217,8 @@ func (s *Server) buildInto(core *proto.Server) {
 	if core != nil {
 		s.attached = true
 		s.core = core
-		// The shared core is the composer's, so only the fields that are REVIEW's semantics go on it
-		// here. Info/Instructions/Framing/Protocol belong to the composed server as a whole.
+		// On a shared core, set only review-specific fields; Info, Instructions, Framing and Protocol belong to
+		// the composed server.
 		s.core.OnRoots = s.applyClientRoots
 	} else {
 		s.core = &proto.Server{
@@ -262,15 +228,12 @@ func (s *Server) buildInto(core *proto.Server) {
 			Protocol:     s.Protocol,
 			Diagnostics:  s.Diagnostics,
 			StrictSchema: s.StrictSchema,
-			// The `roots/list` round trip. It fires only when the CLIENT declared the capability, and it
-			// can only narrow — see applyClientRoots.
+			// The roots/list round trip runs only when the client declared the capability, and only narrows.
 			OnRoots: s.applyClientRoots,
-			// `resources/*`, so a governed write can actually be collected. The store is this server's
-			// own registration table; it publishes no host path.
+			// resources/*, so a governed write's patch can be collected. The store publishes no host path.
 			Resources: &s.artifacts,
-			// The `io.modelcontextprotocol/tasks` extension, as a PROJECTION over the run registry —
-			// `taskId == runId`, no second execution model (see tasks.go). It is opt-in per client and
-			// modern-era only, so a client that declares nothing sees only the job shape.
+			// The tasks extension is a projection over the run registry (taskId == runId; see tasks.go). It is
+			// opt-in per client and modern-era only.
 			Tasks: taskProvider{s},
 		}
 	}
@@ -291,8 +254,8 @@ func (s *Server) turnBudget() time.Duration {
 	return defaultTurnTimeout
 }
 
-// writesValue names who performs writes on this server: aimesh when the operator launched it with
-// --allow-writes, else the agent itself.
+// writesValue returns who performs writes on this server: aimesh with --allow-writes, otherwise the
+// agent.
 func (s *Server) writesValue() string {
 	if s.AllowWrites {
 		return "aimesh"
@@ -300,15 +263,11 @@ func (s *Server) writesValue() string {
 	return "agent"
 }
 
-// traceOf lifts the caller's W3C trace context off a request's protocol context into the run
-// record's own shape. It returns nil when the caller sent none, which is every legacy-era request:
-// the three keys are a `2026-07-28` `_meta` convention and the legacy env never fills them.
+// traceOf copies the caller's W3C trace context from the request into the run record's shape. It
+// returns nil when the caller sent none, which includes every legacy-era request.
 //
-// The values are carried VERBATIM and never validated. `basic/index` §`_meta` says of every reserved
-// key that "implementations MUST NOT make assumptions about values at these keys"; the W3C-format
-// MUST on that page binds the SENDER, so refusing a malformed `traceparent` here would be this
-// server asserting a meaning for a field it does not own. It is also why nothing branches on the
-// value — a trace id is an identity for someone else's tooling, not an input to ours.
+// Values are carried verbatim and never validated: the spec says implementations must not make
+// assumptions about reserved _meta values, and nothing here branches on them.
 func traceOf(env *proto.RequestEnv) *review.Trace {
 	if env == nil {
 		return nil
@@ -318,28 +277,28 @@ func traceOf(env *proto.RequestEnv) *review.Trace {
 
 // --- annotations ---
 
-// spendAnnotations mark a tool that STARTS A RUN: not read-only, reaching an open world of external
-// providers, not idempotent. These tools MUST NOT be annotated read-only — that is the single most
-// dangerous kind of annotation mistake, because a host uses it to decide whether to ask the human.
+// spendAnnotations returns annotations for a tool that starts a run: not read-only, open-world and not
+// idempotent. A host uses readOnlyHint to decide whether to ask the user, so these must never claim
+// read-only.
 func spendAnnotations(title string, destructive bool) *proto.ToolAnnotations {
 	return &proto.ToolAnnotations{
 		Title:           title,
 		ReadOnlyHint:    false,
-		DestructiveHint: proto.Bool(destructive),
+		DestructiveHint: new(destructive),
 		IdempotentHint:  false,
-		OpenWorldHint:   proto.Bool(true),
+		OpenWorldHint:   new(true),
 	}
 }
 
-// readOnlyAnnotations mark a tool that only reports. Only `review_list`, `review_doctor`, `review_run_status` and
-// `review_run_result` qualify — everything else spawns processes and spends, and one of them writes.
+// readOnlyAnnotations returns annotations for a tool that only reports: review_list, review_doctor,
+// review_run_status and review_run_result.
 func readOnlyAnnotations(title string) *proto.ToolAnnotations {
 	return &proto.ToolAnnotations{
 		Title:           title,
 		ReadOnlyHint:    true,
-		DestructiveHint: proto.Bool(false),
+		DestructiveHint: new(false),
 		IdempotentHint:  true,
-		OpenWorldHint:   proto.Bool(false),
+		OpenWorldHint:   new(false),
 	}
 }
 
@@ -353,17 +312,13 @@ func (s *Server) registerTools() {
 			"Job-shaped: if the run outlives waitSeconds you get a runId to poll with review_run_status.",
 		InputSchema:  raw(reportInputSchema),
 		OutputSchema: raw(reportResultSchema),
-		// The TITLE is read by a human in a permission prompt, and it has to agree with the hints
-		// beside it. "Review (read-only)" did not: this tool spawns model CLIs, spends money and
-		// writes a run directory, which is exactly why readOnlyHint is false. A title that says
-		// read-only next to a hint that says otherwise is the mis-signal the annotations exist to
-		// prevent, so the title now says the true thing — it changes no workspace file.
+		// A user reads the title in a permission prompt, so it must agree with the hints: the tool spawns model
+		// CLIs and writes a run directory but changes no workspace file.
 		Annotations: spendAnnotations("Review (reports findings; writes no workspace changes)", false),
 	}, s.reportHandler)
 
-	// review_remediate is listed on every server: its patch output changes no project content, so an
-	// agent can always ask for the diff and apply it itself. Its apply output is gated per call
-	// (allowWrite) and by the operator's --allow-writes launch grant — see remediationMode.
+	// review_remediate is listed on every server: patch output changes no project content. Apply output
+	// needs allowWrite on the call and the --allow-writes grant; see remediationMode.
 	s.core.Register(proto.Tool{
 		Name:  toolRemediate,
 		Title: "Produce or apply accepted review findings",
@@ -401,9 +356,8 @@ func (s *Server) registerTools() {
 		return proto.Result(renderDoctor(payload), payload), nil
 	})
 
-	// The agent guide, byte-identical to `aimesh agents-md`. Defined in internal/agentguide so this
-	// server and the explore server cannot drift into serving two different documents.
-	// Skipped when attached: the composed server registers it once for both domains.
+	// The agent guide, identical to `aimesh agents-md`. When attached, the composed server registers it
+	// once for both domains.
 	if !s.attached {
 		s.core.Register(proto.Tool{
 			Name:         agentguide.ToolName,
@@ -415,9 +369,7 @@ func (s *Server) registerTools() {
 		}, func(ctx context.Context, c *proto.Call) (*proto.CallToolResult, error) {
 			text, payload, err := agentguide.ToolPayload()
 			if err != nil {
-				// An unreadable AGENTS_MD override is an ERROR, never a quiet fall back to the
-				// embedded guide: falling back would hand the agent a document the operator did not
-				// choose while reporting success.
+				// An unreadable AGENTS_MD override is an error rather than a silent fallback to the embedded guide.
 				return proto.ErrorResult(err.Error(), nil), nil
 			}
 			return proto.Result(text, payload), nil
@@ -471,44 +423,30 @@ type runArgs struct {
 	Panel           *panelArg             `json:"panel"`
 	Authority       []review.AuthorityDoc `json:"authority"`
 	WaitSeconds     *int                  `json:"waitSeconds"`
-	// MaxParallel bounds how many of this run's reviewer seats invoke their model CLI AT ONCE.
-	// Omitted, the whole panel runs in parallel. It is a PER-CALL parameter and not a launch flag
-	// because the right number is a fact about the machine the CLIs run on — resident memory and
-	// process count for a cloud CLI, loaded weights for a local model — and about the caller's
-	// provider rate limits, none of which this server can see. It bounds parallelism only: every
-	// seat still reviews, so the findings are unchanged and only the wall clock moves.
+	// MaxParallel bounds how many reviewer seats call their model CLI at once; omitted, the whole panel runs
+	// in parallel. It is per call because the right value depends on the caller's machine and provider rate
+	// limits. Every seat still reviews.
 	MaxParallel *int `json:"maxParallel"`
-	// DryRun resolves this run's plan, panel, authority documents and preflight, then STOPS
-	// before the first model call and answers with the run's SHAPE — the seats it would convene,
-	// the lanes it would call, and the model-call range it is bounded by.
-	//
-	// It matters more here than on any other surface, because here the caller is a MODEL. A model
-	// deciding whether to convene a five-seat panel on a large tree has no other way to learn what
-	// that costs before committing to it, and a model that cannot find out cheaply will either
-	// over-spend or refuse work it should have done. Every configuration error a real run would
-	// raise is raised by this one, for free.
+	// DryRun resolves the plan, panel, authority documents and preflight, then stops before the first model
+	// call and returns the run's shape: the seats, the calls and the model-call range. It raises every
+	// configuration error a real run would, without spending.
 	DryRun bool `json:"dryRun"`
-	// VerifyReadiness asks every configured agent whether it can do real work before dispatching
-	// anything. It SPENDS one bounded, one-token call per distinct adapter/model, and it exists so a
-	// panel does not pay for its first seat's whole prompt and then halt on a second seat whose CLI
-	// was blocked on login or folder trust the entire time — failures `Available()` cannot see.
-	// dryRun prices these calls and performs none of them.
+	// VerifyReadiness spends one bounded one-token call per distinct adapter and model before dispatching,
+	// so a seat blocked on login or folder trust halts the run before the panel spends. A dry run prices
+	// these calls without making them.
 	VerifyReadiness bool   `json:"verifyReadiness"`
 	IdempotencyKey  string `json:"idempotencyKey"`
-	// Roots are EXTRA absolute directories this call reads beside its workspace — for example the
-	// project folder that holds authority documents while the workspace is a temporary directory.
-	// See callScope.
+	// Roots are extra absolute directories this call reads beside its workspace, such as a folder holding
+	// authority documents. See callScope.
 	Roots []string `json:"roots"`
 }
 
-// callScope builds the confinement for ONE call from the paths that call declares: its workspace (when
-// it names one) and its extra `roots`. Every path must be absolute, must not be the filesystem root, a
-// home directory, a system tree or a protected directory, and must lie inside the operator's --root
-// ceiling when one was set; a legacy client's declared roots narrow it further. The returned env carries
-// that resolver, so everything the call reads is judged against its own scope and never another call's.
+// callScope builds the confinement for one call from the paths it declares: its workspace and extra
+// roots. Each path must be absolute, must not be the filesystem root, a home directory, a system tree
+// or a protected directory, and must lie inside the --root ceiling when set; a legacy client's roots
+// narrow further. The returned env carries the resolver.
 //
-// A call that declares no path (an inline workspace with no extra roots) gets the zero resolver, which
-// refuses every filesystem path: inline content consumes no root.
+// A call that declares no path gets the zero resolver, which refuses every filesystem path.
 func (s *Server) callScope(env *proto.RequestEnv, workspace string, extra []string) (*proto.RequestEnv, *proto.CallToolResult, error) {
 	var paths []string
 	if ws := strings.TrimSpace(workspace); ws != "" {
@@ -551,26 +489,21 @@ func (s *Server) callScope(env *proto.RequestEnv, workspace string, extra []stri
 	return &scoped, nil, nil
 }
 
-// remediateArgs adds the write parameters. `fromRun` and the full-cycle parameters are mutually
-// exclusive; the server enforces that itself rather than trusting the schema's `oneOf`.
+// remediateArgs adds the write parameters. The server enforces fromRun's exclusivity itself rather than
+// trusting the schema.
 type remediateArgs struct {
 	runArgs
 	FromRun    string `json:"fromRun"`
 	Output     string `json:"output"`
 	AllowWrite *bool  `json:"allowWrite"`
-	// Select is the SELECTIVE-APPLY filter: host-computed fingerprints from the source run's
-	// accepted findings, naming which of them to write. Absent applies the whole accepted
-	// set; present-and-empty is refused, never widened.
-	//
-	// A pointer to a slice, so that "absent" and "[]" are DIFFERENT requests. The decoder is strict
-	// (`DisallowUnknownFields`), so a misspelled narrowing filter is a -32602 rather than silently
-	// dropped — the failure a narrowing filter must never have.
+	// Select names, by host-computed fingerprint, which of the source run's accepted findings to write.
+	// Absent applies the whole accepted set; an empty list is refused. It is a pointer so absent and []
+	// differ.
 	Select *[]string `json:"select"`
 }
 
-// decode strictly decodes a tool's arguments. Strict decoding is what makes
-// `additionalProperties: false` a real boundary: a schema is advisory to a client, so a server that
-// trusted it would accept a misspelled field and run something the caller did not ask for.
+// decode strictly decodes a tool's arguments, so an unknown or misspelled field is refused rather than
+// ignored.
 func decode(args json.RawMessage, into any) error {
 	if len(args) > maxArgumentBytes {
 		return proto.InvalidParams("invalid params: arguments are %d bytes, exceeding the %d-byte limit for one call", len(args), maxArgumentBytes)
@@ -616,20 +549,16 @@ type prepared struct {
 	cleanup func()
 }
 
-// prepare validates a run-forming request COMPLETELY before any spend: the panel selection, the
-// workspace (against the trusted roots, or materialized from inline content), and the authority
-// declaration (shape, then full resolution). It returns either a prepared run, or a domain-halt
+// prepare validates a run-forming request before any spend: the panel, the workspace (declared path or
+// materialized inline content) and the authority declaration. It returns a prepared run, a domain-halt
 // result, or a protocol error.
 //
-// The split matters. A malformed REQUEST is a JSON-RPC error (-32602) with a corrected example: the
-// call was never well-formed. A refusal about the WORLD — a path outside the trusted roots, an
-// oversized authority document, a pinned hash that no longer matches — is a domain halt on
-// `isError` carrying the taxonomy, because the model has to react to it rather than re-spell it.
-// `env` is the request's protocol context: every path this function judges is judged against
-// `env.Trust`, the resolver captured when the call arrived, never against a process-global one.
+// A malformed request is a JSON-RPC invalid-params error. A refusal about the world, such as a path
+// outside the call's scope or a mismatched hash pin, is an isError result carrying the halt taxonomy.
+// Every path is judged against env.Trust, the resolver captured when the call arrived.
 func (s *Server) prepare(env *proto.RequestEnv, args runArgs, mode review.Mode, tool string) (*prepared, *proto.CallToolResult, error) {
-	// The call's scope is built FIRST, so that every judgement below — the workspace, the authority
-	// documents, and the roots recorded on the run request — is made against the same resolver.
+	// Build the call's scope first, so the workspace, authority documents and recorded roots are all judged
+	// against one resolver.
 	declared := args.Workspace
 	if len(args.InlineWorkspace) > 0 {
 		declared = ""
@@ -642,8 +571,7 @@ func (s *Server) prepare(env *proto.RequestEnv, args runArgs, mode review.Mode, 
 	if err != nil {
 		return nil, nil, err
 	}
-	// maxParallel is refused rather than clamped: a caller who asked to run two seats at a time
-	// because that is what their machine can host must not silently get the whole panel.
+	// An invalid maxParallel is refused rather than clamped.
 	maxParallel := 0
 	if args.MaxParallel != nil {
 		maxParallel = *args.MaxParallel
@@ -655,9 +583,8 @@ func (s *Server) prepare(env *proto.RequestEnv, args runArgs, mode review.Mode, 
 	if err != nil || res != nil {
 		return nil, res, err
 	}
-	// Authority: the pure declaration checks first (a malformed doc, or inline content in a
-	// write-capable mode, is a malformed request), then the full resolution, whose refusals are
-	// about the world.
+	// Authority: declaration checks first (malformed requests), then full resolution (refusals about the
+	// world).
 	if verr := authority.Validate(args.Authority, mode); verr != nil {
 		cleanup()
 		return nil, nil, proto.InvalidParams("invalid params: authority: %v (reasonCode %s)", verr, fault.ReasonOf(verr))
@@ -673,25 +600,16 @@ func (s *Server) prepare(env *proto.RequestEnv, args runArgs, mode review.Mode, 
 		Workspace: ws, Mode: mode, Surface: "mcp",
 		ReviewerPanel: pick.reviewers, ComposedRoles: pick.roles,
 		Authority: args.Authority, TrustedRoots: env.Roots, Trace: traceOf(env),
-		// Recorded on the run's DURABLE decision set, so the on-disk artifact says the same thing
-		// about this run that this server's in-memory registry does. This surface READS it back:
-		// `review_remediate {fromRun}` resolves a handle the registry no longer holds from the run's
-		// own directory, and an inline run must be refused by NAME there too rather than failing
-		// obscurely on a directory this process already deleted.
+		// Recorded on the durable decision set, so a later fromRun read from disk refuses an inline run by name.
 		WorkspaceEphemeral: inline,
-		// BOUNDED EXECUTION and every containment/budget waiver, from the OPERATOR's launch flags and
-		// never from the call. See the Server fields for why a calling model gets no say in any of
-		// them: each one either executes code, widens what containment admits, or changes what the
-		// model's own seats are shown.
+		// Bounded execution and containment waivers come from the operator's launch flags, never the call.
 		VerifyCommands:      s.VerifyCommands,
 		VerifyTimeout:       s.VerifyTimeout,
 		VerifyBaseline:      s.VerifyBaseline,
 		AllowProtectedPaths: s.AllowProtectedPaths,
-		// From the CALL, unlike those above: how many CLIs this machine can host at once is the
-		// caller's fact to state, and stating it changes nothing about what gets reviewed.
+		// From the call: how many CLIs the caller's machine can run at once.
 		MaxParallel: maxParallel,
-		// Also from the CALL: pricing a run is a question about THIS request, and a launch flag
-		// could only answer it for every request at once.
+		// From the call: pricing is a question about this request.
 		DryRun:          args.DryRun,
 		VerifyReadiness: args.VerifyReadiness,
 	}
@@ -710,23 +628,22 @@ func (s *Server) waitBudget(v *int) (int, error) {
 	return *v, nil
 }
 
-// startReport admits, launches and inline-waits for one review.
+// startReport admits, launches and waits inline for one review.
 func (s *Server) startReport(ctx context.Context, c *proto.Call, tool string, prep *prepared, wait int, key string, then func(*record, review.RunOutcome, runview.View, error)) (*proto.CallToolResult, error) {
-	// IDEMPOTENCY first, before any admission accounting: a retry after a dropped connection must
-	// return the ORIGINAL run, not a second panel billed to the same person for the same question.
+	// Check idempotency first: a retry after a dropped connection returns the original run instead of
+	// starting a second panel.
 	if prior := s.runs.existing(key); prior != nil {
 		prep.cleanup()
-		// A still-running prior run is handed back as a TASK to a client that declared the tasks
-		// extension, and as the job shape to everyone else. The retry gets whatever the original
-		// call would now get — which is the point of idempotency.
+		// A running prior run is handed back as a task to clients that declared the tasks extension, and as the
+		// job shape otherwise.
 		if taskHandOff(c, prior) {
 			return nil, nil
 		}
 		return s.payloadFor(prior), nil
 	}
 	runID := newRunID()
-	// The run id the CALLER is about to be handed also NAMES the run's directory, so the decision
-	// set this run records is findable from the only handle the caller holds. See newRunID.
+	// The run id also names the run's directory, so its decision set is findable from the caller's handle.
+	// See newRunID.
 	prep.request.RunID = runID
 	runCtx, cancel := context.WithCancel(context.Background())
 	rec, aerr := s.runs.admit(runID, tool, string(prep.request.Mode), key, "", cancel)
@@ -736,12 +653,11 @@ func (s *Server) startReport(ctx context.Context, c *proto.Call, tool string, pr
 		structured, text := refusalResult("", aerr)
 		return proto.ErrorResult(text, structured), nil
 	}
-	// The panel echo is attached to the RECORD, not just to this response, so a later review_run_status /
-	// review_run_result can answer "which panel is this?" while the run is still in flight.
+	// Attach the panel echo to the record so status and result calls can report it while the run is in
+	// flight.
 	rec.attachPick(prep.pick)
 
-	// The progress sink is live only for the INLINE wait: a progress notification is correlated to
-	// the request that supplied the token, and this call is the only request that did.
+	// Progress is live only during the inline wait; notifications are correlated to this request's token.
 	var sink atomic.Pointer[proto.Call]
 	sink.Store(c)
 	prep.request.OnEvent = func(ev audit.EventLine) {
@@ -777,8 +693,8 @@ func (s *Server) startReport(ctx context.Context, c *proto.Call, tool string, pr
 	return s.awaitRun(ctx, c, rec, prep.pick, cancel, wait, func() { sink.Store(nil) }), nil
 }
 
-// finishReport records a completed review: the result payload AND, on success, the decision set a
-// later `fromRun` remediation writes from.
+// finishReport records a completed review: its result payload and, on success, the decision set a later
+// fromRun remediation applies.
 func (s *Server) finishReport(rec *record, prep *prepared, out review.RunOutcome, view runview.View, rerr error, cancelled bool) {
 	if rerr != nil {
 		structured, text := haltResult(rec, prep.pick, view, rerr, cancelled)
@@ -789,9 +705,8 @@ func (s *Server) finishReport(rec *record, prep *prepared, out review.RunOutcome
 		rec.finish(state, structured, text, true)
 		return
 	}
-	// The decision set is captured HERE, once, from the run that produced it — including the base
-	// hashes of every targeted file. Recomputing any of it later would make the remediation act on
-	// a different set than the one a human read.
+	// Capture the decision set once, from the run that produced it, including the base hashes of every
+	// targeted file.
 	set := &decisionSet{
 		Workspace: prep.request.Workspace, Inline: prep.inline,
 		Profile: prep.request.Profile, Panel: prep.request.ReviewerPanel, Overrides: prep.request.ComposedRoles,
@@ -803,11 +718,8 @@ func (s *Server) finishReport(rec *record, prep *prepared, out review.RunOutcome
 	}
 	if !prep.inline {
 		set.BaseHashes = run.BaseHashes(prep.request.Workspace, acceptedFiles(out))
-		// The reviewed root's IDENTITY, captured here for the same reason the base hashes are: a
-		// remediation must be able to prove it is writing to the tree that was judged, and a path
-		// string cannot prove that. A capture failure is not a review failure — the report stands —
-		// but it leaves the set unbound, and an unbound set is refused by the write path rather
-		// than written on the strength of a pathname.
+		// Capture the reviewed root's identity so a remediation can prove it writes the reviewed tree. A capture
+		// failure leaves the set unbound, and the write path refuses an unbound set.
 		if id, ierr := run.CaptureWorkspaceIdentity(prep.request.Workspace); ierr == nil {
 			set.WorkspaceIdentity = id
 		}
@@ -818,15 +730,14 @@ func (s *Server) finishReport(rec *record, prep *prepared, out review.RunOutcome
 	rec.finish(StateComplete, structured, text, false)
 }
 
-// remediable reports whether a run's accepted set could be handed to `review_remediate --fromRun`.
-// An inline workspace never can: the directory the content was materialized into belongs to this
-// process and is deleted when the run ends, so there is nothing real to write to.
+// remediable reports whether a run's accepted set can be applied with review_remediate. An inline
+// workspace cannot: its directory is deleted when the run ends.
 func (s *Server) remediable(prep *prepared) bool {
 	return !prep.inline
 }
 
-// acceptedFiles is the set of workspace-relative files the accepted findings target — exactly the
-// files whose base hashes must still match when a remediation runs.
+// acceptedFiles returns the workspace-relative files targeted by accepted findings, whose base hashes
+// must still match at remediation.
 func acceptedFiles(out review.RunOutcome) []string {
 	seen := map[string]bool{}
 	var files []string
@@ -843,15 +754,11 @@ func acceptedFiles(out review.RunOutcome) []string {
 	return files
 }
 
-// awaitRun is the JOB SHAPE: wait out the inline budget, then hand back the run id rather than
-// holding a request open past the client's timeout, where it would be killed mid-spend.
+// awaitRun waits out the inline budget and then returns the run id, rather than holding a request open
+// past the client's timeout.
 //
-// `disarm` DISCONNECTS the progress sink, and it runs on every return path. A progress notification
-// is correlated to the request that supplied the token, so once this call has answered — with a
-// result, with `state: "running"`, or not at all because the client cancelled — the run must stop
-// emitting progress against it. Without the disarm a run that outlived its inline budget kept
-// firing `notifications/progress` for a request that had already been replied to: at best noise a
-// client cannot correlate, at worst progress arriving for a request the client considers cancelled.
+// disarm disconnects the progress sink on every return path, so a run that outlives its inline wait
+// stops sending progress for a request that has already been answered or cancelled.
 func (s *Server) awaitRun(ctx context.Context, c *proto.Call, rec *record, pick panelPick, cancel func(), wait int, disarm func()) *proto.CallToolResult {
 	if disarm != nil {
 		defer disarm()
@@ -865,27 +772,17 @@ func (s *Server) awaitRun(ctx context.Context, c *proto.Call, rec *record, pick 
 		}
 		return s.payloadFor(rec)
 	case <-timer.C:
-		// THE ONE PLACE THE TASKS EXTENSION CHANGES A `tools/call` ANSWER. The inline budget
-		// expired and the run is still going — exactly the moment the job shape hands back
-		// `{runId, state:"running"}`. A client that declared `io.modelcontextprotocol/tasks`
-		// receives a `CreateTaskResult` for the SAME run id instead; a client that did not
-		// receives the identical bytes it always did.
+		// The inline budget expired with the run still going. A client that declared the tasks extension gets a
+		// CreateTaskResult for the same run id; others get {runId, state: "running"}.
 		if taskHandOff(c, rec) {
 			return nil
 		}
 		structured, text := runningResult(rec, pick, wait)
 		return proto.Result(text, structured)
 	case <-ctx.Done():
-		// The CLIENT cancelled (or the session went away). Kill the run: a cancelled call must not
-		// keep spending, and — the rule that matters for the write primitive — it must not commit
-		// anything afterwards. The receipt is the run record on disk plus the log notification the
-		// remediation goroutine emits; the response a cancelled call never gets is not the only
-		// place the outcome exists.
-		//
-		// The payload is the CANCELLED shape, not the running shape with a different `state`: it
-		// carries the taxonomy (`haltClass`/`reasonCode`) a client branches on, and it satisfies the
-		// `cancelled` branch of the declared outputSchema. Overwriting `state` on the running shape
-		// produced a payload that matched no branch at all.
+		// The client cancelled or disconnected. Cancel the run so it stops spending and commits nothing. The
+		// run record and log notification carry the outcome. The payload is the cancelled shape, which carries
+		// the halt taxonomy and satisfies the outputSchema's cancelled branch.
 		cancel()
 		structured, text := runningResult(rec, pick, wait)
 		structured["state"] = StateCancelled
@@ -899,10 +796,7 @@ func (s *Server) payloadFor(rec *record) *proto.CallToolResult {
 	state, structured, text, isErr := rec.snapshot()
 	if state == StateRunning {
 		out := map[string]any{"runId": rec.ID, "state": StateRunning, "tool": rec.Tool, "mode": rec.Mode}
-		// The panel echo is REQUIRED on the running branch of the review output schema, and it is
-		// knowable from admission — the requested half always, the executed half empty until seats
-		// report. Omitting it here made `review_run_result` on a still-running review emit a payload its own
-		// declared schema rejected.
+		// The running branch of the review output schema requires the panel echo, which is known from admission.
 		if rec.Tool == toolReport {
 			out["panel"] = rec.pickSnapshot().echo(nil)
 		}
@@ -912,40 +806,25 @@ func (s *Server) payloadFor(rec *record) *proto.CallToolResult {
 	if isErr {
 		res = proto.ErrorResult(text, structured)
 	}
-	// The resource links ride EVERY rendering of this record, including a `review_run_result` fetched long
-	// after the starting call answered — the call that pays for a write is often not the call that
-	// collects it.
+	// Resource links ride every rendering of the record, since the call that collects a write is often not
+	// the call that started it.
 	res.Content = append(res.Content, rec.linksSnapshot()...)
 	return res
 }
 
-// newRunID mints a run id of the form `<UTC timestamp>-<sub-second>-<64 random bits>`, e.g.
-// `20260728T140311-0421-9f8e7d6c5b4a3210`.
+// newRunID returns a run id of the form <UTC timestamp>-<sub-second>-<64 random bits>, for example
+// 20260728T140311-0421-9f8e7d6c5b4a3210.
 //
-// It is also the NAME of the run's own directory (run.Request.RunID carries it into the
-// Manager). That is what makes the handle durable: the id is the only thing an MCP client ever
-// holds, so `review_remediate {fromRun}` can read the run's on-disk decision set only if the id
-// names the directory it is stored in. One identifier for one run, instead of two.
-//
-// WHAT THE TIMESTAMP DOES AND DOES NOT DISCLOSE. A run id travels to a third party's inference log,
-// so it carries NO host path and nothing about this machine — that part is unchanged and is the
-// property worth protecting. The start time is not in that category: the caller is the one who
-// made the call, so its own clock already tells it when. In exchange the directory sorts
-// chronologically beside the CLI's and ACP's, which share this timestamp prefix
-// (meshcore/audit.NewRun) — and an artifact directory that cannot be read in the order things
-// happened is the one thing browsing it is for.
-//
-// The random suffix is not decoration. Two runs admitted inside the same 0.1 ms would otherwise
-// mint the same name, and audit.NewRun's MkdirAll succeeds on an existing directory — so a
-// collision would not fail, it would silently interleave two runs' artifacts in one directory.
-// MCP is the surface where that is reachable, being the concurrent one.
+// The id is also the run directory's name, so review_remediate {fromRun} can find the stored decision
+// set from the only handle an MCP client holds. It contains no host path. The timestamp prefix sorts
+// runs chronologically beside CLI and ACP runs. The random suffix prevents two runs admitted in the same
+// instant from sharing a directory, which audit.NewRun would not detect.
 func newRunID() string {
 	now := time.Now().UTC()
 	ts := now.Format("20060102T150405") + fmt.Sprintf("-%04d", now.Nanosecond()/1e5)
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand does not fail in practice. If it ever does, the nanosecond clock is a worse
-		// uniqueness source than 64 random bits but a far better one than nothing.
+		// If crypto/rand fails, fall back to the nanosecond clock.
 		return ts + "-" + strconv.FormatInt(now.UnixNano(), 16)
 	}
 	return ts + "-" + hex.EncodeToString(b[:])
@@ -962,9 +841,8 @@ func (s *Server) remediateHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 	if merr != nil {
 		return nil, merr
 	}
-	// An apply WRITES THE WORKSPACE, so it is confirmed per call on top of the operator's launch grant.
-	// It is checked before anything else about the request, so a call that never confirmed the write
-	// cannot spend anything learning that the rest of it was also malformed.
+	// An apply writes the workspace, so it is confirmed per call in addition to the launch grant. It is
+	// checked first, before anything else about the request.
 	if mode == review.ModeApply && (args.AllowWrite == nil || !*args.AllowWrite) {
 		return nil, proto.InvalidParams(
 			"invalid params: `allowWrite` must be present and literally true for output=apply — an apply writes the workspace and is confirmed per call. Corrected call: {\"fromRun\": \"<a review_report runId>\", \"workspace\": \"<absolute workspace>\", \"output\": \"apply\", \"allowWrite\": true}")
@@ -974,13 +852,10 @@ func (s *Server) remediateHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 			"invalid params: `inlineWorkspace` cannot be remediated — the content was supplied over the wire and materialized into a directory this server owns and then deletes, so there is nothing real to write to. Review inline content with review_report, and remediate a workspace path that resolves inside this server's trusted roots.")
 	}
 	fromRun := strings.TrimSpace(args.FromRun)
-	// MCP WRITES GO THROUGH `fromRun`, AND ONLY THROUGH `fromRun`, on both protocol eras. On 2026-07-28
-	// stdio a cancelled request may receive no further message at all, so a write whose response is
-	// cancelled tells the caller nothing; `fromRun` is a value the caller ALREADY RECEIVED in a completed
-	// response, so at the instant the write window opens the caller provably holds a handle. basic/index:
-	// "State that needs to span multiple requests ... MUST be referenced by an explicit identifier the
-	// client passes on each request." The CLI keeps its one-call cycle: its caller is a human at a
-	// terminal who is shown the run directory as the run starts, with no response to lose.
+	// MCP writes go only through fromRun. On 2026-07-28 stdio a cancelled request may receive no further
+	// message, so a one-call write could leave the caller with no handle; fromRun is a value the caller
+	// already received. The CLI keeps its one-call cycle because its user sees the run directory as the run
+	// starts.
 	if fromRun == "" {
 		confirm := ""
 		if mode == review.ModeApply {
@@ -1003,9 +878,7 @@ func (s *Server) remediateHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 	if werr != nil {
 		return nil, werr
 	}
-	// THE SELECTIVE-APPLY FILTER, validated before any spend. An EMPTY `select` is refused
-	// here rather than in the write path so the caller learns it from a -32602 that names the
-	// correction, and so no run is admitted for a call that can only write nothing.
+	// Validate select before any spend: an empty list is refused with a correction.
 	var selection []string
 	if args.Select != nil {
 		selection = *args.Select
@@ -1014,8 +887,7 @@ func (s *Server) remediateHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 				"invalid params: `select` is present and empty. An empty narrowing filter names ZERO findings — it does not mean \"apply everything\", and accepting it would let a call read as a normal apply while writing nothing. Omit `select` to apply run %q's whole accepted set, or name the `fingerprint` values from that run's accepted findings.", fromRun)
 		}
 	}
-	// The call's scope applies to the WRITE too, and it is resolved before the write window opens: the
-	// roots this call declares are the roots the receipt records the write against.
+	// The call's scope also governs the write; its declared roots are what the receipt records.
 	env, nres, nerr := s.callScope(c.Env(), workspace, args.Roots)
 	if nerr != nil {
 		return nil, nerr
@@ -1026,8 +898,7 @@ func (s *Server) remediateHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 	return s.remediateFromRun(ctx, c, env, workspace, fromRun, mode, wait, strings.TrimSpace(args.IdempotencyKey), selection)
 }
 
-// trimmedNonEmpty is the caller's list with blanks removed — the same normalization the write path
-// applies, used here only to decide whether a supplied `select` names anything at all.
+// trimmedNonEmpty returns ss without blank entries, the same normalization the write path applies.
 func trimmedNonEmpty(ss []string) []string {
 	out := make([]string, 0, len(ss))
 	for _, s := range ss {
@@ -1038,10 +909,8 @@ func trimmedNonEmpty(ss []string) []string {
 	return out
 }
 
-// refuseRunFormingArgs rejects run-forming parameters on `review_remediate`. The schema forbids
-// `panel` and `authority` there, but a schema is advisory to a client and the decoder embeds `runArgs`
-// wholesale, so the server refuses them by name: each names a GOVERNANCE input — which panel produced
-// the accepted set, which intent it was judged against — that already came from the source run.
+// refuseRunFormingArgs rejects run-forming parameters on review_remediate by name. The schema forbids
+// them, but the decoder embeds runArgs, and the panel and authority were settled by the source run.
 func refuseRunFormingArgs(args runArgs, fromRun string, mode review.Mode) error {
 	var named []string
 	if args.Panel != nil {
@@ -1051,8 +920,8 @@ func refuseRunFormingArgs(args runArgs, fromRun string, mode review.Mode) error 
 		named = append(named, "`authority`")
 	}
 	if args.DryRun {
-		// A dry run prices a review and spends nothing; a remediation writes, so there is nothing for a
-		// dry run to price. Accepting the flag would read as "nothing will be written".
+		// A dry run prices a review; a remediation writes, so accepting the flag would suggest nothing is
+		// written.
 		named = append(named, "`dryRun`")
 	}
 	if args.VerifyReadiness {
@@ -1083,39 +952,24 @@ func (s *Server) remediationMode(output string) (review.Mode, error) {
 	}
 }
 
-// remediateFromRun is the PRIMARY form: apply a prior review's accepted set.
+// remediateFromRun applies a prior review's accepted set.
 func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto.RequestEnv, workspace, fromRun string, mode review.Mode, wait int, key string, selection []string) (*proto.CallToolResult, error) {
-	// IDEMPOTENCY, in two independent forms. The key covers an explicit retry; the source-run guard
-	// covers the retry that forgot the key, or invented a new one. Both return the ORIGINAL
-	// receipt, because the alternative is a second, unrequested write.
-	//
-	// These two lookups are the FAST PATH — a replay that arrives after the winner finished, which
-	// is the common case and which must answer even if the source run's own record has since been
-	// evicted. They are not the guarantee: two calls that arrive together both pass here, so the
-	// binding decision is made once, atomically, at reservation (registry.reserve).
+	// Idempotency has two forms: the key covers explicit retries, and the source-run guard covers retries
+	// without the key. Both return the original receipt. These lookups are a fast path; the binding decision
+	// is made atomically at reservation (registry.reserve).
 	if prior := s.runs.existing(key); prior != nil {
 		return s.attachTo(ctx, c, prior, wait), nil
 	}
 	if prior := s.runs.existingForSource(fromRun); prior != nil {
-		// A SELECTIVE APPLY DOES NOT GET A SECOND WINDOW ON THE SAME SOURCE RUN, and that is
-		// deliberate. This guard exists so that a decision set is
-		// never applied twice, and a second call naming a different `select` is still a second
-		// application of the same set. It therefore attaches to the winner and returns the ORIGINAL
-		// receipt — including the original `selection` — rather than opening a second write window
-		// with a different filter.
-		//
-		// The consequence: "apply findings 1–3, then 4–5" is NOT
-		// available from one report run. Choose the selection in one call, or produce a fresh
-		// review_report run for the second tranche. Loosening this would trade a caller convenience
-		// for the one guarantee this surface exists to keep.
+		// A selective apply gets no second write window on the same source run: a second call with a different
+		// select is still a second application of the same set. It attaches to the winner and returns the
+		// original receipt, including its selection. To apply more findings, run a fresh review_report.
 		return s.attachTo(ctx, c, prior, wait), nil
 	}
 	rec := s.runs.get(fromRun)
 	if rec == nil {
-		// THE REGISTRY MISS IS NOT THE END OF THE QUESTION. The registry is in-memory and bounded
-		// by count and TTL, so a handle can name a run this process really did produce and really
-		// did record — one evicted by retention, or one from before a restart — and it is honoured from
-		// the run's own directory, exactly as an ACP agent honours the same handle from the same file.
+		// A registry miss is not final: the registry is bounded and in-memory, so a handle for a run this process
+		// produced (evicted, or from before a restart) is resolved from the run's directory, as on ACP.
 		return s.remediateFromDisk(ctx, c, env, workspace, fromRun, mode, wait, key, selection)
 	}
 	state, _, _, _ := rec.snapshot()
@@ -1149,99 +1003,66 @@ func (s *Server) remediateFromRun(ctx context.Context, c *proto.Call, env *proto
 		Profile: set.Profile, ReviewerPanel: set.Panel, ComposedRoles: set.Overrides,
 		TrustedRoots: env.Roots, SourceRunID: fromRun,
 		Findings: set.Findings, Decisions: set.Decisions,
-		// The narrowing filter travels UNEXAMINED into the one governed write path. This surface
-		// does not resolve it, does not look a fingerprint up, and does not know which findings it
-		// names — deliberately, so `select` cannot come to mean one thing on MCP and another on the
-		// CLI. All this surface owns is the empty-list refusal, above, which is pre-spend.
+		// The selection passes unexamined to the governed write path; this surface owns only the empty-list
+		// refusal.
 		Select: selection,
 		Shown:  set.Shown, BaseHashes: set.BaseHashes,
-		// THIS turn's trace, not the report run's. The two are separate requests and a host that
-		// traced them separately must be able to see that in the two run directories.
+		// This call's trace, not the report run's.
 		Trace: traceOf(env),
-		// The OPERATOR's launch waivers reach the two-phase apply too. writepath.go checks the
-		// dirty-tree precondition in the one governed write path precisely BECAUSE this path
-		// arrives there; leaving the waiver off here made the launch flag dead for `review_remediate
-		// {fromRun}` while it worked for a single-call apply — the same operator act, two answers.
+		// The operator's launch waivers apply to fromRun writes as to any governed write.
 		AllowProtectedPaths: s.AllowProtectedPaths,
 	}
 	return s.startRemediate(ctx, c, req, wait, key)
 }
 
-// remediateFromDisk resolves a run handle the registry no longer holds, from the run's own
-// directory — the same reader, the same file and the same refusals the ACP surface uses
-// (run.ReadDecisionSet, surface/acp/fromrun.go). It is reached ONLY at the registry miss: both
-// in-process idempotency lookups have already run and found nothing, so nothing here can answer for
-// a remediation this process has already performed.
+// remediateFromDisk resolves a run handle the registry no longer holds from the run's directory, using
+// the same reader and refusals as ACP. It runs only after both in-process idempotency lookups missed.
 //
-// WHAT THE HANDLE IS WORTH. It arrives from a peer, so it is VERIFIED rather than trusted: the id is
-// joined to each of the named workspace's run-record locations and then faces ReadDecisionSet's
-// four checks — lexical containment BEFORE any filesystem call, canonical containment after symlink
-// resolution, the schema version, and `runId == the directory's own name`. Every failure answers
-// with the same `unknownRun`, so a peer that guesses gains no existence oracle and no path outside
-// this agent's own artifact directory is ever read.
+// The handle is verified, not trusted: it is joined to each of the workspace's run-record locations and
+// checked lexically, then canonically, then for schema version and runId matching the directory name.
+// Every failure answers unknownRun.
 //
-// WHAT A SECOND APPLY GETS AFTER A RESTART, stated because it differs from the in-process answer and
-// a client must be able to tell them apart. In-process, the source-run guard hands back the ORIGINAL
-// receipt. Across a restart that guard is gone with the registry — and the write does NOT happen
-// twice: the first apply changed the very files the stored set pins, so the base hashes no longer
-// match and the second call HALTS with `stale_decision_set`, having written nothing. Both are
-// refusals to double-write; one reports a receipt and one reports a halt. That is exactly what ACP
-// does today, and a durable "already applied" marker was deliberately NOT added — a wrong durable
-// record on a write path is a false success, which is worse than an honest halt.
+// After a restart a second apply does not return the original receipt; the first apply changed the
+// pinned files, so it halts with stale_decision_set having written nothing. No durable "already applied"
+// marker is kept, since a wrong one would report false success.
 func (s *Server) remediateFromDisk(ctx context.Context, c *proto.Call, env *proto.RequestEnv, workspace, fromRun string,
 	mode review.Mode, wait int, key string, selection []string) (*proto.CallToolResult, error) {
 
 	set, _, err := s.Manager.ReadDecisionSetByID(workspace, fromRun)
 	if err != nil {
-		// A handle that names nothing on disk EITHER. This also absorbs the two registry-path
-		// refusals that have no on-disk counterpart, and they have none because the artifact says
-		// so rather than because the check was dropped: a decision set is written once, by a
-		// COMPLETED REPORT run, at the end of its cycle. A run still running, a run that halted,
-		// and a remediation run all record no set at all — so `source_run_not_complete` and
-		// `source_run_not_reviewable` cannot be reached from a file that does not exist. (A running
-		// run is never evicted, so its record is always still here to answer with the first of
-		// those.)
+		// Nothing on disk either. A decision set is written only by a completed report run, so a running, halted
+		// or remediation run has none, and source_run_not_complete and source_run_not_reviewable cannot arise
+		// here.
 		return unknownRun(fromRun), nil
 	}
-	// The same ladder, in the same order, answering with the SAME reason codes the registry path
-	// reports — `run.ReasonInlineWorkspaceNotRemediable` and `run.ReasonNoAcceptedFindings`
-	// are those strings, held in one place so the two paths cannot drift apart.
+	// The same refusals, in the same order and with the same reason codes, as the registry path.
 	if rerr := set.Remediable(); rerr != nil {
 		return domainRefusal("", rerr), nil
 	}
 	if !set.NamesWorkspace(workspace) {
 		return domainRefusal("", workspaceMismatch(fromRun)), nil
 	}
-	// THE IDENTITY BINDING, re-established across the report→apply gap. The registry path carries a
-	// live `fs.FileInfo` from the report run; a file cannot, so the canonical path and the durable
-	// device+inode key are re-verified here instead. It is pre-spend: a swapped tree costs a round
-	// trip rather than a write.
+	// Re-verify the identity binding before any spend: the canonical path and device and inode key.
 	identity, ierr := set.BindWorkspace()
 	if ierr != nil {
 		return domainRefusal("", ierr), nil
 	}
 	req := run.RemediateRequest{
-		// The CANONICAL workspace, because BindWorkspace has just proven that is the tree the source
-		// run judged. Resolving the write against the canonical form removes a whole class of
-		// "same tree, different spelling" ambiguity from the one call that writes.
+		// Write against the canonical workspace, which BindWorkspace just verified.
 		Workspace: set.WorkspaceCanonical, WorkspaceIdentity: identity,
 		Mode: mode, Surface: "mcp",
 		Profile: set.Profile, ReviewerPanel: set.Panel, ComposedRoles: set.Roles,
-		// The roots THIS call declares, not the ones the source run was reviewed under. A decision set
-		// outlives them, and the write is re-gated inside the governed write path.
+		// The roots this call declares; the governed write path re-gates the write against them.
 		TrustedRoots: env.Roots,
-		// The handle, not `set.RunID`: ReadDecisionSet has just PROVEN they are the same string
-		// (the recorded runId must be the directory's own name), and using the handle is what makes
-		// the source-run reservation key the same value the fast-path lookup above used.
+		// Use the handle, which ReadDecisionSet proved equals set.RunID, so the reservation key matches the
+		// fast-path lookup.
 		SourceRunID: fromRun,
 		Findings:    set.Findings, Decisions: set.Decisions,
-		// The narrowing filter travels UNEXAMINED into the one governed write path, exactly as it
-		// does on the registry path.
+		// The selection passes unexamined to the governed write path, as on the registry path.
 		Select: selection,
 		Shown:  set.ShownSet(), BaseHashes: set.BaseHashes,
 		Trace: traceOf(env),
-		// The operator's launch waivers, exactly as on the registry path above — the two entry
-		// points differ only in where the decision set came from, never in what is permitted.
+		// The operator's launch waivers, as on the registry path.
 		AllowProtectedPaths: s.AllowProtectedPaths,
 	}
 	return s.startRemediate(ctx, c, req, wait, key)
@@ -1251,8 +1072,7 @@ func (s *Server) remediateFromDisk(ctx context.Context, c *proto.Call, env *prot
 // source run reviewed.
 const ReasonSourceRunWorkspaceMismatch = "source_run_workspace_mismatch"
 
-// sameWorkspace reports whether the workspace a call names is the tree a run recorded, compared after
-// symlink resolution so two spellings of one directory agree.
+// sameWorkspace reports whether named is the tree recorded, compared after resolving symlinks.
 func sameWorkspace(recorded, named string) bool {
 	canon := func(p string) string {
 		abs, err := filepath.Abs(p)
@@ -1273,13 +1093,9 @@ func workspaceMismatch(fromRun string) error {
 		WithReason(ReasonSourceRunWorkspaceMismatch)
 }
 
-// attachTo waits out the inline budget on a run this call did NOT start — the winner of an
-// idempotency or same-source reservation.
-//
-// It deliberately holds no cancel handle. A later caller is a SPECTATOR: its disconnect must not
-// kill the write window the winner opened, and it must not report the winner's run as cancelled on
-// its own behalf, because it decided nothing. What it returns is whatever the winner's record says
-// — the receipt if it has finished, the running shape if it has not.
+// attachTo waits out the inline budget on a run this call did not start: the winner of an idempotency
+// or source-run reservation. It holds no cancel handle, so a spectator's disconnect cannot cancel the
+// winner's write.
 func (s *Server) attachTo(ctx context.Context, c *proto.Call, rec *record, wait int) *proto.CallToolResult {
 	timer := time.NewTimer(time.Duration(wait) * time.Second)
 	defer timer.Stop()
@@ -1288,31 +1104,19 @@ func (s *Server) attachTo(ctx context.Context, c *proto.Call, rec *record, wait 
 	case <-timer.C:
 	case <-ctx.Done():
 	}
-	// A spectator gets a task handle on the same terms the winner would: the run is the winner's,
-	// but the HANDLE is not exclusive — `taskId == runId`, and polling it is a read.
+	// A spectator gets a task handle on the same terms; polling a task is a read.
 	if taskHandOff(c, rec) {
 		return nil
 	}
 	return s.payloadFor(rec)
 }
 
-// THIS SURFACE HAS NO ONE-CALL REVIEW-AND-WRITE FORM.
+// startRemediate reserves and runs one fromRun remediation. The reservation is atomic over the
+// idempotency key and the source run, so every other call for the same decision set attaches to the
+// first instead of opening a second write window.
 //
-// That form — run the governed cycle in report mode, then apply that run's accepted set through the
-// same write window — is ABSENT, not merely disabled, because on MCP it is the one write
-// shape whose caller can be left holding NOTHING — the run it would have to poll is a run only that
-// same, cancelled response would have named. See remediateHandler for the rule and the teaching
-// error.
-//
-// The capability is two calls: review_report, then review_remediate {fromRun}. The CLI has the
-// one-call form, where the caller is a human who is shown the run directory on stderr.
-
-// startRemediate reserves and runs one from-run remediation.
-//
-// The reservation is ATOMIC over both the idempotency key and the source run: whichever call gets
-// there first opens the write window, and every other call for the same decision set attaches to it
-// instead of opening a second one. "Never apply the same accepted set twice" is a property of that
-// single lock, not of a check that happened to run earlier.
+// This surface has no one-call review-and-write: on MCP a cancelled response could leave the caller
+// without a handle. Use review_report, then review_remediate {fromRun}.
 func (s *Server) startRemediate(ctx context.Context, c *proto.Call, req run.RemediateRequest, wait int, key string) (*proto.CallToolResult, error) {
 	runID := newRunID()
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -1338,19 +1142,14 @@ func (s *Server) startRemediate(ctx context.Context, c *proto.Call, req run.Reme
 		defer tcancel()
 		s.runRemediation(tctx, c, rec, req)
 	}()
-	// A from-run remediation has no progress sink to disarm: it emits log notifications only (the
-	// receipt has to survive a cancelled call, which gets no response), and those are not
-	// request-correlated.
+	// A remediation emits only log notifications, which are not request-correlated, so there is no progress
+	// sink to disarm.
 	return s.awaitRun(ctx, c, rec, panelPick{}, cancel, wait, nil), nil
 }
 
-// runRemediation drives the write window and publishes the receipt on BOTH channels.
-//
-// The log notification is not decoration. A cancelled call gets no response — on 2025-06-18 the server
-// SHOULD NOT send one and the client is told to ignore a late one anyway — so the notification plus the
-// on-disk receipt are where the outcome exists, and "what did it actually write" stays answerable. Under
-// 2026-07-28 over stdio even the notification is barred (MUST NOT send ANY further message for that
-// request), which leaves the durable receipt as the only guarantee.
+// runRemediation drives the write window and publishes the receipt as a log notification and on disk.
+// A cancelled call gets no response, and on 2026-07-28 stdio not even the notification, so the durable
+// receipt is the guarantee.
 func (s *Server) runRemediation(ctx context.Context, c *proto.Call, rec *record, req run.RemediateRequest) {
 	req.OnJournal = func(j run.Journal) {
 		c.Log(proto.LevelNotice, ServerName, map[string]any{
@@ -1360,9 +1159,7 @@ func (s *Server) runRemediation(ctx context.Context, c *proto.Call, rec *record,
 		})
 	}
 	out, err := s.Manager.Remediate(ctx, req)
-	// PUBLISH the patch before the receipt is rendered, so the receipt can name the URI it is fetched
-	// by. Without this the call completes a governed write and hands back a run-record-relative name
-	// whose root this surface deliberately withholds — a workflow that finishes and delivers nothing.
+	// Publish the patch first, so the receipt can name the URI it is fetched from.
 	link := s.publishPatch(rec, out)
 	structured, text, isErr := remediateResult(rec, out, err, link)
 	if link != nil {
@@ -1376,10 +1173,8 @@ func (s *Server) runRemediation(ctx context.Context, c *proto.Call, rec *record,
 		"runId": rec.ID, "eventType": "remediation_receipt", "message": text,
 		"receipt": structured["receipt"],
 	})
-	// The record's state is READ BACK from the payload rather than re-derived beside it. It used
-	// to be derived from `isErr`, and that stopped being the same fact when a PARTIAL REFUSAL
-	// began riding `isErr: true` on a run whose state is legitimately "complete" — the write
-	// committed. Two derivations of one fact is how they disagree; there is now one.
+	// Read the record's state back from the payload: a partial refusal is isError yet complete, so deriving
+	// state from isErr would disagree.
 	state, _ := structured["state"].(string)
 	if state == "" {
 		state = StateComplete
@@ -1387,18 +1182,14 @@ func (s *Server) runRemediation(ctx context.Context, c *proto.Call, rec *record,
 	rec.finish(state, structured, text, isErr)
 }
 
-// patchArtifactName is the LOGICAL artifact name a patch is addressed by. It is deliberately not the
-// file's run-relative path (`patches/changes.patch`): a resource URI is an identifier, and one that spelt
-// out a layout would be a half-disclosed path.
+// patchArtifactName is the logical name a patch is addressed by, not its run-relative path, so the
+// resource URI does not disclose the layout.
 const patchArtifactName = "patch"
 
 // publishPatch registers a completed remediation's patch as an MCP resource and returns the Resource to
-// link, or nil when there is nothing to publish.
-//
-// This is the ONE place the run directory is used on this surface, and it never leaves this function: the
-// store holds it privately and the wire sees only `aimesh://run/<runId>/patch`. The receipt's recorded
-// digest is handed to the store too, so a patch that no longer matches the receipt is refused at fetch
-// time rather than served as though the receipt still described it.
+// link, or nil when there is nothing to publish. The run directory stays in the store; the wire sees
+// only aimesh://run/<runId>/patch. The receipt's digest is stored too, so a patch that no longer matches
+// is refused at fetch time.
 func (s *Server) publishPatch(rec *record, out run.RemediateOutcome) *proto.Resource {
 	if out.RunDir == "" || out.Receipt.PatchArtifact == "" {
 		return nil
@@ -1442,9 +1233,8 @@ func decodeRunID(args json.RawMessage) (string, error) {
 	return strings.TrimSpace(a.RunID), nil
 }
 
-// unknownRun is the refusal for a run id this server cannot resolve. It rides `isError` rather than
-// a protocol error because it is something the CALLING MODEL has to react to, and because an
-// expired run is a legitimate outcome of the retention bound rather than a malformed request.
+// unknownRun returns the refusal for a run id this server cannot resolve. It is an isError result rather
+// than a protocol error, because an expired run is a legitimate outcome the calling model must handle.
 func unknownRun(id string) *proto.CallToolResult {
 	return domainRefusal(id, fault.New(fault.Usage, fmt.Sprintf(
 		"unknown or expired runId %q — finished runs are retained for a bounded time and count. If you still need the answer, start a new review.", id)).
@@ -1480,10 +1270,8 @@ func (s *Server) runStatusHandler(ctx context.Context, c *proto.Call) (*proto.Ca
 	} else {
 		text += " Fetch the full result with review_run_result."
 	}
-	// A POLLER THAT NEVER FETCHES `review_run_result` MUST STILL NOT READ A PARTIALLY-REFUSED RUN AS
-	// CLEAN. `state` is "complete" for such a run and always will be, so the two facts
-	// that distinguish it are lifted out of the terminal payload and repeated here. They are read
-	// from the finished payload rather than recomputed, so status and result cannot disagree.
+	// A poller that never fetches review_run_result must not read a partially refused run as clean, so the
+	// outcome and refusal count are copied from the finished payload.
 	if oc, ok := structured["outcome"].(string); ok && oc != "" {
 		out["outcome"] = oc
 		refused := 0
@@ -1520,13 +1308,9 @@ func elapsed(rec *record) float64 {
 
 // --- panel composition ---
 
-// resolveSelection turns the call's `panel` into the requested seats and the role seats the Manager
-// resolves them from. Every refusal here happens BEFORE any spend, and every message names the field and
-// the accepted values so the corrected call is derivable rather than guessable.
-//
-// It does not decide whether a seat's model exists — the adapter answers that when the run starts, and
-// verifyReadiness can ask it first. What it owns is what a surface owns: completeness, the bound, and
-// that every seat names an adapter this server was launched with.
+// resolveSelection turns the call's panel into the requested seats and the role seats the manager
+// resolves them from. Every refusal happens before any spend and names the field and accepted values.
+// Whether a model exists is left to the adapter (or verifyReadiness).
 func (s *Server) resolveSelection(p *panelArg) (panelPick, error) {
 	if p == nil {
 		return panelPick{}, proto.InvalidParams(
@@ -1541,8 +1325,7 @@ func (s *Server) resolveSelection(p *panelArg) (panelPick, error) {
 			"invalid params: `panel.reviewers` has %d seats, exceeding the cap of %d. Each seat is a real model CLI, so the cap is a spend control and is never clamped — send at most %d.",
 			len(p.Reviewers), review.MaxReviewerSeats, review.MaxReviewerSeats)
 	}
-	// A panel MUST name its adjudicator: its judgment becomes the accepted set, so a hidden default
-	// would mean the caller composed a panel whose judge it never saw.
+	// A panel must name its adjudicator, since its judgment becomes the accepted set.
 	if p.AuthorRemediator == nil {
 		return panelPick{}, proto.InvalidParams(
 			"invalid params: `panel.author_remediator` is required — it is the HOST-ADJUDICATION seat whose judgment becomes the accepted set, and it is never defaulted for you. Corrected call: {\"panel\": {\"reviewers\": [...], \"author_remediator\": {\"adapter\": \"<adapter>\", \"model\": \"<model>\"}}}")
@@ -1570,9 +1353,8 @@ func (s *Server) resolveSelection(p *panelArg) (panelPick, error) {
 		if err := s.checkConfigured(rs.field, *rs.seat); err != nil {
 			return panelPick{}, err
 		}
-		// Reasoning effort is a per-seat vantage on the blind panel only. A single-slot role seat takes
-		// an effort-bearing model identifier instead, so a separate effort here would be silently
-		// dropped — which is why it is refused.
+		// Effort applies only to reviewer seats. A role seat takes an effort-bearing model identifier, so a
+		// separate effort would be dropped and is refused.
 		if strings.TrimSpace(rs.seat.Effort) != "" {
 			return panelPick{}, proto.InvalidParams(
 				"invalid params: %s.effort is not accepted — reasoning effort is per-seat only on `panel.reviewers[]`. Put an effort-bearing identifier in %s.model instead.", rs.field, rs.field)
@@ -1582,9 +1364,8 @@ func (s *Server) resolveSelection(p *panelArg) (panelPick, error) {
 	return pick, nil
 }
 
-// checkConfigured enforces that a seat names an adapter this server was launched with, and that the
-// adapter's CLI can be started now. The refusal names the available set, so the corrected call follows
-// from the error.
+// checkConfigured requires a seat to name an adapter this server was launched with whose CLI can be
+// started now. The refusal lists the available adapters.
 func (s *Server) checkConfigured(field string, seat seatArg) error {
 	spec := seat.spec()
 	if spec.Adapter == "" || spec.Model == "" {
@@ -1606,9 +1387,9 @@ func (s *Server) checkConfigured(field string, seat seatArg) error {
 
 // --- workspace resolution ---
 
-// resolveWorkspace turns `workspace` / `inlineWorkspace` into a directory to review. A named path
-// is judged against the trusted roots; inline content is materialized into a directory THIS PROCESS
-// owns, which is why it needs no root — it never touched this machine's filesystem.
+// resolveWorkspace turns workspace or inlineWorkspace into a directory to review. A named path is judged
+// against the call's scope; inline content is materialized into a directory this process owns and needs
+// no root.
 func (s *Server) resolveWorkspace(env *proto.RequestEnv, args runArgs, tool string) (ws string, inline bool, cleanup func(), res *proto.CallToolResult, err error) {
 	cleanup = func() {}
 	path := strings.TrimSpace(args.Workspace)
@@ -1620,8 +1401,7 @@ func (s *Server) resolveWorkspace(env *proto.RequestEnv, args runArgs, tool stri
 		return "", false, cleanup, nil, proto.InvalidParams(
 			"invalid params: `workspace` is required (an absolute directory path). To review content this server cannot read from disk, supply `inlineWorkspace` instead.")
 	case path != "":
-		// The workspace is judged against this call's own scope (callScope built it from this path)
-		// and the non-overridable read denylist, before any spend, with the machine reason code attached.
+		// Judge the workspace against this call's scope and the read denylist before any spend.
 		if _, derr := env.Trust.ResolveRead(path); derr != nil {
 			return "", false, cleanup, domainRefusal("", rootFault(derr, env.Roots)), nil
 		}
@@ -1634,9 +1414,8 @@ func (s *Server) resolveWorkspace(env *proto.RequestEnv, args runArgs, tool stri
 	return dir, true, func() { os.RemoveAll(dir) }, nil, nil
 }
 
-// rootFault types a confinement refusal as a containment halt carrying the resolver's own MACHINE
-// reason code, and appends the operator-facing remedy — so a host user reads "how do I allow this"
-// rather than only "refused".
+// rootFault wraps a confinement refusal as a containment halt carrying the resolver's reason code, with a
+// remedy appended.
 func rootFault(err error, roots []string) error {
 	hint := ""
 	switch scope.ReasonOf(err) {
@@ -1649,9 +1428,8 @@ func rootFault(err error, roots []string) error {
 		WithHalt("M6").WithReason(string(scope.ReasonOf(err))).WithSignal("")
 }
 
-// materializeInline writes caller-supplied content to a fresh isolated temp directory. Every path
-// must be workspace-relative (no absolute/volume/`..` escape) and not excluded; any violation
-// removes the directory and errors, so a malicious map cannot write outside it.
+// materializeInline writes caller-supplied content to a new temp directory. Each path must be
+// workspace-relative and not excluded; on any violation the directory is removed and an error returned.
 func materializeInline(files map[string]string) (string, error) {
 	if len(files) == 0 {
 		return "", fmt.Errorf("inlineWorkspace is empty")
@@ -1698,10 +1476,8 @@ func materializeInline(files map[string]string) (string, error) {
 
 // --- progress + logging mapping ---
 
-// phaseFraction maps a review event to the FRACTION OF PHASES complete. It is deliberately a fixed
-// ladder over named phases rather than a per-item counter: a counter that resets when a phase is
-// retried goes backwards, and a client that sees progress go backwards cannot tell a retry from a
-// bug. Events that are not phase boundaries move nothing — they are logged, not counted.
+// phaseFraction maps a review event to the fraction of phases complete. It is a fixed ladder rather than
+// a per-item counter, so progress never goes backwards on a retry. Other events are logged, not counted.
 var phaseFraction = map[string]float64{
 	"run_started":                   0.02,
 	"doctor_completed":              0.08,

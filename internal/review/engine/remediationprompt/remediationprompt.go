@@ -1,9 +1,7 @@
-// Package remediationprompt renders the model-driven remediation prompt — a pure Engine
-// transformation (data in → string out), no I/O. The Manager supplies ONE accepted finding and
-// the current content of its target file (read via WorkspaceAccess from the isolated remediation
-// copy); this package asks the host (author_remediator, semantic_remediate) to return a
-// schema-valid RemediationResult carrying anchored edits that FIX that finding. Enum/shape strings
-// are kept in lockstep with internal/schema's ParseRemediationResult.
+// Package remediationprompt renders the remediation prompt without I/O. Given one accepted finding
+// and its target file's content from the isolated copy, the prompt asks the author_remediator for a
+// RemediationResult with anchored edits that fix the finding. The expected shape must match
+// schema.ParseRemediationResult.
 package remediationprompt
 
 import (
@@ -21,7 +19,7 @@ type Input struct {
 	Truncated   bool
 	Corrective  bool
 	ParserError string
-	// RequestSelfReportIdentity: set ONLY for weak self-report-strategy host adapters (see reviewprompt).
+	// RequestSelfReportIdentity is set only for self-report host adapters (see reviewprompt).
 	RequestSelfReportIdentity bool
 }
 

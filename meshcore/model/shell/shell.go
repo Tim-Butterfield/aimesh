@@ -1,8 +1,6 @@
-// Package shell is the generic command-exec ModelAccess adapter: it runs a real
-// reviewer CLI per a Recipe (binary detection, configured-path-vs-PATH lookup,
-// argv construction, timeout/cancel, stdout/stderr capture, identity extraction).
-// Concrete per-CLI recipes (devin/claude/codex/agy/ollama/gemini) live in
-// recipes.go. Real authentication and exact identity parsing are verify-on-provision.
+// Package shell is the command-exec model adapter: it runs a provider CLI according to a Recipe
+// (binary lookup, argv construction, timeout and cancellation, output capture, identity extraction).
+// The per-CLI recipes live in recipes.go.
 package shell
 
 import (
@@ -23,20 +21,14 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// Egress says where a call's CONTENT goes — the single most consequential fact about running an
-// adapter, and the one a user has to know BEFORE the call rather than after.
-//
-// It lives on the recipe because the recipe is what decides it: this struct names the binary that is
-// executed, so it is the only place that can honestly say which party ends up holding the prompt. It
-// was prose in docs/security.md, correct but unreachable from code, so anything wanting to state a
-// run's destinations had to re-derive them from a table a reader cross-referenced by hand.
+// Egress says where a call's content goes. It lives on the recipe because the recipe names the
+// binary that receives the prompt.
 type Egress struct {
-	// Destination names the party that receives the content, in the words a user would recognise
-	// ("Anthropic", "OpenAI"). Empty when unknown, which is not the same as none.
+	// Destination names the party that receives the content ("Anthropic", "OpenAI"). Empty when
+	// unknown, which is not the same as none.
 	Destination string
-	// Local is true when nothing leaves the machine. It is the distinction that actually matters,
-	// and it is deliberately a separate field rather than a magic Destination value: code that
-	// branches on "did anything leave" must not have to string-match.
+	// Local is true when nothing leaves the machine. It is a separate field so code can check it
+	// without matching Destination strings.
 	Local bool
 	// Note carries the qualification a destination needs when naming one party would overstate it —
 	// a gateway that routes onward, or a CLI whose destination is whatever the operator pointed it
@@ -49,44 +41,21 @@ type Recipe struct {
 	Name     string // adapter name, e.g. "codex-cli"
 	Detect   string // binary name for PATH lookup, e.g. "codex"
 	Identity core.IdentityMethod
-	// Egress is where this recipe's content goes. Every code-owned recipe declares one; see the
-	// type. A recipe that left it zero would claim an unknown destination, which is why the
-	// registry-level lookup treats "unset" and "user-defined" as the same honest answer.
+	// Egress is where this recipe's content goes. A zero Egress means the destination is unknown.
 	Egress Egress
-	// Evidence is the identity-evidence tier this recipe currently PRODUCES (not its
-	// target). Recipes whose extraction is uncaptured set EvidenceNone so the verifier
-	// treats them as unverified (verify-on-provision) until a stronger parser is added.
+	// Evidence is the identity-evidence tier this recipe produces. A recipe without a captured
+	// extraction sets EvidenceNone, so its calls are treated as unverified.
 	Evidence core.IdentityEvidence
-	// Env is this recipe's PER-CLI environment, merged ONTO model.HardenedEnv() at spawn time
-	// (model.HardenedEnvWith): one appended `K=V` per entry, so the recipe's value wins over both the
-	// inherited environment and the hardened base. It is an override map, never a from-scratch
-	// environment — the inherited variables a provider CLI authenticates with are preserved.
-	//
-	// It exists because non-interactive hints are NOT universally safe. `CI=1` in particular suppresses
-	// or reshapes several CLIs' stderr chrome, which is where some recipes read their identity — so it
-	// is set here, per recipe, only where it cannot cost the run a signal it actually records. Nil for
-	// a recipe that needs nothing extra.
+	// Env holds this recipe's environment overrides, merged onto model.HardenedEnv at spawn time
+	// (model.HardenedEnvWith). Hints such as CI=1 are set per recipe because some CLIs change the
+	// output identity parsing reads under them. Nil when nothing extra is needed.
 	Env map[string]string
 	// BuildArgs constructs the argv (excluding the binary) for a call. When PromptOnStdin is set it
-	// must NOT include model.Call.Prompt — the adapter delivers it separately.
+	// must not include model.Call.Prompt; the adapter delivers it separately.
 	BuildArgs func(c model.Call) []string
-	// PromptOnStdin delivers the prompt on the CLI's STANDARD INPUT instead of as an argv element.
-	//
-	// It exists because argv is not a pipe: `execve` bounds the whole argument vector, so a prompt
-	// passed as an argument is capped by the OPERATING SYSTEM at a size that has nothing to do with
-	// the model's context or with available memory. Measured on darwin/arm64 (ARG_MAX 1 MiB): a
-	// single 512 KiB argument execs, and a 1 MiB one fails with "argument list too long" before the
-	// CLI starts. Linux is stricter still per argument (MAX_ARG_STRLEN, typically 128 KiB) whatever
-	// its total allows. A workspace of any size therefore could not be reviewed through argv, and
-	// the failure lands at exec time with EMPTY stderr — nothing for clihint to classify, because
-	// the provider never ran.
-	//
-	// Standard input has no such bound: it is a stream, so the limit becomes memory, which is what
-	// the limit should have been all along. Verified 2026-08-12 against the installed CLIs, each
-	// with a real call under read-only sandboxing: `codex exec` documents "instructions are read
-	// from stdin", `claude -p` reads a piped prompt, and `gemini` appends `-p` to stdin input.
-	//
-	// A recipe that leaves this false keeps the argv form, and keeps the OS ceiling with it.
+	// PromptOnStdin delivers the prompt on standard input instead of in argv. The OS bounds argv
+	// size (on Linux, typically 128 KiB per argument), so a large prompt fails at exec time with
+	// no output; standard input is bounded only by memory.
 	PromptOnStdin bool
 	// ParseIdentity extracts the actual answering model from the output. May be nil, in which case the
 	// call records NO identity — never the requested model, which would be our own argument echoed back.
@@ -95,7 +64,7 @@ type Recipe struct {
 	// (e.g. claude-code's `result` field). May be nil (no wrapping → Stdout is the payload).
 	// Returns nil/empty when there is nothing to unwrap (e.g. fake/non-envelope output).
 	ParsePayload func(stdout, stderr []byte, c model.Call) []byte
-	// Discovery is the OPTIONAL model-listing mechanism (see discovery.go). Nil = the
+	// Discovery is the optional model-listing mechanism (see discovery.go). Nil = the
 	// CLI documents no non-interactive way to enumerate models (claude/devin/gemini).
 	Discovery *Discovery
 }
@@ -132,9 +101,8 @@ func Registry(paths map[string]string, timeout time.Duration) map[string]model.A
 // Name returns the adapter's stable registry key (the recipe name, e.g. "claude-code").
 func (a *Adapter) Name() string { return a.Recipe.Name }
 
-// Evidence reports the identity-evidence tier this adapter's recipe PRODUCES (not its target). It
-// lets a Client surface project ACP-validation readiness (whether a lane can be model-identity
-// verified) WITHOUT invoking the adapter. Satisfies the optional `interface{ Evidence() … }`.
+// Evidence reports the identity-evidence tier this adapter's recipe produces, so callers can report
+// verification readiness without invoking the adapter.
 func (a *Adapter) Evidence() core.IdentityEvidence { return a.Recipe.Evidence }
 
 func (a *Adapter) resolveBinary() (string, error) {
@@ -176,11 +144,9 @@ func (a *Adapter) Available() (bool, string) {
 	return true, "found on PATH at " + bin
 }
 
-// Probe implements model.Prober: a safe, no-model `<bin> --version` probe under a short timeout. It
-// never authenticates, sends no prompt, and answers no interactive prompt; a captured login/folder-trust
-// signature (or a hang) is classified via clihint. A version probe cannot exercise auth/trust/model, so
-// success here does NOT prove a real review call won't block — it is a diagnostic. Real model identity is
-// verified on spawned review calls, not here.
+// Probe implements model.Prober with a bounded `<bin> --version` run. It sends no prompt and answers
+// no interactive prompt; a login or folder-trust signature, or a hang, is classified via clihint.
+// Success proves only that the binary starts, not that a real call will succeed.
 func (a *Adapter) Probe(ctx context.Context) model.ProbeResult {
 	bin, err := a.resolveBinary()
 	if err != nil {
@@ -189,8 +155,7 @@ func (a *Adapter) Probe(ctx context.Context) model.ProbeResult {
 	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(pctx, bin, "--version")
-	// The SAME environment a real call gets (base + this recipe's overrides), so the probe is
-	// representative: a CLI that only misbehaves under the recipe's env would otherwise probe clean.
+	// The same environment as a real call, so recipe-specific behavior shows up in the probe.
 	cmd.Env = model.HardenedEnvWith(a.Recipe.Env)
 	// Separate bounded buffers for stdout/stderr — os/exec pumps them on distinct
 	// goroutines, so a single shared buffer would data-race (and could OOM unbounded).
@@ -222,30 +187,13 @@ func (a *Adapter) Probe(ctx context.Context) model.ProbeResult {
 var _ model.Prober = (*Adapter)(nil)
 
 // promptReachesArgv reports whether this recipe hands model.Call.Prompt to the CLI as an argv
-// element. It is the exact inverse of PromptOnStdin by the BuildArgs contract: a recipe that sets
-// PromptOnStdin must NOT put the prompt in argv, and one that leaves it false keeps the argv form.
+// element: the inverse of PromptOnStdin under the BuildArgs contract.
 func (r Recipe) promptReachesArgv() bool { return !r.PromptOnStdin }
 
 // checkPromptNotOptionLike refuses, before anything is spawned, a prompt that an argv-passing CLI
-// would parse as an OPTION instead of as the prompt.
-//
-// argv is not a byte channel. A prompt handed to a CLI as a positional argument (ollama, cursor-cli)
-// or as an option VALUE (devin-cli and agy-cli, each `-p <prompt>`) reaches that CLI's flag parser
-// before it reaches its model, so a prompt whose first byte is `-` is consumed as a flag and the CLI
-// exits on an unknown option having never seen it. None of the four argv recipes passes a `--`
-// end-of-options separator, and `--` is not universally honored, so the constraint is real.
-//
-// Measured 2026-08-30: a ballot header opening `-----` cost a live shortlist run 3 of 5 seats —
-// devin-cli exited 2 printing its usage, cursor-cli exited 1 echoing prompt text — while the three
-// PromptOnStdin recipes (codex-cli, claude-code, gemini-cli) answered normally. Quorum failed and
-// every ranked row came back withheld.
-//
-// The reason this belongs at the adapter rather than in each prompt builder is that the failure is
-// silent exactly where it is expensive: each affected lane looks like an ordinary non-zero exit, so
-// a governed run degrades to a partial panel instead of stopping, and the tally then reflects
-// whichever providers happen to read their prompt from stdin. Refusing here turns a distributed,
-// provider-shaped bias into ONE legible cause at the boundary that owns the constraint. It costs a
-// stdin recipe nothing: the check applies only where the prompt actually meets a flag parser.
+// would parse as an option. A prompt passed as a positional argument or option value reaches the
+// CLI's flag parser, so a leading `-` yields a usage error that looks like an ordinary non-zero exit.
+// Checking at the adapter reports one clear cause instead. Recipes that use stdin are unaffected.
 func checkPromptNotOptionLike(r Recipe, prompt string) error {
 	if !r.promptReachesArgv() || !strings.HasPrefix(prompt, "-") {
 		return nil
@@ -260,10 +208,8 @@ func checkPromptNotOptionLike(r Recipe, prompt string) error {
 // A non-zero exit is reported via Result.ExitCode (not a Go error) so the caller
 // classifies it; a timeout returns ExitCode 124 plus an error.
 func (a *Adapter) Invoke(ctx context.Context, c model.Call) (model.Result, error) {
-	// BEFORE resolving a binary or spending anything: a prompt this recipe would hand to a flag
-	// parser as an option is refused outright (see checkPromptNotOptionLike). 126 is the shell's
-	// "found but not executable" — the nearest honest code for a call the host declined to run.
-	// The check is pure argument inspection, so it answers identically with no CLI installed.
+	// An option-like prompt is refused before resolving a binary (see checkPromptNotOptionLike).
+	// 126 is the shell's "found but not executable" code, the nearest match for a declined call.
 	if err := checkPromptNotOptionLike(a.Recipe, c.Prompt); err != nil {
 		return model.Result{ExitCode: 126, Stderr: []byte(err.Error())}, err
 	}
@@ -280,12 +226,10 @@ func (a *Adapter) Invoke(ctx context.Context, c model.Call) (model.Result, error
 	if c.WorkDir != "" {
 		cmd.Dir = c.WorkDir // containment: run the CLI in the caller's isolated dir, not the process cwd
 	}
-	// inherited env + the universal hardened hints + THIS recipe's own overrides (appended last, so a
-	// recipe wins; auth-bearing inherited variables are never dropped).
+	// Inherited environment, hardened hints, then this recipe's overrides, which win.
 	cmd.Env = model.HardenedEnvWith(a.Recipe.Env)
-	// The prompt goes down a PIPE, not into argv, wherever the recipe supports it — see
-	// Recipe.PromptOnStdin for the measured reason. strings.Reader, so the bytes are not copied
-	// again on the way out.
+	// The prompt goes through standard input where the recipe supports it; see
+	// Recipe.PromptOnStdin.
 	if a.Recipe.PromptOnStdin {
 		cmd.Stdin = strings.NewReader(c.Prompt)
 	}
@@ -326,10 +270,9 @@ func (a *Adapter) Invoke(ctx context.Context, c model.Call) (model.Result, error
 			return res, runErr // could not start / I/O error
 		}
 	}
-	// With no parser there is NO identity — not an assumed one. Echoing back the model we requested
-	// would report a "confirmation" manufactured from our own argument, which is precisely the defect
-	// that got codex-cli's banner demoted (see codexRecipe). An empty ActualModel is the honest answer
-	// and costs nothing: identity is recorded, never enforced (../../../docs/model-identity.md).
+	// With no parser the identity stays empty rather than echoing the requested model, which would
+	// be a confirmation made from our own argument. Identity is recorded, never enforced
+	// (docs/model-identity.md).
 	if a.Recipe.ParseIdentity != nil {
 		res.ActualModel = a.Recipe.ParseIdentity(res.Stdout, res.Stderr, c)
 	}
@@ -349,10 +292,9 @@ var _ model.Adapter = (*Adapter)(nil)
 
 // --- optional per-invocation debug (opt-in via WithDebug) ---
 
-// WithDebug is retained for the apps' existing wiring; it delegates to model.WithDebug so shell and
-// the ACP adapter share ONE debug writer key (enable --debug once, every adapter emits). Resolved
-// binary + argv, exit code, duration, extracted identity + evidence tier, and captured stderr/stdout
-// go to w. Off by default; for troubleshooting an adapter/provider and bringing up a new adapter.
+// WithDebug enables per-invocation debug output to w by delegating to model.WithDebug, so every
+// adapter shares one debug writer. The output covers the binary and argv, exit code, duration,
+// extracted identity and evidence tier, and captured streams. Debug output is off by default.
 func WithDebug(ctx context.Context, w io.Writer) context.Context { return model.WithDebug(ctx, w) }
 
 func debugWriter(ctx context.Context) io.Writer { return model.DebugWriter(ctx) }

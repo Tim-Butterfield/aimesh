@@ -1,22 +1,9 @@
 package cli
 
-// `aimesh clean` — remove prior run artifacts.
-//
-// It is a SHARED command rather than a per-domain one because the thing being cleaned is shared: both
-// domains write under one state root, and where they write depends on whether `init` has been run,
-// not on which domain ran. A user asking "what is this taking up, and how do I get rid of it" is
-// asking one question, and answering it twice under two nouns would be the tool's internal structure
-// leaking into the request.
-//
-// TWO PROPERTIES DECIDE ITS SHAPE:
-//
-//  1. IT SWEEPS BOTH LOCATIONS. Output lands in the project `.aimesh/` when the tree was init'ed and
-//     in the OS temp directory when it was not. Cleaning only the first would leave every artifact of
-//     every uninitialized run exactly where the user cannot see it.
-//  2. IT NEVER PICKS A RETENTION POLICY. With no selector it reports an inventory and stops. Deleting
-//     review artifacts is deleting evidence — the run record holds the findings, the decisions, the
-//     patch and, for an apply, the undo — so what to keep is the user's judgement and the command
-//     refuses to guess it.
+// `aimesh clean` removes prior run artifacts for both domains. It sweeps the project .aimesh/
+// directory and the OS temp directory that uninitialized trees write to. With no selector it only
+// reports an inventory: a run directory holds that run's findings, decisions, patch and undo data,
+// so the retention policy is the user's to choose.
 
 import (
 	"encoding/json"
@@ -32,9 +19,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/localstate"
 )
 
-// cleanComponents are the state components whose runs this command manages. It is the fixed pair the
-// tool actually writes, named here rather than discovered, so a stray directory in the state root is
-// never swept as though it were a component's runs.
+// cleanComponents are the state components this command manages. They are listed rather than
+// discovered, so a stray directory in the state root is never swept.
 var cleanComponents = []string{"review", "explore"}
 
 // cleanReport is the `--json` projection: every location considered, whether it existed, and every
@@ -64,6 +50,7 @@ type cleanRt struct {
 	Skipped  string `json:"skipped,omitempty"`
 }
 
+// runClean removes or inventories prior run directories.
 func runClean(args []string, out, errw io.Writer) int {
 	fs := flag.NewFlagSet("clean", flag.ContinueOnError)
 	fs.SetOutput(errw)
@@ -86,8 +73,7 @@ func runClean(args []string, out, errw io.Writer) int {
 		}
 		sel.OlderThan = d
 	}
-	// TWO SELECTORS IS AMBIGUOUS, not a conjunction. "--keep 3 --older-than 7d" could mean either
-	// rule, and picking one silently would delete on a policy the user did not write.
+	// Two selectors are ambiguous rather than combined, so they are refused.
 	if n := selectorCount(sel); n > 1 {
 		fmt.Fprintln(errw, "aimesh clean: name ONE of --all, --keep or --older-than — two selectors do not combine, and guessing which one wins would delete on a rule you did not write")
 		return int(fault.Usage)
@@ -159,8 +145,7 @@ func selectorLabel(s localstate.CleanSelector) string {
 	}
 }
 
-// parseCleanDuration accepts a Go duration and additionally `<n>d` for days, because retention is
-// spoken in days and `168h` is the kind of arithmetic a user should not have to do to delete a file.
+// parseCleanDuration accepts a Go duration or a day count such as 7d.
 func parseCleanDuration(raw string) (time.Duration, error) {
 	s := strings.TrimSpace(raw)
 	if days, ok := strings.CutSuffix(s, "d"); ok {
@@ -177,9 +162,8 @@ func parseCleanDuration(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-// printClean renders the human report. With no selector it is an INVENTORY plus the three ways to
-// select — a `clean` that deletes nothing has to say what it saw and how to act on it, or it reads
-// as a command that failed.
+// printClean renders the human report. Without a selector it lists the inventory and the ways to
+// select runs for removal.
 func printClean(w io.Writer, rep cleanReport, sel localstate.CleanSelector) {
 	for _, loc := range rep.Locations {
 		if !loc.Exists {
@@ -223,8 +207,6 @@ func printClean(w io.Writer, rep cleanReport, sel localstate.CleanSelector) {
 		verb = "Would remove"
 	}
 	fmt.Fprintf(w, "\n%s %d run(s), %s. %d remaining.\n", verb, rep.RemovedRuns, humanBytes(rep.FreedBytes), rep.RemainingRuns)
-	// Said once, at the end, where it is a reason to run this rather than a warning about having
-	// run it: the artifacts hold verbatim copies of everything the models were shown.
 	fmt.Fprintln(w, "Run artifacts hold verbatim copies of everything the models were shown, so this frees disk")
 	fmt.Fprintln(w, "and removes those copies. It cannot be undone.")
 }

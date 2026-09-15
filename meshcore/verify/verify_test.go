@@ -1,34 +1,10 @@
 package verify
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/Tim-Butterfield/aimesh/meshcore/core"
 )
-
-type expectedIdentity struct {
-	RequestedModel string `json:"requestedModel"`
-	Evidence       string `json:"evidence"`
-	ExpectedActual string `json:"expectedActual"`
-	ExpectedStatus string `json:"expectedStatus"`
-	FixtureKind    string `json:"fixtureKind"` // "real" | "synthetic"
-}
-
-func readExpected(t *testing.T, path string) expectedIdentity {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	var e expectedIdentity
-	if err := json.Unmarshal(b, &e); err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	return e
-}
 
 func TestClassifyIdentity(t *testing.T) {
 	cases := []struct {
@@ -71,68 +47,6 @@ func TestClassifyIdentity(t *testing.T) {
 	}
 }
 
-func TestParseSelfReport(t *testing.T) {
-	cases := map[string]string{
-		"claude-opus-4-8":                "claude-opus-4-8",
-		"  gpt-5.5  ":                    "gpt-5.5",
-		"`Gemini 3.1 Pro (High)`":        "Gemini 3.1 Pro (High)",
-		"model: claude-opus-4-8-medium":  "claude-opus-4-8-medium",
-		"I am gpt-5-4-medium":            "gpt-5-4-medium",
-		"\n\n  qwen2.5-coder:14b\nextra": "qwen2.5-coder:14b",
-		"":                               "",
-		"   ":                            "",
-	}
-	for in, want := range cases {
-		if got := ParseSelfReport([]byte(in)); got != want {
-			t.Errorf("ParseSelfReport(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// TestIdentityFixtures parses each sanitized adapter fixture's stdout as a self-report
-// and asserts the classification — proving the parser contract without any real CLI.
-// Fixtures are synthetic (see each notes.md).
-func TestIdentityFixtures(t *testing.T) {
-	root := filepath.Join("..", "..", "testdata", "adapters")
-	var dirs []string
-	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
-			if _, e := os.Stat(filepath.Join(p, "expected-identity.json")); e == nil {
-				dirs = append(dirs, p)
-			}
-		}
-		return nil
-	})
-	if len(dirs) == 0 {
-		t.Fatalf("no identity fixtures found under %s", root)
-	}
-	for _, dir := range dirs {
-		t.Run(filepath.Base(filepath.Dir(dir))+"/"+filepath.Base(dir), func(t *testing.T) {
-			exp := readExpected(t, filepath.Join(dir, "expected-identity.json"))
-			if exp.FixtureKind != "real" && exp.FixtureKind != "synthetic" {
-				t.Errorf("fixtureKind = %q, want real|synthetic (must be explicit)", exp.FixtureKind)
-			}
-			// This test exercises the SELF-REPORT parser; adapter-specific evidence
-			// (e.g. claude envelope) is parsed + tested in its adapter package.
-			if exp.Evidence != string(core.EvidenceSelfReport) {
-				return
-			}
-			stdout, _ := os.ReadFile(filepath.Join(dir, "stdout.txt"))
-			actual := ParseSelfReport(stdout)
-			if actual != exp.ExpectedActual {
-				t.Errorf("parsed actual = %q, want %q", actual, exp.ExpectedActual)
-			}
-			status, _ := ClassifyIdentity(core.IdentityEvidence(exp.Evidence), exp.RequestedModel, actual, "")
-			if status != exp.ExpectedStatus {
-				t.Errorf("status = %q, want %q", status, exp.ExpectedStatus)
-			}
-			if status == core.VerifVerified {
-				t.Error("self_report must never classify as verified")
-			}
-		})
-	}
-}
-
 // TestCapEvidence proves the evidence-authority boundary: a produced tier is clamped to the adapter's
 // declared ceiling, so a self_report/none adapter can never be classified on strong evidence and
 // faked as verified — even if it returns a matching model with an inflated Evidence.
@@ -148,8 +62,8 @@ func TestCapEvidence(t *testing.T) {
 			t.Errorf("CapEvidence(%q,%q)=%q want %q", c.ceiling, c.produced, got, c.want)
 		}
 	}
-	// The guardrail end-to-end: after capping to a self_report ceiling, a matching model can NEVER be
-	// classified as verified even though the produced tier claimed a strong envelope.
+	// End to end: after capping to a self_report ceiling, a matching model is never classified as
+	// verified, even though the produced tier claimed an envelope.
 	capped := CapEvidence(core.EvidenceSelfReport, core.EvidenceEnvelope)
 	if st, ok := ClassifyIdentity(capped, "opus", "opus", ""); ok && st == core.VerifVerified {
 		t.Errorf("a self_report-ceiling adapter must never classify verified, got %q,%v", st, ok)
@@ -172,9 +86,8 @@ func TestParseSelfReportJSON(t *testing.T) {
 	}
 }
 
-// TestParseSelfReportEnvelope proves the wrapper-aware parser: it reads BOTH the review-path wrapper
-// ({reviewmeshIdentity, result}) and the bare probe object, is fence-tolerant, and does NOT read a
-// bare ReviewerResult (no identity) as a self-report.
+// ParseSelfReportEnvelope reads both the wrapped form ({reviewmeshIdentity, result}) and the bare probe
+// object, tolerates fences, and does not read a result with no identity as a self-report.
 func TestParseSelfReportEnvelope(t *testing.T) {
 	sr, ok := ParseSelfReportEnvelope([]byte(`{"reviewmeshIdentity":{"model":"Gemini 3.1 Pro","effort":"High","source":"self_report"},"result":{"schemaVersion":1}}`))
 	if !ok || sr.Model != "Gemini 3.1 Pro" || sr.Effort != "High" {
@@ -205,13 +118,13 @@ func TestExtractWrappedResult(t *testing.T) {
 	if got := ExtractWrappedResult([]byte(`{"schemaVersion":1,"verdict":"approve"}`)); got != nil {
 		t.Errorf("a bare result must not be treated as a wrapper, got %q", got)
 	}
-	// A SECOND top-level object must be rejected (held to the same single-object rule as a bare result).
+	// A second top-level object is rejected, as it is for a bare result.
 	if got := ExtractWrappedResult([]byte(`{"reviewmeshIdentity":{"model":"X"},"result":{"a":1}} {"extra":true}`)); got != nil {
 		t.Errorf("a second top-level object must be rejected, got %q", got)
 	}
 }
 
-// TestAgySelfReportMatching proves the EXACT (non-fuzzy) Agy display-name+effort normalization: a
+// TestAgySelfReportMatching proves the exact (non-fuzzy) Agy display-name+effort normalization: a
 // display+effort self-report matches (self_reported), an effort synonym matches, but a slug non-match,
 // a version drift, and a missing effort are all unknown (NOT self_reported, NOT a mismatch halt).
 func TestAgySelfReportMatching(t *testing.T) {

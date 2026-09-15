@@ -7,8 +7,8 @@ import (
 	"syscall"
 )
 
-// FILE_ATTRIBUTE_REPARSE_POINT marks junctions, mount points, and other reparse
-// points (not only symlinks) on Windows.
+// fileAttributeReparsePoint is FILE_ATTRIBUTE_REPARSE_POINT, which marks junctions, mount points and
+// other reparse points (not only symlinks) on Windows.
 const fileAttributeReparsePoint = 0x400
 
 // hasReparseAttr reports whether a Windows entry carries the reparse-point

@@ -22,7 +22,7 @@ func legacyEnv() *proto.RequestEnv {
 	return &proto.RequestEnv{Method: "tools/call", Era: proto.EraLegacy}
 }
 
-// Each call's scope is built from the paths THAT call declares, so two calls never share one.
+// Each call's scope is built from the paths that call declares.
 func TestCallScope_IsBuiltFromTheCallsOwnPaths(t *testing.T) {
 	parent := t.TempDir()
 	a, b := mkdir(t, parent, "a"), mkdir(t, parent, "b")

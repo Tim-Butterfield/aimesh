@@ -120,16 +120,16 @@ func TestFramer_WriteMessageIsAtomicUnderConcurrentWriters(t *testing.T) {
 			f := newFramer(framing, strings.NewReader(""), w)
 			want := map[string]bool{}
 			var wg sync.WaitGroup
-			for g := 0; g < writers; g++ {
-				for i := 0; i < each; i++ {
+			for g := range writers {
+				for i := range each {
 					want[fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"m%d"}`, g, i)] = true
 				}
 			}
-			for g := 0; g < writers; g++ {
+			for g := range writers {
 				wg.Add(1)
 				go func(g int) {
 					defer wg.Done()
-					for i := 0; i < each; i++ {
+					for i := range each {
 						if err := f.WriteMessage([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"m%d"}`, g, i))); err != nil {
 							t.Errorf("write: %v", err)
 							return

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -257,9 +258,7 @@ func defaultPanel() map[string]any {
 // defaultPanel.
 func exploreArgs(extra map[string]any) map[string]any {
 	args := map[string]any{"purpose": "choose a datastore", "criteria": []string{"cost", "latency"}, "mode": "map", "panel": defaultPanel()}
-	for k, v := range extra {
-		args[k] = v
-	}
+	maps.Copy(args, extra)
 	if p, has := args["panel"]; has && p == nil {
 		delete(args, "panel")
 	}
@@ -694,7 +693,7 @@ func TestPanel_CompositionIsFailClosedAgainstTheLaunchSet(t *testing.T) {
 	}
 	// The fan-out cap is a spend control: over-cap fails, it is never clamped.
 	seats := make([]any, 0, 17)
-	for i := 0; i < 17; i++ {
+	for i := range 17 {
 		seats = append(seats, map[string]any{"adapter": "fake", "model": "m" + string(rune('a'+i))})
 	}
 	_, err = s.CallTool(ctx, &sdk.CallToolParams{Name: "explore", Arguments: exploreArgs(map[string]any{"panel": map[string]any{

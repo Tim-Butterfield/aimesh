@@ -36,8 +36,8 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// launchAgent starts the child agent the way a host configuration does: launched with the internal
-// fake adapter, and nothing else set up. allowWrites adds `--allow-writes`.
+// launchAgent starts the child agent as a host configuration would, with only the internal fake
+// adapter. allowWrites adds --allow-writes.
 func launchAgent(t *testing.T, framing string, env []string, allowWrites bool) (*Client, func() error, error) {
 	t.Helper()
 	return LaunchWith(testBin, Options{Framing: framing, Adapters: []string{"fake"}, AllowWrites: allowWrites, Env: env})
@@ -52,8 +52,8 @@ func workspace(t *testing.T) string {
 	return ws
 }
 
-// env isolates the child from the developer's machine: a fresh AIMESH_HOME (the durable session
-// store), a temp artifact directory, a deterministic fake scenario, and the unlocked internal fake.
+// env isolates the child: a fresh AIMESH_HOME, a temp artifact directory, a deterministic fake
+// scenario and the internal fake enabled.
 func env(t *testing.T) []string {
 	t.Helper()
 	return envIn(t, t.TempDir())
@@ -70,7 +70,7 @@ func envIn(t *testing.T, home string) []string {
 	)
 }
 
-// panelMeta is the `_meta` a review turn carries: every seat is the fake adapter.
+// panelMeta returns the _meta a review turn carries, with every seat on the fake adapter.
 func panelMeta() map[string]any {
 	seat := map[string]any{"adapter": "fake", "model": "fake-model"}
 	return map[string]any{"reviewmesh": map[string]any{
@@ -78,8 +78,7 @@ func panelMeta() map[string]any {
 	}}
 }
 
-// promptRM extracts the reviewmesh result block from an ACP v1 PromptResponse result
-// (`_meta.reviewmesh`), where status/mode/findings/runDir live (not at the ACP top level).
+// promptRM returns a PromptResponse result's _meta.reviewmesh block.
 func promptRM(t *testing.T, res map[string]any) map[string]any {
 	t.Helper()
 	meta, _ := res["_meta"].(map[string]any)
@@ -90,8 +89,7 @@ func promptRM(t *testing.T, res map[string]any) map[string]any {
 	return rm
 }
 
-// updEventType reads the reviewmesh eventType from an ACP v1 SessionUpdate
-// (update._meta.reviewmesh.eventType).
+// updEventType returns update._meta.reviewmesh.eventType from a SessionUpdate.
 func updEventType(upd map[string]any) string {
 	meta, _ := upd["_meta"].(map[string]any)
 	rm, _ := meta["reviewmesh"].(map[string]any)
@@ -99,7 +97,7 @@ func updEventType(upd map[string]any) string {
 	return s
 }
 
-// The minimal required ACP flow over a real subprocess, for both framings, on a fresh home.
+// TestACP_ReportFlow runs the minimal ACP flow over a subprocess, for both framings, on a fresh home.
 func TestACP_ReportFlow(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
@@ -121,8 +119,7 @@ func TestACP_ReportFlow(t *testing.T) {
 			if init.Error != nil {
 				t.Fatalf("initialize error: %+v", init.Error)
 			}
-			// ACP v1 initialize result: integer protocolVersion 1 + agentCapabilities; no
-			// reviewmesh-internal capabilities/serverInfo top-level fields.
+			// ACP v1 initialize result: integer protocolVersion 1 and agentCapabilities.
 			if pv, ok := init.Result["protocolVersion"].(float64); !ok || pv != 1 {
 				t.Errorf("initialize protocolVersion must be numeric 1, got %#v", init.Result["protocolVersion"])
 			}
@@ -164,8 +161,8 @@ func TestACP_ReportFlow(t *testing.T) {
 	}
 }
 
-// The ACP v1 session flow over a real subprocess: initialize → session/new →
-// session/prompt (report-mode, fake adapter) → shutdown — for BOTH framings.
+// TestACP_SessionFlow runs initialize, session/new, a report session/prompt and shutdown over a
+// subprocess, for both framings.
 func TestACP_SessionFlow(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
@@ -211,8 +208,8 @@ func TestACP_SessionFlow(t *testing.T) {
 	}
 }
 
-// session/prompt streams ordered session/update progress notifications (JSON-RPC notifications, no
-// id) tagged with the session id, then the terminal response — for both framings.
+// session/prompt streams ordered session/update notifications tagged with the session id before the
+// final response, for both framings.
 func TestACP_SessionPromptProgress(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
@@ -291,8 +288,7 @@ func TestACP_SessionPromptProgress(t *testing.T) {
 	}
 }
 
-// session/load is not implemented (loadSession:false; reconnect uses session/resume) →
-// method-not-found, both framings.
+// session/load returns method-not-found, for both framings.
 func TestACP_SessionLoadMethodNotFound(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
@@ -322,8 +318,8 @@ func TestACP_SessionLoadMethodNotFound(t *testing.T) {
 	}
 }
 
-// session/prompt with host-mediated inline content (no workspace path): the agent materializes it to
-// a temp workspace and reviews it end-to-end — both framings.
+// session/prompt with inline content and no workspace path is materialized and reviewed end to end,
+// for both framings.
 func TestACP_InlineWorkspace(t *testing.T) {
 	for _, framing := range []string{acp.FramingNewline, acp.FramingContentLength} {
 		t.Run(framing, func(t *testing.T) {
@@ -378,7 +374,7 @@ func TestACP_InvalidRequests(t *testing.T) {
 	}
 	defer stop()
 
-	// unknown method → method-not-found error
+	// An unknown method returns method-not-found.
 	unknown, err := c.Call("bogus-method", nil)
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -387,7 +383,7 @@ func TestACP_InvalidRequests(t *testing.T) {
 		t.Error("unknown method should return a JSON-RPC error")
 	}
 
-	// review with no workspace → invalid-params error (clean, no crash)
+	// review without a workspace returns invalid params.
 	noWs, err := c.Call("review", map[string]any{"mode": "report"})
 	if err != nil {
 		t.Fatalf("call: %v", err)
@@ -397,8 +393,7 @@ func TestACP_InvalidRequests(t *testing.T) {
 	}
 }
 
-// A child launched with no adapter starts, and a review turn is refused with a message naming the
-// launch flag — on a fresh home with nothing set up.
+// A child launched with no adapter starts, and a review turn is refused naming the launch flag.
 func TestACP_NoAdapterRefusesAReviewTurnByName(t *testing.T) {
 	ws := workspace(t)
 	c, stop, err := Launch(testBin, acp.FramingNewline, env(t), nil)
@@ -415,8 +410,8 @@ func TestACP_NoAdapterRefusesAReviewTurnByName(t *testing.T) {
 	}
 }
 
-// Without --allow-writes, an apply turn over a REAL subprocess is refused, naming the grant and the
-// patch turn, and the workspace is left untouched.
+// Without --allow-writes, an apply turn over a subprocess is refused, naming the grant and the patch
+// turn, and the workspace is unchanged.
 func TestACP_ApplyWithoutAllowWritesIsRefused(t *testing.T) {
 	ws := workspace(t)
 	c, stop, err := launchAgent(t, acp.FramingNewline, env(t), false)
@@ -456,8 +451,8 @@ func TestACP_ApplyWithoutAllowWritesIsRefused(t *testing.T) {
 	}
 }
 
-// canonical resolves a path the way the surface's run-handle check does, so two spellings of one
-// directory compare equal.
+// canonical resolves v as the surface's run-handle check does, so two spellings of one directory
+// compare equal.
 func canonical(t *testing.T, v any) string {
 	t.Helper()
 	p, _ := v.(string)
@@ -467,8 +462,8 @@ func canonical(t *testing.T, v any) string {
 	return p
 }
 
-// With --allow-writes, the two-turn write applies over a real subprocess: the report turn's RESPONSE
-// carries the `runDir`, and the apply turn keyed on that handle writes the set turn one adjudicated.
+// With --allow-writes, the two-turn write applies over a subprocess: the report turn returns runDir,
+// and the apply turn keyed on it writes the set the report adjudicated.
 func TestACP_AllowWritesHonorsApply(t *testing.T) {
 	ws := workspace(t)
 	c, stop, err := launchAgent(t, acp.FramingNewline, env(t), true)
@@ -518,8 +513,8 @@ func TestACP_AllowWritesHonorsApply(t *testing.T) {
 	if rm["modeDegraded"] != nil {
 		t.Errorf("a granted apply must not degrade: %+v", rm)
 	}
-	// TWO runs, TWO handles: the write has its own run directory and names the run whose decisions
-	// it applied. `sourceRunDir` is the canonical directory, so it is compared canonically.
+	// The write has its own run directory and names the run whose decisions it applied; sourceRunDir
+	// is canonical, so compare canonically.
 	if canonical(t, rm["sourceRunDir"]) != canonical(t, sourceRun) {
 		t.Errorf("sourceRunDir = %v, want the report turn's runDir %q", rm["sourceRunDir"], sourceRun)
 	}
@@ -535,14 +530,13 @@ func TestACP_AllowWritesHonorsApply(t *testing.T) {
 	}
 }
 
-// Real CROSS-PROCESS durability: subprocess A (a shared AIMESH_HOME) creates and persists a session
-// and exits; a SEPARATE subprocess B advertises sessionCapabilities.resume, resumes that session from
-// the durable store, and runs a session/prompt that omits `workspace` using the restored cwd.
+// Subprocess A persists a session in a shared AIMESH_HOME and exits; subprocess B resumes it and runs
+// a session/prompt that omits workspace, using the restored cwd.
 func TestACP_ResumeAcrossSubprocesses(t *testing.T) {
 	home := t.TempDir()
 	ws := workspace(t)
 
-	// Instance A: create + persist a session, then terminate.
+	// Instance A: create and persist a session, then exit.
 	cA, stopA, err := launchAgent(t, acp.FramingNewline, envIn(t, home), false)
 	if err != nil {
 		t.Fatalf("launch A: %v", err)
@@ -562,7 +556,7 @@ func TestACP_ResumeAcrossSubprocesses(t *testing.T) {
 		t.Errorf("server A did not terminate cleanly: %v", err)
 	}
 
-	// Instance B (a fresh process, same AIMESH_HOME): resume + prompt without workspace.
+	// Instance B, a fresh process with the same AIMESH_HOME: resume, then prompt without workspace.
 	cB, stopB, err := launchAgent(t, acp.FramingNewline, envIn(t, home), false)
 	if err != nil {
 		t.Fatalf("launch B: %v", err)

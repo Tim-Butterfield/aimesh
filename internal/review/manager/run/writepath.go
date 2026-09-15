@@ -1,32 +1,17 @@
 package run
 
-// THE GOVERNED WRITE PATH — the ONE place in this repository that turns an adjudicated finding
-// into bytes in a live workspace.
+// governedWrite is the only code that turns adjudicated findings into bytes in a live workspace. The
+// journal, content pins, cancel/commit gate, per-finding staging, receipt and edit-target
+// authorization live here, so they hold on every surface: Manager.Remediate and handleMode's
+// patch/apply branch both call it, and neither commits on its own.
 //
-// It exists so there is exactly ONE. The hardening — a journal, content pins, a cancel/commit gate,
-// a receipt and edit-target authorization — lives here and therefore holds on EVERY surface.
-// A second write path is how those guarantees diverge: a branch that commits with a plain, unpinned
-// `ws.Commit` re-opens the data-loss defect they close (an editor's in-place save during a long
-// remediation, silently overwritten from the stale base) on whichever surface skipped them.
+// Callers differ only in inputs:
 //
-// So the guarantees are never copied: they are this function. `Manager.Remediate` (remediate.go)
-// and `handleMode`'s patch/apply branch — the branch the CLI and the ACP surface reach — are both
-// callers of `governedWrite`, and neither of them contains a `Commit` call of its own. What differs
-// between them is INPUT, never rule:
-//
-//   - WHERE THE PINS COME FROM. A from-run remediation is decided against base hashes captured by
-//     an EARLIER run (the report run a human read), so those pins ride the request and are
-//     re-verified against the live tree before anything is copied. A full cycle decides against the
-//     isolated copy it just took, so it RECORDS its pins from that copy — the exact bytes its edits
-//     are derived from. Either way the pin means the same thing at the commit: "this destination is
-//     still the content this write was decided against, or nothing is written".
-//   - WHETHER OUT-OF-BAND TRUSTED ROOTS GATE THE WORKSPACE. They do for a decision set that
-//     travelled (it can outlive the roots its run was launched with); they deliberately do not for a
-//     full cycle, because an agent surface may review a directory IT materialized, which no human
-//     root covers (see Request.TrustedRoots).
-//
-// Everything else — the journal, the cancel/commit gate, per-finding staging, the commit-attempt
-// marker, the pinned commit, the receipt — is this function, once, for every surface.
+//   - Pins: a fromRun remediation carries base hashes from the report run and re-verifies them
+//     against the live tree before copying; a full cycle records pins from the isolated copy its edits
+//     derive from. Either way a destination whose content changed is never written.
+//   - Trusted roots: a stored decision set is checked against the roots in force now; a full cycle is
+//     not, because an agent surface may review a directory it materialized (see Request.TrustedRoots).
 
 import (
 	"context"
@@ -49,198 +34,140 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// defaultWriteArtifacts is the run-relative directory a write window records itself in. It is the
-// path docs/mcp.md and docs/security.md name, so the FIRST write window of any run — every MCP
-// remediation, and the first cycle of a CLI/ACP apply — keeps it.
+// defaultWriteArtifacts is the run-relative directory a write window records itself in, as named in
+// docs/mcp.md and docs/security.md. The first write window of any run uses it.
 const defaultWriteArtifacts = "remediation"
 
-// Stable MACHINE reason codes for a finding that produced no write. They are recorded on the
-// receipt and mapped to a decision state by the caller, so both surfaces spell the same outcome
-// the same way.
+// Reason codes for a finding that produced no write, recorded on the receipt.
 const (
-	// reasonTargetNotShownOrExcluded — the finding's file is empty, excluded/internal, or was
-	// never shown to a reviewer.
+	// reasonTargetNotShownOrExcluded: the file is empty, excluded, or was never shown to a reviewer.
 	reasonTargetNotShownOrExcluded = "target_not_shown_or_excluded"
-	// reasonTargetAbsentFromCopy — the finding's file was not in this run's isolated copy (it was
-	// withheld for a containment reason, or it stopped existing between the copies), so there is
-	// no base to write against and nothing to edit.
+	// reasonTargetAbsentFromCopy: the file is not in this window's isolated copy, so there is no
+	// base to edit.
 	reasonTargetAbsentFromCopy = "target_absent_from_copy"
-	// reasonNoEditProposed — neither the model nor the deterministic engine produced an edit.
+	// reasonNoEditProposed: neither the model nor the deterministic engine produced an edit.
 	reasonNoEditProposed = "no_edit_proposed"
-	// reasonEditFailed — at least one of the finding's hunks did not apply, so the finding was
-	// rolled back out of the copy whole.
+	// reasonEditFailed: at least one hunk did not apply, so the whole finding was rolled back.
 	reasonEditFailed = "edit_failed"
 )
 
-// ReasonApplyRefusedProtectedPath is the RUN-LEVEL machine reason code for a remediation that
-// completed with at least one protected-path refusal. It is the code the CLI reports beside exit
-// 7 and the code the projection carries; the PER-FINDING code on the receipt row is
-// `review.ApplyRefusalProtectedPath` ("protected_path").
-//
-// The two are deliberately different strings. `protected_path` answers "why was THIS finding not
-// applied"; `apply_refused_protected_path` answers "why did this RUN not exit 0" — and a reader
-// who saw only the per-finding code beside an exit code would have to infer that the run-level
-// consequence exists at all.
+// ReasonApplyRefusedProtectedPath is the run-level reason code for a remediation that completed with
+// at least one protected-path refusal (exit 7). Each refused receipt row carries the per-finding code
+// review.ApplyRefusalProtectedPath.
 const ReasonApplyRefusedProtectedPath = "apply_refused_protected_path"
 
-// The two ways a SELECTIVE APPLY refuses. Both are refusals BEFORE the write window — nothing is
-// copied, nothing is planned and nothing is written — because both mean the caller asked for a
-// narrowing that names no writable finding, and the fail-closed answer to "write exactly these
-// zero things" is to write nothing and say so, not to fall back to writing everything.
+// Reason codes for a selective apply that names no writable finding. Both refuse before the write
+// window, so nothing is copied or written.
 const (
-	// ReasonSelectionEmpty — `select` was supplied and is empty. An empty narrowing filter must
-	// never mean "apply everything": that is the one outcome a caller can neither detect nor
-	// survive, and it is the same fail-closed discipline `intersectRoots` applies to roots.
+	// ReasonSelectionEmpty: `select` was supplied and is empty; an empty filter never means
+	// "apply everything".
 	ReasonSelectionEmpty = "apply_selection_empty"
-	// ReasonSelectionMatchedNothing — every fingerprint in `select` named a finding that is not in
-	// this run's accepted set. The design names the empty-list case; this is the same caller error
-	// arriving one step later (a mistyped or stale fingerprint list), and it gets the same answer
-	// for the same reason. A PARTIAL match is NOT this: it proceeds, and the unmatched entries are
-	// reported on the result and recorded on the receipt.
+	// ReasonSelectionMatchedNothing: no fingerprint in `select` names a finding in the accepted set.
+	// A partial match proceeds and reports the unmatched entries.
 	ReasonSelectionMatchedNothing = "apply_selection_matched_nothing"
 )
 
-// findingWrite is one accepted finding's write outcome, as the write path observed it. It is what a
-// caller needs to finalize the finding's decision state without re-deriving anything.
+// findingWrite is one accepted finding's write outcome, enough for the caller to finalize its
+// decision state.
 type findingWrite struct {
 	FindingID string
 	File      string
-	// Applied is true when the finding's hunks are in the bytes that were committed (apply) or in
-	// the diff that was produced (patch).
+	// Applied is true when the finding's hunks are in the committed bytes (apply) or the produced
+	// diff (patch).
 	Applied bool
-	// Skipped is true when the finding never produced a write at all: its target was not shown,
-	// excluded or empty, or no edit was proposed for it. It is a different disposition from
-	// "attempted and failed", and callers render it differently.
+	// Skipped is true when the finding produced no write: its target was not shown, excluded or
+	// empty, or no edit was proposed.
 	Skipped bool
-	// Refused is true when the finding's target resolved to a PROTECTED PATH. It is a third
-	// disposition, not a flavour of Skipped: a skip is an absence of anything to write, whereas a
-	// refusal is the host declining a write the model did propose — and only the refusal makes
-	// the run report itself as not cleanly successful.
+	// Refused is true when the finding's target is a protected path. Unlike a skip, a refusal
+	// declines a proposed write and marks the run as not cleanly successful.
 	Refused bool
 	// Reason is the stable machine code for a finding that was not applied.
 	Reason string
 }
 
-// writeRequest is one governed write. Its fields are inputs — nothing here selects a different
-// RULE, only a different source for a fact the rule needs.
+// writeRequest is one governed write. Its fields supply facts to the write rules; none selects a
+// different rule.
 type writeRequest struct {
-	// Workspace is the live root being written. Identity is that root's canonical identity as
-	// captured by the thing that decided this write (the report run, for a from-run remediation;
-	// the start of the cycle, for a full cycle). An unbound identity is a halt: a path is not a
-	// repository.
+	// Workspace is the live root being written, and Identity its canonical identity as captured when
+	// the write was decided. An unbound identity halts.
 	Workspace string
 	Identity  WorkspaceIdentity
-	// Mode must be ModePatch or ModeApply; the caller has already refused ModeReport.
+	// Mode is ModePatch or ModeApply.
 	Mode review.Mode
-	// Plan is the RESOLVED plan, used only to select the author_remediator lane.
+	// Plan is the resolved plan, used only to select the author_remediator lane.
 	Plan review.RunPlan
-	// SourceRunID names the run whose decision set this applies ("" when it is this run's own).
+	// SourceRunID names the run whose decision set this applies; empty for this run's own.
 	SourceRunID string
 	// Artifacts is the run-relative directory for this window's journal, commit-attempt marker and
-	// receipt. Empty means defaultWriteArtifacts. A run with more than one write window (a
-	// converging apply) gives its later windows their own directory so no journal is overwritten.
+	// receipt; empty means defaultWriteArtifacts.
 	Artifacts string
-	// Findings / Decisions are the adjudicated set, index-aligned. They are RECONCILED BY FINDING
-	// ID here, never trusted by position.
+	// Findings and Decisions are the adjudicated set. They are reconciled by finding id, never by
+	// position.
 	Findings  []review.Finding
 	Decisions []review.Decision
-	// Accept reports whether a reconciled decision authorizes a write. A from-run remediation
-	// accepts the report run's `reported_valid` set; a full cycle accepts its actionable,
-	// non-refused decisions.
+	// Accept reports whether a reconciled decision authorizes a write.
 	Accept func(review.Decision) bool
-	// Select, when non-nil, NARROWS the accepted set to the findings whose HOST-COMPUTED
-	// fingerprint it names. nil means no narrowing.
-	//
-	// It composes with Accept rather than replacing it: `Accept` decides what a run is ALLOWED to
-	// write, `Select` decides which of that the caller ASKED to write, and the intersection is what
-	// happens. Like the `roots` narrowing argument it can only reduce — a fingerprint naming
-	// nothing in this set is dropped, never resolved against another run, and never fetched from
-	// anywhere. That is why threading it here, into the one governed write path, reaches the CLI,
-	// ACP and MCP at once and cannot mean three things on three surfaces.
+	// Select, when non-nil, narrows the accepted set to findings whose host-computed fingerprint it
+	// names. Accept decides what may be written and Select what the caller asked for; the write is
+	// their intersection, and a selection can only reduce it.
 	Select []string
-	// SelectPrimary marks the window whose selection outcome is REPORTED and whose "matched
-	// nothing" is a refusal.
-	//
-	// A converging apply opens a write window PER CYCLE and the selection narrows every one of
-	// them. Only the first is measured against the caller's list, and the reason is not a nicety:
-	// by cycle 2 a selected finding may legitimately be absent because cycle 1 applied it, so
-	// reporting it as an unmatched selector would be a false alarm and refusing the cycle over it
-	// would abort a run that did exactly what was asked.
+	// SelectPrimary marks the window whose selection outcome is reported and whose empty match is a
+	// refusal. Later cycles of a converging apply are not measured, because a selected finding may
+	// already have been applied.
 	SelectPrimary bool
-	// Shown is the set of workspace-relative files a reviewer was actually shown.
+	// Shown is the set of workspace-relative files a reviewer was shown.
 	Shown map[string]bool
-	// Pins is path → the content digest this write was decided against. When PinsFromCopy is set it
-	// is IGNORED and recorded from the isolated copy instead (see the file comment). A nil map is
-	// normalized to an empty one: a pinned commit is exhaustive, and "no pins" must mean "nothing
-	// may be written", never "write everything unchecked".
+	// Pins maps each path to the content digest this write was decided against. PinsFromCopy records
+	// them from the isolated copy instead. A nil map means nothing may be written.
 	Pins         map[string]string
 	PinsFromCopy bool
-	// TrustedRoots, when non-empty, must contain the workspace. See the file comment for why this
-	// is an input rather than a universal rule.
+	// TrustedRoots, when non-empty, must contain the workspace.
 	TrustedRoots []string
-	// OnJournal, when set, receives the journal at the moment it is durable and BEFORE the first
-	// edit. It must not block or panic.
+	// OnJournal, when set, receives the journal once it is durable and before the first edit. It must
+	// not block or panic.
 	OnJournal func(Journal)
-	// AllowProtectedPaths waives the protected-config half of containment for this window — the
-	// root admission AND the write denylist, which must agree or the window opens on a tree it
-	// cannot write. Secrets are unaffected. See run.Request.AllowProtectedPaths.
+	// AllowProtectedPaths waives the protected-config half of containment for both root admission and
+	// the write denylist. Secrets are unaffected. See Request.AllowProtectedPaths.
 	AllowProtectedPaths bool
-	// VerifyCommands / VerifyTimeout carry the operator's own build/test commands into this window.
-	// Empty means nothing is executed. See verify.go.
+	// VerifyCommands and VerifyTimeout carry the operator's build/test commands. See verify.go.
 	VerifyCommands []string
 	VerifyTimeout  time.Duration
 }
 
-// writeResult is what the window did. It is populated on every path, including a halt, so a caller
-// always has the receipt.
+// writeResult is what the window did. It is populated on every path, including a halt.
 type writeResult struct {
 	Journal   Journal
 	Receipt   Receipt
 	Cancelled bool
 	Withheld  []review.WithheldFile
 	Findings  []findingWrite
-	// Refusals is the protected-path refusals this window recorded, keyed on the host-computed
-	// fingerprint. It is the same set as the `Refused` entries in Findings, projected into the
-	// form every surface reports — carried once here so no surface re-derives it (and no surface
-	// keys it on the model-authored finding id).
+	// Refusals are the protected-path refusals, keyed by host-computed fingerprint rather than the
+	// model-authored finding id.
 	Refusals []review.ApplyRefusal
-	// Selection is what a narrowing selection did, on the window that reports it (SelectPrimary).
-	// nil when no selection was supplied, or on a later cycle of a converging apply.
+	// Selection is what a narrowing selection did, set only on the primary window.
 	Selection *review.ApplySelection
-	// Accepted is how many reconciled decisions authorized a write AFTER any narrowing selection.
-	// Zero means the window closed before a copy was ever made — there was nothing to do, which is
-	// a different fact from "everything was skipped".
+	// Accepted counts decisions that authorized a write after selection. Zero means the window
+	// closed before any copy was made.
 	Accepted int
-	// Committed reports whether the LIVE commit completed. False for patch mode by construction.
+	// Committed reports whether the live commit completed; always false in patch mode.
 	Committed bool
-	// Applied counts the findings whose hunks reached the live tree (0 unless Committed).
+	// Applied counts findings whose hunks reached the live tree.
 	Applied int
-	// Verification is what the operator's own commands did on the copy, before and after the edits.
-	// nil when none were supplied. It is a RECORD: nothing in this window branches on it.
+	// Verification is what the operator's commands did before and after the edits; nil when none
+	// were supplied. Nothing branches on it.
 	Verification *review.VerificationReport
-	// UndoPatch is the absolute path of the reverse-appliable patch, set ONLY for an apply into a
-	// tree with no version control — the case where it is the only way back. Empty everywhere else,
-	// because in a repository the answer is the VCS and naming a patch instead would be noise.
+	// UndoPatch is the absolute path of the reverse-appliable patch, set only for an apply into a tree
+	// without version control.
 	UndoPatch string
 }
 
-// selectAccepted narrows a reconciled accepted set to the findings whose HOST-COMPUTED fingerprint
-// a caller named, and reports exactly what the narrowing did.
-//
-// THE KEY IS `schema.Fingerprint(finding)` AND NOTHING ELSE. Not `Finding.ID`, which is
-// model-authored (a model that could relabel findings could otherwise steer which one a caller's
-// "apply only this" selects) and which this run renumbers after the write window anyway. Not the
-// file, which is not unique. The fingerprint is derived by us from the finding's own file and
-// normalized location, so the only way a model changes what a fingerprint names is by proposing a
-// different finding, in the open, where a human reads it.
-//
-// It is a PURE FILTER over the set it is given. There is no lookup, no fallback and no fetch: a
-// fingerprint that names nothing here names nothing, full stop, and lands in Unmatched. That is what
-// makes "a selection can only reduce" a property of the code rather than a promise.
+// selectAccepted narrows a reconciled accepted set to the findings whose host-computed fingerprint a
+// caller named, and reports what matched. It keys on schema.Fingerprint, never the model-authored
+// Finding.ID, so a model cannot relabel findings to steer a selection. It is a pure filter: a
+// fingerprint that names nothing in the set lands in Unmatched.
 func selectAccepted(accepted []acceptedTarget, want []string) (review.ApplySelection, []acceptedTarget) {
 	sel := review.ApplySelection{Requested: []string{}, Matched: []string{}, Unmatched: []string{}}
-	// Trim and dedupe the caller's list, preserving its order. A repeated selector is a typo, not a
-	// request to apply something twice, and a blank one names nothing at all.
+	// Trim and deduplicate the caller's list, preserving order.
 	seen := map[string]bool{}
 	for _, w := range want {
 		w = strings.TrimSpace(w)
@@ -253,9 +180,7 @@ func selectAccepted(accepted []acceptedTarget, want []string) (review.ApplySelec
 	if len(sel.Requested) == 0 {
 		return sel, nil
 	}
-	// Index the accepted set by fingerprint. Two accepted findings can in principle share one (the
-	// fingerprint is the DEDUP identity), and if they do, selecting it selects both — which is the
-	// honest reading of "apply the finding this names".
+	// Index by fingerprint; if two accepted findings share one, selecting it selects both.
 	byFP := map[string][]acceptedTarget{}
 	for _, t := range accepted {
 		fp := schema.Fingerprint(t.finding)
@@ -273,9 +198,7 @@ func selectAccepted(accepted []acceptedTarget, want []string) (review.ApplySelec
 			picked[t.index] = true
 		}
 	}
-	// The narrowed set keeps the ORIGINAL ORDER of the accepted set rather than the caller's. The
-	// write path's per-finding call ids and its journal are ordered by that index, and letting a
-	// caller reorder the write sequence would be a capability nobody asked for.
+	// Keep the accepted set's order; call ids and the journal follow it.
 	var narrowed []acceptedTarget
 	for _, t := range accepted {
 		if picked[t.index] {
@@ -294,12 +217,9 @@ func (w writeRequest) artifact(name string) string {
 	return path.Join(dir, name)
 }
 
-// governedWrite is the one write path. See the file comment.
-//
-// It owns the isolated copy, the journal, the staging, the commit and the receipt; the caller owns
-// the run directory, the mode ceiling and what the decision states become afterwards. On every
-// return — success, halt or cancellation — the receipt has been persisted or the returned error
-// says why it could not be.
+// governedWrite performs one write window (see the file comment). It owns the isolated copy, journal,
+// staging, commit and receipt; the caller owns the run directory and the resulting decision states.
+// On every return the receipt has been persisted, or the error says why it could not be.
 func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRequest) (writeResult, error) {
 	var out writeResult
 	out.Findings = []findingWrite{}
@@ -317,10 +237,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		Intended:           []IntendedHunk{}, Applied: []AppliedFinding{},
 		NotApplied: []AppliedFinding{}, Files: []string{},
 	}
-	// finish persists the receipt. It is the ONLY thing anyone can read afterwards, so a failure to
-	// write it is a terminal failure of the run rather than a logged inconvenience — and it is
-	// written DURABLY, because a receipt that is only in the page cache does not answer the
-	// question a crash asks.
+	// finish persists the receipt durably. It is the record of what happened, so failing to write it
+	// fails the run.
 	finish := func(status, reason string) error {
 		receipt.Status, receipt.ReasonCode = status, reason
 		receipt.IntentSHA256 = intentDigest(receipt.Intended)
@@ -331,9 +249,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		}
 		return nil
 	}
-	// halt records the outcome and returns the error the caller must return. A receipt that could
-	// not be persisted REPLACES the fault it was recording: a caller told only about the original
-	// cause would believe a receipt exists for it, and an unrecorded outcome is the worse failure.
+	// halt records the outcome and returns the error to return. If the receipt cannot be persisted,
+	// that failure replaces the original fault, so the caller never assumes a receipt exists.
 	halt := func(status, reason string, cause error) error {
 		if perr := finish(status, reason); perr != nil {
 			return fault.Wrap(fault.Internal,
@@ -343,9 +260,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		return cause
 	}
 
-	// THE DECISION SET, reconciled by finding ID before anything else is done with it. An
-	// unreconcilable set is refused whole: there is no safe subset of a set whose bindings are
-	// unknown.
+	// Reconcile decisions to findings by id first; an unreconcilable set is refused whole.
 	accepted, rcerr := reconcileDecisions(req.Findings, req.Decisions, req.Accept)
 	if rcerr != nil {
 		return out, halt("halted", ReasonDecisionSetUnreconciled, fault.New(fault.Policy, fmt.Sprintf(
@@ -353,18 +268,13 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 			rcerr)).WithReason(ReasonDecisionSetUnreconciled))
 	}
 
-	// THE NARROWING SELECTION, applied to the reconciled set and to nothing else.
-	//
-	// It is placed HERE deliberately: after reconciliation, so a selector can only name a finding
-	// whose decision binding has already been verified; and before every other check, so a run
-	// narrowed to nothing is refused before a workspace is stat-ed, a copy is taken, or a model is
-	// called. Selection can only REDUCE — there is no branch below that adds a finding back.
+	// Apply the selection after reconciliation, so it names only verified bindings, and before any
+	// other check, so a selection of nothing is refused before any copy or model call.
 	if req.Select != nil {
 		sel, narrowed := selectAccepted(accepted, req.Select)
 		if req.SelectPrimary {
 			out.Selection = &sel
-			// The selection is recorded on the DURABLE receipt before anything can refuse, so a
-			// refused selection is answerable from the run directory too.
+			// Record the selection on the receipt before anything can refuse.
 			receipt.Selection = &sel
 		}
 		if len(sel.Requested) == 0 {
@@ -372,9 +282,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 				"remediation refused: `select` was supplied and is empty. An empty narrowing filter does NOT mean \"apply everything\" — it names zero findings, so this call would write nothing while reading as a normal apply. Omit `select` to apply the whole accepted set, or name the host-computed fingerprints you want.").
 				WithReason(ReasonSelectionEmpty))
 		}
-		// The matched-nothing refusal belongs to the window that is measured against the caller's
-		// list. On a later cycle of a converging apply an empty match means "cycle 1 already
-		// applied them", which is success, not a caller error.
+		// Only the primary window refuses an empty match; on a later cycle it means the findings
+		// were already applied.
 		if req.SelectPrimary && len(sel.Matched) == 0 {
 			return out, halt("halted", ReasonSelectionMatchedNothing, fault.New(fault.Usage, fmt.Sprintf(
 				"remediation refused: none of the %d fingerprint(s) in `select` names a finding in this run's accepted set (%s). Nothing was written. A selector is the HOST-COMPUTED `fingerprint` from the accepted findings of the run being applied — never a finding's `id`, which is model-authored and renumbered.",
@@ -384,8 +293,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		accepted = narrowed
 	}
 
-	// THE WORKSPACE, bound by identity rather than by pathname. Checked before the staleness pins,
-	// because matching hashes in the WRONG tree is precisely the failure this catches.
+	// Bind the workspace by identity, not pathname, before checking pins: matching hashes in the wrong
+	// tree is the failure this catches.
 	if !req.Identity.Bound() {
 		return out, halt("halted", ReasonWorkspaceUnbound, fault.New(fault.Policy, fmt.Sprintf(
 			"remediation refused: this request carries no canonical identity for the reviewed workspace %q, so there is no way to verify that the path still names the tree that was reviewed. The run that produced the decision set must capture it (review.CaptureWorkspaceIdentity) and carry it on the request.",
@@ -398,12 +307,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 			verr), verr).WithReason(ReasonWorkspaceIdentityChanged))
 	}
 
-	// STALENESS, pass one — only for pins that came from an EARLIER run. Checked before the copy is
-	// made, before any model call, before any write: the cheapest possible place to discover that
-	// the decision set describes a workspace that has moved on. It is NOT the last check; each
-	// destination's content is verified again inside the commit, because everything between here and
-	// there takes time. A window that records its own pins from the copy has nothing to check here —
-	// its pins cannot be stale yet, which is exactly why the second check is the load-bearing one.
+	// First staleness check, for pins from an earlier run: refuse before any copy or model call. The
+	// commit re-verifies every destination, which is the check that matters for pins taken from the copy.
 	if !req.PinsFromCopy {
 		if stale := StaleBaseHashes(req.Workspace, pins); len(stale) > 0 {
 			_ = run.Event(m.now(), "error", "run_halted", "decision set is stale", map[string]any{"files": stale})
@@ -424,14 +329,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 
 	ws := workspace.New(m.TempBase)
 	ws.AllowProtectedRoots = req.AllowProtectedPaths
-	// The out-of-band trusted roots are ENFORCED, not merely carried, when the caller supplies
-	// them: the workspace must resolve inside the set in force NOW. A decision set is a durable
-	// artifact and can outlive the roots its run was launched with, so the check belongs here rather
-	// than only at the surface that first accepted the path.
-	//
-	// The operator's waiver is applied to THIS resolver too: it decides whether the workspace is an
-	// acceptable write destination, so leaving it strict here would refuse the very root the waiver
-	// exists to admit, while still reporting the failure as a trusted-roots problem.
+	// A stored decision set can outlive the roots its run was launched with, so enforce the roots in
+	// force now. The protected-path waiver applies here too, or it would refuse the root it admits.
 	if len(req.TrustedRoots) > 0 {
 		trust, terr := scope.NewWith(scope.Options{AllowProtectedWrites: req.AllowProtectedPaths}, req.TrustedRoots...)
 		if terr != nil {
@@ -448,9 +347,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 					WithHalt(ScopeHaltClass).WithReason(string(scope.ReasonUnresolvable)))
 		}
 	}
-	// Root confinement for this write: every live destination must land inside the workspace the
-	// caller consented to, and must not hit a protected path. It is built HERE, from the workspace
-	// this write is about, so no surface and no caller gets to supply a wider one.
+	// Root confinement is built here from the workspace, so no caller can supply a wider one.
 	confine, serr := scope.NewWith(scope.Options{AllowProtectedWrites: req.AllowProtectedPaths}, req.Workspace)
 	if serr != nil {
 		return out, halt("halted", string(scope.ReasonUnresolvable),
@@ -459,17 +356,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 	}
 	ws.Guard = confine
 
-	// A DIRTY TREE IS RECORDED, NEVER REFUSED. Working on a tree holding uncommitted work is the normal
-	// state of the work, not an anomaly worth interrupting, and a refusal that fires on the normal case
-	// is a flag every invocation has to carry.
-	//
-	// Undoing our edits takes the user's with them only with the BLUNT undo (`git checkout -- .`). A
-	// precise one is produced on this very path: `changes.patch` is a complete reverse-appliable
-	// delta of everything this run wrote, so `git apply -R` undoes exactly ours and nothing else.
-	// See the undo_is_this_patch event below, which already names it for the no-VCS case.
-	//
-	// The fact is still worth having in the record — an operator reading a run later should be able
-	// to see that the tree was not clean when it was written to — so it stays as an EVENT.
+	// A dirty tree is recorded as an event, never refused: uncommitted work is normal, and
+	// changes.patch reverse-applies exactly this run's edits.
 	if req.Mode == review.ModeApply {
 		if d := ProbeWorkspaceDirtiness(ctx, req.Workspace); d.Known && d.Dirty {
 			_ = run.Event(m.now(), "warn", "workspace_dirty", d.Summary(), map[string]any{
@@ -489,30 +377,20 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		out.Withheld = appendWithheld(out.Withheld, rwh...)
 	}
 
-	// THE VERIFICATION BASELINE — the project's own commands, before any edit exists.
-	//
-	// It runs on a THROWAWAY copy of its own, NOT on `rcopy`, and that is not fastidiousness. `rcopy`
-	// is the tree the commit is derived from, and the commit writes back every file in it that differs
-	// from live — so a `go build` or an `npm install` here would put object files and node_modules
-	// into the user's repository. See baselineOnAThrowawayCopy. Both copies are taken from the same
-	// live tree moments apart, so they are byte-identical and the comparison holds.
+	// The verification baseline runs on a throwaway copy, not rcopy: the commit writes back every
+	// file in rcopy that differs from live, so build output there would land in the user's tree.
 	verifyBefore := m.baselineOnAThrowawayCopy(ctx, run, ws, req.Workspace, req.VerifyCommands, req.VerifyTimeout)
 
-	// absentFromCopy holds targets this window could not read a base for out of its own copy —
-	// withheld for a containment reason (a hardlink), or gone between the reviewer's copy and this
-	// one. See the pin block below for why they are skipped rather than halted.
+	// absentFromCopy holds targets this window's copy does not contain (withheld or deleted); they are
+	// skipped, not halted.
 	absentFromCopy := map[string]bool{}
-	// canTarget is the gate a finding must pass before it can be written at all: a real,
-	// non-excluded path that a reviewer was actually shown and that this window holds a base for.
+	// canTarget reports whether a finding's file is non-excluded, was shown, and has a base in the copy.
 	canTarget := func(f review.Finding) bool {
 		return f.File != "" && !workspace.IsExcluded(f.File) && req.Shown[f.File] && !absentFromCopy[f.File]
 	}
 
-	// THE PINS, for a window that records its own. They are read from the ISOLATED COPY, which is
-	// byte-identical to the live tree at the moment it was taken and is the very base every edit
-	// below is derived from. Reading them from the live tree instead would leave a gap: a save that
-	// landed between the copy and the pin would be adopted as the base and then silently
-	// overwritten. Reading them from the copy closes that by construction.
+	// Record pins from the isolated copy, the base every edit derives from. Pinning the live tree
+	// would adopt a save made after the copy as the base and then overwrite it.
 	if req.PinsFromCopy {
 		rels := make([]string, 0, len(accepted))
 		for _, t := range accepted {
@@ -521,12 +399,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 			}
 		}
 		pins = BaseHashes(rcopy.Root, rels)
-		// A target the copy does not hold is not a writable target, and it is a SKIP rather than an
-		// authorization halt. The distinction is real: a request that pins a file the tree does not
-		// have is a claim contradicted by disk (a halt — see authorizeEditTarget), while a file
-		// this window simply could not copy is a caveat the run has already surfaced. Dropping the
-		// key rather than keeping an `absent` pin also keeps the commit's pin set exhaustive over
-		// what is actually being written.
+		// A target the copy lacks is skipped: the run has already recorded why it was not copied.
+		// Dropping its pin keeps the commit's pin set exact.
 		for rel, pin := range pins {
 			if pin == BaseHashAbsent {
 				absentFromCopy[rel] = true
@@ -540,8 +414,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 	hostAdapter, hostReg := m.Adapters[hostLane.Adapter]
 	modelRemediation := hasHost && hostLane.Adapter != "fake" && hostReg
 
-	// PASS 1 — compute every intended hunk. Nothing is written in this pass, so the journal below
-	// is a complete statement of intent rather than a running commentary on what already happened.
+	// Pass 1 computes every intended hunk without writing, so the journal is a complete statement of
+	// intent.
 	type plannedEdit struct {
 		finding review.Finding
 		edits   []review.Edit
@@ -550,18 +424,9 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 	var planned []plannedEdit
 	for _, t := range accepted {
 		f := t.finding
-		// Root confinement + the protected-path denylist, BEFORE the skip rules. Two refusals
-		// come back from here and they are answered DIFFERENTLY, under the partial-refusal contract:
-		//
-		//   - PROTECTED PATH (the non-overridable write denylist, inside the consented root) is a
-		//     RECORDED REFUSAL. Nothing is written there — that is non-negotiable — but the
-		//     remaining findings proceed. A SILENT skip letting a run report success would be wrong;
-		//     a refusal that is named in the receipt, counted in the summary, rendered first in the
-		//     text and carried in the run's coarse not-clean signal is not silent. A halt would cost
-		//     every OTHER finding in a paid run.
-		//   - ANYTHING ELSE — a target resolving outside the consented root, an unresolvable path,
-		//     a resolver with no roots — still HALTS. Those are escapes, not policy; the denylist
-		//     held in the first case and did not even get to speak in the others.
+		// Check confinement before the skip rules. A protected-path denial is a recorded refusal and
+		// the other findings proceed; any other denial (outside the root, unresolvable) is an escape
+		// and halts.
 		if aerr := authorizeTarget(ws, rcopy, f.File); aerr != nil {
 			d, isDenial := scope.AsDenial(aerr)
 			if !isDenial || d.Reason != scope.ReasonWriteDenied {
@@ -576,10 +441,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 				Reason: review.ApplyRefusalProtectedPath,
 			})
 			out.Refusals = append(out.Refusals, review.ApplyRefusal{
-				// The FINGERPRINT, not the id: it is host-computed from the finding's own
-				// content, so a model cannot relabel a finding to steer which one a caller's
-				// follow-up selection names — and unlike the id it survives this run's own
-				// post-write renumbering.
+				// Key by the host-computed fingerprint, which survives renumbering and cannot be
+				// relabelled by a model.
 				Fingerprint: schema.Fingerprint(f),
 				File:        f.File,
 				Reason:      review.ApplyRefusalProtectedPath,
@@ -628,18 +491,12 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 			continue
 		}
 		for _, e := range edits {
-			// EVERY EDIT TARGET IS JUDGED — and scope is only one of the questions. See
-			// authorizeEditTarget: confinement answers WHERE a write may land, never WHAT WAS
-			// REVIEWED.
+			// Every edit target must match what was reviewed, not merely lie inside the root.
 			if terr := authorizeEditTarget(f, e, req.Shown, pins); terr != nil {
 				return out, halt("halted", fault.ReasonOf(terr), terr)
 			}
-			// STILL A HALT HERE, and deliberately so. `authorizeEditTarget` above has already
-			// established that `e.File == f.File`, and `f.File` passed the finding-level
-			// authorization at the top of this loop — so the DENYLIST branch is unreachable at
-			// this point, and the recorded-refusal answer has nothing to apply to. What can
-			// still fire is a target that resolves outside the root between the two checks, which
-			// is an escape and halts on both.
+			// e.File equals f.File, which already passed the denylist, so any denial here is an
+			// escape and halts.
 			if aerr := authorizeTarget(ws, rcopy, e.File); aerr != nil {
 				return out, halt("halted", fault.ReasonOf(aerr), aerr)
 			}
@@ -652,10 +509,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		planned = append(planned, plannedEdit{finding: f, edits: edits, origin: origin})
 	}
 
-	// THE JOURNAL IS A PRECONDITION, not a side effect. It is made durable BEFORE the first edit,
-	// and a journal that cannot be written HALTS: the contract this path advertises is
-	// "journal before write", and a full or read-only disk must therefore make the write
-	// unreachable rather than make the journal optional.
+	// The journal must be durable before the first edit; if it cannot be written, nothing is written.
 	journal := Journal{
 		SchemaVersion: 1, RunID: run.ID, SourceRunID: req.SourceRunID, Mode: string(req.Mode),
 		Hunks: receipt.Intended, IntentSHA256: intentDigest(receipt.Intended),
@@ -673,8 +527,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		req.OnJournal(journal)
 	}
 
-	// WRITE-WINDOW BOUNDARY. Cancellation is honored HERE and at the commit, and nowhere in
-	// between: a cancellation observed mid-hunk would leave the copy in a state nobody journaled.
+	// Cancellation is honored here and at the commit only; mid-hunk it would leave an unjournaled copy.
 	if ctx.Err() != nil {
 		_, _, _ = ws.Discard(rcopy)
 		out.Cancelled = true
@@ -684,16 +537,9 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 				WithHalt("F").WithReason(ReasonRemediateCancelled))
 	}
 
-	// PASS 2 — apply to the COPY. The live tree is still untouched: only Commit reaches it.
-	//
-	// A FINDING IS ALL-OR-NOTHING. Its hunks are staged first, so a finding whose second hunk
-	// fails does not leave its first hunk in the copy — the copy is what Commit ships, so a
-	// half-applied finding recorded as "not applied" would be a receipt stating the opposite of
-	// what shipped. Per-FINDING staging is chosen over aborting the whole remediation because the
-	// finding is the unit the receipt reports and the unit a human accepted: one finding whose
-	// anchor drifted should not discard the others, and with staging that choice costs no
-	// honesty. A rollback that itself fails is a different matter and halts the run: at that
-	// point the copy matches no recorded intent.
+	// Pass 2 applies edits to the copy; only the commit reaches the live tree. Each finding is
+	// all-or-nothing: its files are snapshotted and restored if any hunk fails, so the receipt matches
+	// what ships. A failed rollback halts, because the copy then matches no recorded intent.
 	type findingResult struct {
 		finding review.Finding
 		applied bool
@@ -732,8 +578,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		results = append(results, findingResult{finding: p.finding, applied: true})
 	}
 
-	// A DIFF FAILURE IS A HALT. What would be committed is derived from it; a dropped error here
-	// would produce a receipt whose file list is silently empty for a run that wrote.
+	// The commit is derived from the diff, so a diff failure halts.
 	diff, changes, derr := ws.Diff(rcopy)
 	if derr != nil {
 		return out, halt("halted", ReasonDiffFailed, fault.Wrap(fault.Internal,
@@ -756,17 +601,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 				WithReason(ReasonPatchUnwritable))
 		}
 		_ = run.Event(m.now(), "info", "patch_written", "patch artifact written", map[string]any{"files": len(changes)})
-		// THE UNDO, for a tree that has no other one.
-		//
-		// `changes.patch` is a complete reverse-appliable delta of everything this run wrote, and it
-		// is produced on the APPLY path as well as the patch path — so an undo has always existed
-		// here. In a repository nobody needs it: `git checkout` is the obvious move. In a tree under
-		// NO version control it is the only way back, and it was neither stated nor reliably durable.
-		//
-		// It is named here, on the record, rather than left for someone to deduce from an artifact
-		// listing. The durability half is handled before the run starts (see EnsureDurableRunDir):
-		// this same tree is the one whose run directory would otherwise default to the OS temp
-		// directory, which is precisely the wrong place to keep the only copy of an undo.
+		// In a tree without version control, changes.patch is the only undo, so name it on the
+		// record. EnsureDurableRunDir keeps it out of the OS temp directory.
 		if req.Mode == review.ModeApply && receipt.PatchArtifact != "" {
 			if d := ProbeWorkspaceDirtiness(ctx, req.Workspace); !d.Known {
 				out.UndoPatch = filepath.Join(run.Dir, receipt.PatchArtifact)
@@ -778,7 +614,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 	}
 
 	if req.Mode == review.ModeApply {
-		// THE SECOND BOUNDARY, decided once under a lock: cancelled, or committing, never both.
+		// The second boundary is decided once under a lock: cancelled or committing, never both.
 		var window writeWindow
 		if !window.enter(ctx) {
 			_, _, _ = ws.Discard(rcopy)
@@ -788,10 +624,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 				fault.Wrap(fault.Policy, "remediation cancelled before apply", ctx.Err()).
 					WithHalt("F").WithReason(ReasonRemediateCancelled))
 		}
-		// The window is open. From here the context no longer decides this call's disposition —
-		// see writeWindow — and the marker below makes the fact durable BEFORE the first live
-		// write, so a crash leaves a run directory that says "a commit was entered" rather than
-		// one that is silent about it.
+		// The window is open and the context no longer decides the outcome (see writeWindow). The
+		// durable marker records that a commit was entered, so a crash is visible.
 		receipt.CommitAttempted = true
 		if merr := writeDurableJSON(run.Dir, req.artifact("commit-attempt.json"), map[string]any{
 			"schemaVersion": 1, "runId": run.ID, "sourceRunId": req.SourceRunID,
@@ -806,17 +640,13 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		if testHookInsideWriteWindow != nil {
 			testHookInsideWriteWindow()
 		}
-		// STALENESS, pass two — inside the commit, per destination, immediately before each
-		// replacement. The pins are the very base this write was decided against, so a file edited
-		// during the model calls above is refused here even though its inode never changed (an
-		// in-place save keeps it) and even though the cheap check above passed minutes ago.
-		//
-		// THIS IS THE ONLY LIVE-WORKSPACE COMMIT IN THE PRODUCT. Every surface reaches it.
+		// Second staleness check: the commit verifies each destination against its pin immediately
+		// before replacing it, catching in-place saves made during the model calls. This is the only
+		// live-workspace commit.
 		committed, commitErr := ws.CommitExpecting(rcopy, pins)
 		if commitErr != nil {
 			_, _, _ = ws.Discard(rcopy)
-			// The commit rolled back, so NOTHING reached the live tree: every planned finding is
-			// recorded as not applied, and the receipt says so rather than describing the copy.
+			// The commit rolled back, so every planned finding is recorded as not applied.
 			for _, r := range results {
 				receipt.NotApplied = append(receipt.NotApplied, AppliedFinding{
 					FindingID: r.finding.ID, File: r.finding.File,
@@ -826,11 +656,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 					FindingID: r.finding.ID, File: r.finding.File, Reason: ReasonApplyCommitFailed,
 				})
 			}
-			// A destination that changed under us — by content, by identity, or by turning up with
-			// no recorded base at all — is the SAME event the pre-window staleness check exists to
-			// catch, discovered later. It is reported with the same reason code so a caller
-			// branches on one thing, and it is the one commit failure that is a POLICY refusal
-			// rather than an internal error: nothing malfunctioned, the world moved.
+			// A destination that drifted is the same event as a stale decision set, so it uses the
+			// same reason code and is a policy refusal rather than an internal error.
 			if wr, ok := workspace.AsRefusal(commitErr); ok && isDestinationDrift(wr.Reason) {
 				return out, halt("halted", ReasonStaleDecisionSet, fault.Wrap(fault.Policy, fmt.Sprintf(
 					"remediation refused at the commit boundary: %q is no longer what the review judged (%s). NOTHING was written — the commit rolled back. Re-run the review and remediate from the new run.",
@@ -843,9 +670,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 				fault.Wrap(fault.Internal, "commit remediation to live workspace", commitErr).
 					WithReason(ReasonApplyCommitFailed))
 		}
-		// THE RECEIPT NOW DESCRIBES THE COMMITTED REALITY, and only it: the applied set, the file
-		// list and `committed` are all derived from the commit that succeeded, never from the copy
-		// that preceded it.
+		// The receipt is derived from the successful commit, not from the copy.
 		receipt.Committed, out.Committed = true, true
 		receipt.Files = append(receipt.Files, committed...)
 		for _, r := range results {
@@ -870,8 +695,7 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 		_ = run.Event(m.now(), "info", "apply_committed", "applied edits to live workspace",
 			map[string]any{"files": committed})
 	} else {
-		// PATCH MODE. Nothing reached the live tree by construction, so the "applied" set is the
-		// set that reached the DIFF, and the file list is the diff's.
+		// Patch mode: "applied" means reached the diff, and the file list is the diff's.
 		receipt.Files = append(receipt.Files, changedFiles(changes)...)
 		for _, r := range results {
 			if r.applied {
@@ -894,21 +718,9 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 	}
 	sort.Strings(receipt.Files)
 
-	// THE SECOND VERIFICATION PASS — on the same copy, now carrying every applied edit.
-	//
-	// IT RUNS AFTER THE COMMIT, and that ordering is load-bearing twice over.
-	//
-	// First, it is what stops this feature writing into someone's repository. `CommitExpecting`
-	// re-enumerates the WHOLE copy and writes back every file that differs from live — so a `go
-	// build` or an `npm test` run before the commit would have its object files, binaries and
-	// coverage directories committed into the user's tree. A tool that reviews code must not leave
-	// build output behind, and no denylist would have caught it reliably, because build artifacts
-	// look exactly like source.
-	//
-	// Second, it makes "a failing suite never blocks a commit" STRUCTURAL rather than a promise
-	// somebody has to keep. There is no branch to get wrong: by the time this runs, the commit is
-	// already done. Nothing was lost by moving it — the commit does not modify the copy, so this
-	// measures precisely the tree the edits produced.
+	// The after-edit verification runs on the same copy after the commit: the commit writes back every
+	// differing file, so build output from an earlier run would land in the user's tree, and running
+	// afterwards means a failing suite cannot block the commit.
 	if len(req.VerifyCommands) > 0 {
 		_ = run.Event(m.now(), "info", "verification_after_start",
 			fmt.Sprintf("re-running %d project command(s) on the containment copy, now with the applied edits", len(req.VerifyCommands)),
@@ -929,9 +741,8 @@ func (m *Manager) governedWrite(ctx context.Context, run *audit.Run, req writeRe
 	return out, nil
 }
 
-// eventVerification records one pass's per-command outcome. The OUTPUT is deliberately not in the
-// event data: it is already in verification.json, and a multi-kilobyte build log inside an event line
-// makes the event stream unreadable for every other purpose it serves.
+// eventVerification records one pass's per-command outcome. Command output stays in
+// verification.json to keep event lines small.
 func (m *Manager) eventVerification(run *audit.Run, eventType, pass string, results []review.VerificationResult) {
 	rows := make([]map[string]any, 0, len(results))
 	failed := 0

@@ -11,12 +11,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// SELECTIVE APPLY on the CLI. The tests reach `parseSelection` and `printSelection` through `run(...)`,
-// so they assert the flag's behavior as a user meets it.
+// These tests exercise --select through run, as a user meets it.
 
-// TestSelect_CLI_FingerprintIsDisclosedByTheProjection is the DISCLOSURE CHANNEL on this surface: a
-// human runs `--report --json`, reads a fingerprint, and passes it back as `--select`. Without it
-// the flag would take a value nothing tells you.
+// A user reads a fingerprint from `--report --json` and passes it back with --select.
 func TestSelect_CLI_FingerprintIsDisclosedByTheProjection(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, out, errs := run(t, "review", "--report", "--json", "--profile", "fake-smoke", jsonWorkspace(t))
@@ -37,14 +34,13 @@ func TestSelect_CLI_FingerprintIsDisclosedByTheProjection(t *testing.T) {
 	if !strings.HasPrefix(f.Fingerprint, "sha1:") {
 		t.Errorf("fingerprint = %q, want the host-computed identity", f.Fingerprint)
 	}
-	// THE SECURITY PROPERTY: the selector is not the model-authored id.
+	// The selector is not the model-authored id.
 	if f.Fingerprint == f.ID {
 		t.Fatal("the disclosed selector IS the finding's id — a model that could relabel findings could then steer which one --select names")
 	}
 }
 
-// TestSelect_CLI_IsRefusedInReportMode. `--select` narrows what is WRITTEN, and report mode writes
-// nothing, so accepting it would report success for a narrowing that could not have had an effect.
+// --select narrows what is written and report mode writes nothing, so it is refused.
 func TestSelect_CLI_IsRefusedInReportMode(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, _, errs := run(t, "review", "--report", "--profile", "fake-smoke", "--select", "sha1:abc", jsonWorkspace(t))
@@ -57,8 +53,7 @@ func TestSelect_CLI_IsRefusedInReportMode(t *testing.T) {
 	}
 }
 
-// TestSelect_CLI_EmptyValueIsRefusedNotWidened. An empty narrowing filter names ZERO findings, and
-// the one outcome a caller can neither detect nor survive is having that read as "apply everything".
+// An empty filter names zero findings and must never read as "apply everything".
 func TestSelect_CLI_EmptyValueIsRefusedNotWidened(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, _, errs := run(t, "review", "--apply", "--profile", "fake-smoke", "--select", "  ", jsonWorkspace(t))
@@ -70,10 +65,8 @@ func TestSelect_CLI_EmptyValueIsRefusedNotWidened(t *testing.T) {
 	}
 }
 
-// TestSelect_CLI_UnmatchedSelectorRefusesAndNamesIt. Every selector named nothing, so nothing would
-// be written — refused rather than reported as a clean run that happened to apply zero findings.
-// The projection still carries the selection, because "which of my selectors named nothing" is the
-// question a caller has at that moment.
+// When every selector matches nothing, the run is refused rather than reported clean, and the
+// projection still carries the selection.
 func TestSelect_CLI_UnmatchedSelectorRefusesAndNamesIt(t *testing.T) {
 	hermeticReview(t, "valid")
 	code, out, errs := run(t, "review", "--apply", "--json", "--profile", "fake-smoke",
@@ -86,8 +79,7 @@ func TestSelect_CLI_UnmatchedSelectorRefusesAndNamesIt(t *testing.T) {
 	}
 }
 
-// TestSelect_CLI_SelectedApplyWritesAndReportsTheSelection is the capability end to end on the
-// surface a human uses.
+// A selected apply writes and reports the selection end to end.
 func TestSelect_CLI_SelectedApplyWritesAndReportsTheSelection(t *testing.T) {
 	hermeticReview(t, "valid")
 	ws := jsonWorkspace(t)
@@ -103,7 +95,7 @@ func TestSelect_CLI_SelectedApplyWritesAndReportsTheSelection(t *testing.T) {
 	}
 	fp := view.Findings[0].Fingerprint
 
-	// Turn 2: apply exactly it.
+	// Turn 2: apply exactly that finding.
 	code, out, errs = run(t, "review", "--apply", "--json", "--profile", "fake-smoke", "--select", fp, ws)
 	if code != int(fault.OK) {
 		t.Fatalf("selective apply exit=%d\nstderr:\n%s\nstdout:\n%s", code, errs, out)
@@ -127,14 +119,13 @@ func TestSelect_CLI_SelectedApplyWritesAndReportsTheSelection(t *testing.T) {
 	if applied.Outcome != review.OutcomeApplied {
 		t.Errorf("outcome = %q, want %q", applied.Outcome, review.OutcomeApplied)
 	}
-	// The human channel says what was narrowed, on stderr under --json so stdout stays parseable.
+	// The human summary of the selection goes to stderr under --json.
 	if !strings.Contains(errs, "selective apply") {
 		t.Errorf("the human channel must state the narrowing:\n%s", errs)
 	}
 }
 
-// TestSelect_CLI_NoSelectionIsUnchanged is the blast radius: an ordinary apply must be exactly what
-// it was, or `--select` has changed the meaning of every run that does not use it.
+// An apply without --select is unaffected.
 func TestSelect_CLI_NoSelectionIsUnchanged(t *testing.T) {
 	hermeticReview(t, string(fake.Valid))
 	code, out, errs := run(t, "review", "--apply", "--json", "--profile", "fake-smoke", jsonWorkspace(t))

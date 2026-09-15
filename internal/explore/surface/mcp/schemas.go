@@ -8,41 +8,28 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/mode"
 )
 
-// This file holds the DECLARED contract of the exploremesh MCP server: the tool input schemas, the
-// output schemas, and the `initialize.instructions` cross-tool contract. They are written as literal JSON
-// rather than derived from Go types on purpose — strict `oneOf`, `additionalProperties: false` and exact
-// `required` sets are the whole point here, and none of them survives a round trip through a
-// reflection-derived schema.
+// This file holds the MCP server's tool input and output schemas and its initialize instructions. The
+// schemas are literal JSON so that oneOf, additionalProperties and required sets are exact.
 //
-// Two rules govern everything below:
-//
-//   - INPUTS are strict. `additionalProperties: false` everywhere, `oneOf` where a genuine choice exists,
-//     and required means required. A misspelled field must be a first-try error the model can correct,
-//     not a silently-ignored parameter that changes what the run means. The server enforces the same
-//     rules itself (schemas are advisory to a client; they are not a validation boundary).
-//   - OUTPUTS declare what must ALWAYS be there: the governance block, the identity caveats and the
-//     requested-vs-executed panel echo are `required`. That is the invariant a summary must never drop,
-//     and putting it in the schema makes it client-side checkable instead of a promise in prose.
-//     Outputs deliberately do NOT set `additionalProperties: false`: a client must not break when a later
-//     revision reports MORE about a run.
+// Input schemas are strict: additionalProperties is false and required fields are enforced. The server
+// enforces the same rules itself, since clients may not validate. Output schemas require the governance
+// block, identity caveats and panel echo, but allow additional properties so clients tolerate new fields.
 
-// MaxPanelExplorers is the hard ceiling on an ad-hoc panel — a spend control on the fan-out, never
-// clamped (a request for 20 seats fails; it never quietly runs 16).
+// MaxPanelExplorers is the maximum number of explorers in a panel. Larger requests are refused, not
+// clamped.
 const MaxPanelExplorers = 16
 
-// MinPanelExplorers is the floor: a panel with fewer than two explorers has nothing to be blind about.
+// MinPanelExplorers is the minimum number of explorers in a panel.
 const MinPanelExplorers = 2
 
-// Wait-budget bounds. The default is well inside the ~60 s request timeout common in MCP clients, so a
-// run that finishes quickly comes back inline and a slower one degrades to the job shape instead of
-// being killed mid-spend.
+// Wait-budget bounds, in seconds. The default stays well under the common 60-second MCP request timeout.
 const (
 	DefaultWaitSeconds = 25
 	MaxWaitSeconds     = 120
 )
 
-// slotSchema is one panel seat, named by IDENTIFIER only. There is deliberately no path/args/binary
-// property: those are configuration, and configuration over MCP is a non-goal.
+// slotSchema is one panel seat, identified by adapter name, model and effort. It has no path or argument
+// properties.
 const slotSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -54,9 +41,7 @@ const slotSchema = `{
   }
 }`
 
-// panelSchema is the required panel: the explorers and the collator one call composes, each from the
-// adapters this server was launched with. A call can never introduce an adapter, a path or a launch
-// argument.
+// panelSchema is the panel a call composes from the server's launch adapters: explorers and a collator.
 var panelSchema = fmt.Sprintf(`{
   "type": "object",
   "additionalProperties": false,
@@ -68,10 +53,8 @@ var panelSchema = fmt.Sprintf(`{
   }
 }`, MinPanelExplorers, MaxPanelExplorers, slotSchema, slotSchema)
 
-// canonicalizersSchema is the OPTIONAL explicit canonicalizer pair. `minItems`/`maxItems` are both 2 rather
-// than a free-length array: the merge-agreement rule is defined over exactly two independent proposals, and
-// ONE entry is ambiguous about which slot it fills (slot a defaults to the collator's identity). The server
-// enforces the same rule itself — schemas are advisory to a client, not a validation boundary.
+// canonicalizersSchema is the optional explicit canonicalizer pair: exactly two seats (see
+// roster.ValidateCanonicalizers).
 var canonicalizersSchema = fmt.Sprintf(`{
   "type": "array",
   "minItems": 2,
@@ -94,26 +77,12 @@ var commonProps = fmt.Sprintf(`
     "idempotencyKey": {"type": "string", "maxLength": 200, "description": "Optional caller-supplied key. Repeating a call with the same key returns the EXISTING run instead of spending again — use it when retrying."}`,
 	panelSchema, canonicalizersSchema, MaxWaitSeconds, DefaultWaitSeconds)
 
-// exploreInputSchema is the ONE run-starting tool, covering every mode. It mirrors the CLI, where
-// `aimesh explore run --mode <name>` plus mode-specific flags is likewise a single entry point.
+// exploreInputSchema is the input schema of the explore tool, which starts a run in any mode. mode is
+// required so the same call means the same thing on every install.
 //
-// `mode` is REQUIRED rather than defaulted — a per-profile default mode would make the identical call
-// mean different things on different installs, which is exactly what a machine caller cannot see.
-//
-// THE MODE-SPECIFIC INPUTS ARE DECLARED THREE TIMES, ON PURPOSE:
-//
-//  1. here, as a `oneOf` discriminated union (see modeBranches) — precise, machine-checkable, and
-//     stating BOTH what each mode requires and what it forbids, so the schema describes the whole
-//     contract rather than half of it;
-//  2. in the tool DESCRIPTION (mcp.go) — prose every model reads when choosing the call;
-//  3. in the agent guide (internal/agentguide/AGENTS.md) — for an agent that reads it up front.
-//
-// The redundancy is the point. Conditional subschemas are valid JSON Schema but are handled
-// inconsistently across MCP clients and tool-calling stacks, so a requirement expressed ONLY as
-// if/then can silently fail to reach the model — and this is a SPENDING tool, where the cost of the
-// model finding out by being refused is a wasted round-trip. Enforcement is still the handler's (a
-// schema is advisory to a client, so the server can never rely on it); these three are how the
-// caller learns the rule before paying for it.
+// Mode-specific parameters are described in three places: the oneOf branches here (see modeBranches),
+// exploreToolDescription, and the agent guide. Clients handle conditional schemas inconsistently, so the
+// prose copies make sure the model sees the rules; the handler enforces them.
 var exploreInputSchema = fmt.Sprintf(`{
   "type": "object",
   "additionalProperties": false,
@@ -156,11 +125,8 @@ const runIDInputSchema = `{
 
 const emptyInputSchema = `{"type": "object", "additionalProperties": false, "properties": {}}`
 
-// --- output schemas ---
-
-// governanceSchema is REQUIRED on every terminal result. `countsEmitted` is what makes that possible for
-// every mode: a mode that produces no host-computed counts says so explicitly rather than omitting the
-// block, because an absent key and an honest "this mode emits no counts" are different facts.
+// governanceSchema is the governance block required on every complete result. countsEmitted is false for
+// modes that produce no host-computed counts.
 const governanceSchema = `{
     "type": "object",
     "required": ["countsEmitted"],
@@ -230,29 +196,18 @@ const panelEchoSchema = `{
     }
   }`
 
-// haltProps are the taxonomy payload a domain halt carries. It rides `structuredContent` on a result
-// with `isError: true` — NOT a JSON-RPC error, whose `data` clients routinely flatten or drop.
+// haltProps are the halt fields carried in structuredContent on an isError result. A JSON-RPC error is not
+// used because clients often drop its data.
 const haltProps = `
       "exitCode": {"type": "integer", "description": "The shared aimesh halt taxonomy exit code (3 config, 4 adapter, 5 model/identity, 7 policy/cap, 8 internal)."},
       "haltClass": {"type": "string"},
       "reasonCode": {"type": "string", "description": "The stable machine reason code. Branch on this, never on the message."},
       "failure": {"type": "object", "description": "The sanitized, capped breakdown: which seats were dropped and why."}`
 
-// runResultSchema is the declared outputSchema of every run-starting tool AND of explore_run_result. It is a
-// FOUR-branch `oneOf` keyed on `state`, because a job-shaped tool genuinely has four shapes — and
-// expressing them as branches is what lets governance + identityCaveats + panel be REQUIRED on the one
-// branch where a result exists, instead of being softened to optional so a "running" reply can validate.
-//
-// The branches are `running` / `complete` / `halted` / `cancelled`, and each `state` is a `const` rather
-// than an `enum`, so exactly one branch can ever match. `cancelled` is its own branch because a cancelled
-// call is genuinely a fourth shape: it is not a halt (nothing failed) and it has no result, but it does
-// carry the panel echo and the taxonomy. It must NOT be emitted as the RUNNING shape with `state`
-// overwritten — that is a payload matching no branch at all. (reviewmesh's result schema has the identical
-// four-branch shape; the two servers must not diverge on what `state` means.)
-//
-// `panel` is required on `running` and `cancelled` as well as on `complete`. The requested-vs-executed
-// echo is the one governance fact that exists from the moment a run is admitted, so "which panel is
-// this?" is answerable from the first reply rather than only from the last.
+// runResultSchema is the output schema of explore and explore_run_result: a oneOf with one branch per
+// state (running, complete, halted, cancelled), each with a const state so exactly one branch matches.
+// Governance and identity caveats are required only on complete; the panel echo is also required on running
+// and cancelled. Review's result schema uses the same four states.
 var runResultSchema = fmt.Sprintf(`{
   "oneOf": [
     {
@@ -322,12 +277,8 @@ var runResultSchema = fmt.Sprintf(`{
 	panelEchoSchema, identityCaveatsSchema, haltProps,
 	panelEchoSchema, identityCaveatsSchema, haltProps)
 
-// runShapeSchema is the DRY RUN's disclosure: what the exploration would do, before anything is spent.
-//
-// `modelCalls` is ONE number rather than a min/max pair — the difference from reviewmesh's shape, and not an
-// omission. An exploration's round count is fixed by its mode contract (there is deliberately no
-// data-dependent termination rule), and every other multiplier is settled before the run starts, so there is
-// nothing left to estimate. Only a halt makes the real figure smaller.
+// runShapeSchema describes a dry run's shape block. modelCalls is a single exact number because the mode
+// fixes the round count; only a halt lowers the real total.
 const runShapeSchema = `{
     "type": "object",
     "required": ["mode", "explorers", "collator", "rounds", "policy", "modelCalls", "calls", "payload"],
@@ -362,10 +313,8 @@ var runStatusSchema = fmt.Sprintf(`{
   }
 }`, panelEchoSchema)
 
-// listOutputSchema is the SANITIZED configuration projection. Note what is not here and cannot be added
-// without changing this type: binary paths, launch arguments, environment. A tool result is inference
-// input for a third party — shipping the operator's environment into it is a disclosure, not a
-// convenience.
+// listOutputSchema is the output schema of the list tool. It omits binary paths, launch arguments and
+// environment, which would disclose the operator's setup to the client model.
 const listOutputSchema = `{
   "type": "object",
   "required": ["adapters", "modes", "limits"],
@@ -419,10 +368,8 @@ const doctorOutputSchema = `{
   }
 }`
 
-// exploreToolDescription is the prose half of the per-mode contract — declaration (2) of the three
-// described on exploreInputSchema. It is a named constant rather than an inline literal so a test can
-// assert it actually states every requirement the rules table defines: redundancy that can drift is
-// worse than none, because the stale copy still looks authoritative.
+// exploreToolDescription is the explore tool's description. A test checks that it states every rule in
+// modeInputRules.
 const exploreToolDescription = "Runs a blind panel of independent models over one question and returns a HOST-COMPUTED result. " +
 	"SPENDS MONEY: it launches the configured model CLIs. " +
 	"`mode` selects what the run means AND decides which other parameters are required: " +
@@ -433,41 +380,33 @@ const exploreToolDescription = "Runs a blind panel of independent models over on
 	"A parameter belonging to a different mode is REFUSED, not ignored — an artifact passed to a map run fails rather than being dropped. " +
 	"Job-shaped: if the run outlives waitSeconds you get a runId to poll with explore_run_status."
 
-// uniformModes are the modes whose parameter shape is exactly the common one — nothing beyond purpose
-// and criteria. challenge/compare/forecast each declare more; see modeInputRules.
+// uniformModes are the modes that take no parameters beyond the common ones.
 var uniformModes = []string{mode.Map, mode.Synthesize, mode.Catalog, mode.Shortlist, mode.AICollab}
 
-// allModes is every mode the single `explore` tool accepts, uniform ones first so the enum reads in
-// increasing order of what it demands of the caller.
+// allModes lists every mode the explore tool accepts, uniform modes first.
 var allModes = append(append([]string{}, uniformModes...), mode.Challenge, mode.Compare, mode.Forecast)
 
-// modeSpecificProps is every parameter that belongs to SOME mode but not all. It is the universe the
-// per-mode rules partition: whatever a mode does not require, it forbids.
+// modeSpecificProps are the parameters that belong to only some modes.
 var modeSpecificProps = []string{"artifact", "options", "comparisonAxes", "target", "unit", "horizon", "conditioningEvent"}
 
-// modeInputRules is the ONE definition of "which parameters go with which mode", read by both the
-// schema generator and the handler. Two lists that had to agree would eventually not.
-//
-// Note `requires` and the implicit forbid: a mode forbids every mode-specific parameter it does not
-// require. Accepting an ignored parameter is the failure this avoids — a caller who passes `artifact`
-// to a `map` run believes the artifact was reviewed, and a silent success is the worst possible
-// answer. `conditioningEvent` is optional-for-forecast, so it is permitted there and forbidden
-// elsewhere.
+// modeInputRules defines which mode-specific parameters each mode requires or permits. Both the schema and
+// the handler use it. A mode forbids every mode-specific parameter it neither requires nor permits, so a
+// misplaced parameter is refused instead of silently ignored.
 var modeInputRules = map[string]struct {
 	requires []string
-	permits  []string // additionally allowed but not required
+	permits  []string // allowed but not required
 }{
 	mode.Challenge: {requires: []string{"artifact"}},
 	mode.Compare:   {requires: []string{"options", "comparisonAxes"}},
 	mode.Forecast:  {requires: []string{"target", "unit", "horizon"}, permits: []string{"conditioningEvent"}},
 }
 
-// allowedFor reports the mode-specific parameters a mode may carry (required + permitted).
+// allowedFor returns the mode-specific parameters mode m requires or permits.
 func allowedFor(m string) map[string]bool {
 	out := map[string]bool{}
 	r, ok := modeInputRules[m]
 	if !ok {
-		return out // a uniform mode carries none of them
+		return out
 	}
 	for _, p := range r.requires {
 		out[p] = true
@@ -478,26 +417,11 @@ func allowedFor(m string) map[string]bool {
 	return out
 }
 
-// modeBranches renders the per-mode contract as a `oneOf` DISCRIMINATED UNION — one branch per mode,
-// each pinning `mode` to its const, listing what that mode requires, and forbidding every
-// mode-specific parameter it does not take. Generated from modeInputRules so the published schema
-// cannot drift from the handler enforcing the same rules.
+// modeBranches returns the oneOf branches for exploreInputSchema, generated from modeInputRules. Each branch
+// fixes mode to a const, requires that mode's parameters and forbids the other mode-specific ones.
 //
-// WHY oneOf/not/anyOf RATHER THAN THE OBVIOUS if/then. This repo ships its own validator
-// (meshcore/jsonschema) and a test — vocabulary_test.go — fails the build if a published schema uses
-// a keyword that validator does not implement. The reasoning there is exact and worth restating: an
-// unimplemented keyword is treated as an annotation, so an `if`/`then` contract would be SILENTLY
-// IGNORED by our own strict check while a compliant client ENFORCED it, and the build would stay
-// green the whole time. `if`/`then` is unimplemented; `oneOf`, `not`, `anyOf`, `const` and `required`
-// all are. Expressing it this way keeps the schema something we validate against ourselves rather
-// than something we merely advertise.
-//
-// Exactly one branch can match, because the eight `mode` consts are distinct — which is what makes
-// `oneOf` correct here rather than merely convenient.
-//
-// The forbids matter as much as the requires: without them the schema would describe a tool that
-// accepts `target` on a `challenge` run, and a validating client would forward the call for the
-// server to reject instead of catching it locally.
+// It uses oneOf, not and anyOf rather than if/then because meshcore/jsonschema does not implement if/then,
+// and vocabulary_test.go fails on keywords that validator would ignore.
 func modeBranches() string {
 	branches := make([]string, 0, len(allModes))
 	for _, m := range allModes {
@@ -506,8 +430,7 @@ func modeBranches() string {
 		required := append([]string{"mode"}, modeInputRules[m].requires...)
 		branch := fmt.Sprintf(`"required": [%s], "properties": {"mode": {"const": %q}}`, quotedList(required), m)
 
-		// "this mode carries none of the others" — as `not: {anyOf: [{required:[p]}, …]}`, since a
-		// property is forbidden exactly when requiring it must fail.
+		// Forbid the other parameters with not: {anyOf: [{required: [p]}, ...]}.
 		forbidden := make([]string, 0, len(modeSpecificProps))
 		for _, p := range modeSpecificProps {
 			if !allowed[p] {
@@ -530,8 +453,7 @@ func quotedList(ss []string) string {
 	return strings.Join(out, ", ")
 }
 
-// raw compacts a schema literal, failing loudly at startup if it is not valid JSON (a malformed schema
-// would otherwise reach a client as an uninterpretable tool declaration).
+// raw returns s as a json.RawMessage, panicking if it is not valid JSON.
 func raw(s string) json.RawMessage {
 	var buf json.RawMessage
 	if err := json.Unmarshal([]byte(s), new(any)); err != nil {
@@ -541,9 +463,8 @@ func raw(s string) json.RawMessage {
 	return buf
 }
 
-// instructions is the cross-tool contract carried in `initialize.instructions`. It is the one place a
-// client model reads BEFORE choosing a tool, so it states the rules that no per-tool description can
-// enforce on its own.
+// instructions is the server's initialize instructions, which describe how the tools fit together and how
+// to report results.
 const instructions = `exploremesh runs a blind panel of independent models over one question and returns a HOST-COMPUTED result.
 
 How the tools relate:

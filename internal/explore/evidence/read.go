@@ -1,20 +1,14 @@
 package evidence
 
-// This file READS a captured run directory into memory. It is deliberately the only half of the export that
-// knows about files, and it reads the persisted JSON — never the live in-memory types — because the system
-// of record is the run directory. Two consequences worth stating:
+// This file reads a captured run directory into memory. It is the only part of the export that reads files,
+// and it reads the persisted JSON, since the run directory is the system of record.
 //
-//   - A MISSING MANIFEST MEANS AN UNFINISHED RUN. The manifest is written last and renamed into place, so
-//     its absence is the capture layer's own signal that the directory is not a complete record. The export
-//     refuses rather than exporting a partial one.
-//   - THE APPEND-ONLY LEDGER IS READ FROM ITS JSONL, not from the confirmation record's embedded copy. The
-//     JSONL is the designated append-only artifact; the embedded copy exists for a different purpose.
+//   - A missing manifest means an unfinished run: the manifest is written last, so the export refuses.
+//   - The merge ledger is read from its append-only JSONL file, not from the copy embedded in the
+//     confirmation record.
 //
-// Where a persisted shape happens to be an exported Go type that round-trips cleanly (schema.RawTask,
-// govern.Report, govern.Decision, canon.LedgerRow, …) the reader uses it: the export must consume exactly
-// the bytes the capture layer writes, and re-declaring those shapes here would create two definitions of one
-// wire format that could drift apart silently. Where the persisted shape CANNOT round-trip — round.Round has
-// unexported fields and marshals through a custom encoder — a local wire struct mirrors the encoder's output.
+// Persisted shapes are decoded into the Go types that wrote them, so there is one definition of each
+// format. round.Round has unexported fields and a custom encoder, so roundWire mirrors its encoding.
 
 import (
 	"bufio"
@@ -33,8 +27,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// Artifact file names inside a run directory (the capture layer's own vocabulary, restated here as the
-// export's read contract).
+// Artifact file names inside a run directory, as the capture package writes them.
 const (
 	fileManifest         = "manifest.json"
 	fileTask             = "task.json"
@@ -50,8 +43,7 @@ const (
 	fileDegraded         = "degraded.json"
 )
 
-// roundWire mirrors round.Round's custom JSON encoding (its fields are unexported so the immutable blind
-// baseline cannot be rewritten — which also means it has no decoder, hence this).
+// roundWire mirrors round.Round's JSON encoding. round.Round keeps its fields unexported and has no decoder.
 type roundWire struct {
 	Index       int               `json:"index"`
 	ID          string            `json:"id"`
@@ -61,8 +53,8 @@ type roundWire struct {
 	Carried     *round.Artifact   `json:"carried,omitempty"`
 }
 
-// runRecord is a whole captured run, read into memory. Every field is exactly what the run directory holds;
-// nothing here is derived, defaulted or repaired — the derivation happens in evidence.go, over this.
+// runRecord is a captured run read into memory, exactly as the run directory holds it. Derivation happens in
+// evidence.go.
 type runRecord struct {
 	Dir          string
 	Manifest     capture.ManifestV1
@@ -70,7 +62,7 @@ type runRecord struct {
 	HasTask      bool
 	Formulation  schema.Formulation
 	Rounds       []roundWire
-	Ledger       []canon.LedgerRow // the CONFIRMED (or only) revision
+	Ledger       []canon.LedgerRow // the confirmed (or only) revision
 	Provisional  []canon.LedgerRow // the superseded revision, retained on disk
 	Confirmation *canon.Confirmation
 	Governance   *govern.Report
@@ -80,9 +72,8 @@ type runRecord struct {
 	Degraded     *schema.DegradedOutput
 }
 
-// readRun loads a captured run directory. It fails on a missing/unreadable manifest (an unfinished run) and
-// on a malformed artifact — an export that silently skipped a file it could not parse would produce a
-// database that looks complete and is not.
+// readRun loads a captured run directory. A missing or unreadable manifest, or a malformed artifact, is an
+// error rather than a skipped file.
 func readRun(dir string) (*runRecord, error) {
 	rec := &runRecord{Dir: dir}
 	if err := readJSONFile(dir, fileManifest, &rec.Manifest, true); err != nil {
@@ -129,8 +120,8 @@ func readRun(dir string) (*runRecord, error) {
 	if rec.Degraded, err = readOptional[schema.DegradedOutput](dir, fileDegraded); err != nil {
 		return nil, err
 	}
-	// A run with no recorded round still exports (a halt before the fan-out is a real, exportable record);
-	// but a run whose rounds file exists and is empty while envelopes were captured is a corrupt directory.
+	// A run that halted before the fan-out has no round and still exports; envelopes without a round mean
+	// the directory is inconsistent.
 	if len(rec.Rounds) == 0 && len(rec.Manifest.Envelopes) > 0 {
 		return nil, fmt.Errorf("run directory %s: the manifest lists %d envelope(s) but %s records no round — the directory is inconsistent",
 			dir, len(rec.Manifest.Envelopes), fileRounds)
@@ -138,8 +129,8 @@ func readRun(dir string) (*runRecord, error) {
 	return rec, nil
 }
 
-// readJSONFile decodes one artifact. When required is false a missing file leaves the target untouched (the
-// artifact simply did not apply to this mode); a PRESENT but malformed file is always an error.
+// readJSONFile decodes one artifact into v. When required is false a missing file leaves v unchanged; a
+// malformed file is always an error.
 func readJSONFile(dir, name string, v any, required bool) error {
 	b, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
@@ -170,9 +161,8 @@ func readOptional[T any](dir, name string) (*T, error) {
 	return &v, nil
 }
 
-// readLedger reads an append-only merge-ledger JSONL, one row per line, IN FILE ORDER. Order is part of the
-// artifact: the revision hash is a chain over the rows in exactly this sequence, so reordering them would
-// break the very property the ledger exists to provide.
+// readLedger reads a merge-ledger JSONL file, one row per line, in file order. The order matters because
+// the revision hash chains over the rows in sequence.
 func readLedger(dir, name string) ([]canon.LedgerRow, error) {
 	f, err := os.Open(filepath.Join(dir, name))
 	if err != nil {

@@ -1,6 +1,5 @@
-// Package model is the ModelAccess layer: the contract every adapter implements
-// and the shared call/result shapes. Concrete adapters live in subpackages
-// (Batch 1 ships only the deterministic fake under model/fake).
+// Package model defines the contract every model adapter implements and the shared call and result
+// shapes. Concrete adapters live in subpackages.
 package model
 
 import (
@@ -9,21 +8,19 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/core"
 )
 
-// Call is one model invocation request handed to an adapter. Role and Phase are OPAQUE
-// string labels (meshcore carries them for audit/attribution; it does not interpret them —
-// the app owns the typed Role/Phase enums and converts at the boundary).
+// Call is one model invocation request handed to an adapter. Role and Phase are opaque labels carried
+// for audit; the application owns their meaning.
 type Call struct {
 	Role     string        // opaque label (app's role)
 	Phase    string        // opaque label (app's phase)
 	Model    string        // catalog key
 	ModelArg core.ModelArg // the opaque adapter argument (the expected identity)
 	Effort   string        // resolved reasoning effort/thinking ("" = unspecified); recipe decides use
-	CopyRoot string        // the isolated workspace copy the reviewer may read
-	// WorkDir is the working directory the CLI process runs in (CONTAINMENT). Empty → the process's
-	// own cwd, so a caller that must not let an agentic CLI read/wander the launching project (e.g.
-	// exploremesh, which reviews nothing on disk) MUST set this to a fresh isolated dir. The shell
-	// adapter sets cmd.Dir to it; the ACP adapter already runs in a fresh temp dir when CopyRoot is
-	// empty. Read-only recipe flags remain the second containment layer.
+	CopyRoot string        // the isolated workspace copy the model may read
+	// WorkDir is the working directory the CLI process runs in. Empty means the process's own cwd, so a
+	// caller that must keep an agentic CLI out of the launching project must set a fresh isolated
+	// directory. The ACP adapter uses a fresh temp dir when CopyRoot is empty. Read-only recipe flags
+	// are a second containment layer.
 	WorkDir string
 	Prompt  string // the rendered prompt
 }
@@ -35,9 +32,8 @@ type Result struct {
 	ExitCode    int
 	ActualModel string                // the model the adapter reports actually answered
 	Evidence    core.IdentityEvidence // the tier of signal behind ActualModel ("" = none)
-	// Payload is the SEMANTIC content when the CLI wraps it in an envelope (e.g.
-	// claude-code `--output-format json` → the reviewer JSON inside `result`). The
-	// Manager parses Payload when present, else Stdout; Stdout is always kept for audit.
+	// Payload is the semantic content when the CLI wraps it in an envelope, such as claude-code's
+	// `result` field. Callers parse Payload when present, else Stdout; Stdout is always kept for audit.
 	Payload []byte
 }
 
@@ -57,10 +53,8 @@ type DiscoveredModel struct {
 	Efforts       []string // supported efforts when the mechanism reports them (nil = none reported)
 }
 
-// Lister is the OPTIONAL model-discovery capability an adapter may implement. Discovery
-// runs a metadata/listing command only (never a model invocation, never token spend) and
-// is invoked strictly on demand — never from default tests, doctor, or page load. Adapters
-// without a discovery mechanism simply do not implement it.
+// Lister is the optional model-discovery capability. Discovery runs only a listing command, never a
+// model invocation, and only on demand, never from default tests or doctor.
 type Lister interface {
 	// ListModels runs the adapter's discovery mechanism and parses its output.
 	ListModels(ctx context.Context) ([]DiscoveredModel, error)
@@ -69,10 +63,9 @@ type Lister interface {
 	DiscoveryMechanism() (command, kind string)
 }
 
-// ArgPreviewer is the OPTIONAL capability to render the EFFECTIVE invocation argv for a
-// pending (model, effort) choice — composed from the same recipe that real calls use, so
-// the preview can never drift from actual behavior. The returned argv starts with the
-// binary name; the prompt position is shown as the literal placeholder "<prompt>".
+// ArgPreviewer is the optional capability to render the invocation argv for a (model, effort) choice,
+// built from the same recipe real calls use. The argv starts with the binary name, and the prompt
+// position is the placeholder "<prompt>".
 type ArgPreviewer interface {
 	PreviewArgs(modelArg, effort string) []string
 }

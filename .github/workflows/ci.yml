@@ -1,5 +1,5 @@
-# CI runs the SAME gate contributors run locally, and nothing else. The Makefile is the
-# single definition of what "green" means; this file only invokes it, so the two cannot drift.
+# CI runs the same gate contributors run locally. The Makefile defines green; this file only
+# invokes it.
 name: CI
 
 on:
@@ -29,10 +29,9 @@ jobs:
             go.sum
             meshcore/go.sum
 
-      - name: Standard gate (fmt, vet, build, test, race, boundary, both golden runs)
+      - name: Standard gate (fmt, vet, staticcheck, build, test, race, boundary, both golden runs)
         run: make gate
 
-      # Not part of the gate (see the Makefile): the Windows build is cross-compiled to catch a
-      # compile break early, but nothing here executes on Windows or claims it works there.
+      # Not part of the gate: this catches Windows compile errors; nothing runs on Windows here.
       - name: Windows cross-compile
         run: make windows-build

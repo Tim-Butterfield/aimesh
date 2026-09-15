@@ -16,9 +16,8 @@ func ref(id, adapter, model string) review.SeatRef {
 	return review.SeatRef{SeatID: id, Adapter: adapter, Model: model}
 }
 
-// TestComposeAgreement_NeverTouchesTheCount is the invariant this whole feature is defined by. An
-// adjusted agreement figure would need a model-family taxonomy the host cannot verify; what it can do
-// is say how many DISTINCT models are behind the number it already computed.
+// TestComposeAgreement_NeverTouchesTheCount checks that composition reports how many distinct models
+// back the agreement count and never adjusts the count itself.
 func TestComposeAgreement_NeverTouchesTheCount(t *testing.T) {
 	adj := &adjudication.Result{
 		Findings: []review.Finding{{ID: "1"}, {ID: "2"}},

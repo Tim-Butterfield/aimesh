@@ -1,9 +1,7 @@
 package config
 
-// store.go holds the domain-free config-store I/O: byte-atomic writes, YAML/JSON format
-// detection + conversion, strict JSON decode plumbing, and the "validate before load / write"
-// mechanism. The schema check is INJECTED via ValidateBytes, so this store never learns any
-// app's typed schema.
+// store.go holds domain-free configuration I/O: atomic writes, YAML and JSON handling, strict decoding,
+// and validation before load and write. The caller supplies the schema check as ValidateBytes.
 
 import (
 	"bytes"
@@ -96,8 +94,8 @@ func ApplyPatchToFile(path string, patch Patch, validate ValidateBytes) error {
 	if _, ok := root["schemaVersion"]; !ok {
 		root["schemaVersion"] = 1
 	}
-	// Serialize in the target file's format so the strict re-validation below (which picks the
-	// parser by extension) matches: YAML for .yaml/.yml, JSON for a legacy .json.
+	// Serialize in the target file's format so the re-validation below, which picks the parser by
+	// extension, matches: YAML for .yaml/.yml, JSON otherwise.
 	var out []byte
 	var err error
 	if IsYAML(path) {
@@ -116,11 +114,9 @@ func ApplyPatchToFile(path string, patch Patch, validate ValidateBytes) error {
 	return WriteFileAtomic(path, out)
 }
 
-// WriteFileAtomic writes already-serialized config bytes to path **atomically**: it creates the
-// parent dir, writes a temp file in the SAME directory, then renames it over the target (a rename
-// within a filesystem is atomic), so a crash/interruption never leaves a truncated or partially-
-// written config. The temp file is removed on every failure path (and is a harmless no-op once
-// renamed). It does not parse/validate/mutate — it only writes bytes safely.
+// WriteFileAtomic writes serialized configuration bytes to path atomically: it creates the parent
+// directory, writes and syncs a temp file in the same directory, then renames it over the target, so an
+// interruption never leaves a partial file. The temp file is removed on every failure path.
 func WriteFileAtomic(path string, b []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

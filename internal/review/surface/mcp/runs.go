@@ -9,26 +9,17 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the JOB REGISTRY — the same mechanism exploremesh's MCP surface uses, with one
-// addition this server needs and that one does not: a registry entry also HOLDS the decision set a
-// later `review_remediate --fromRun` writes from.
+// This file implements the run registry, shared in shape with exploremesh's. An entry also holds the
+// decision set a later review_remediate {fromRun} applies: the accepted findings, the files reviewers
+// were shown, and base hashes of targeted files, captured once when the report completes.
 //
-// That is what makes two-phase remediation possible at all. The accepted findings, the files the
-// reviewers were actually shown, and the base hashes of every targeted file are captured when the
-// report run completes and are never recomputed: a remediation that re-derived its own accepted set
-// would be a second adjudication wearing the first one's name.
+// The registry is the fast path. It is in-memory and bounded, so the same set is also stored in the
+// run's directory and remediateFromDisk reads it there. The source-run guard, which returns the
+// original receipt to a retry, lives only here; after a restart the stored base-hash pins refuse a
+// second write instead.
 //
-// It is the FAST path, not the only one. The registry is in-memory and bounded, so an entry is
-// evicted by retention and lost outright on a restart; the same set is ALSO on disk, in the run's
-// own directory, and `review_remediate {fromRun}` falls back to reading it there (mcp.go's
-// remediateFromDisk). What lives only here — and therefore only for the life of the process — is
-// the source-run guard below, which returns the ORIGINAL receipt to a retry. After a restart the
-// durable base-hash pins refuse the second write instead, as a halt.
-//
-// It is not a spend governor — see the note on the retention constants for why there are no admission
-// bounds and where the concurrency decision lives. For the write primitive, the
-// idempotency guard is not a convenience. A retried remediation that applied a second time would be
-// an unrequested write.
+// Idempotency matters for the write tool: a retried remediation applied twice would be an unrequested
+// write.
 
 // Run states, as they appear on the wire.
 const (
@@ -38,35 +29,22 @@ const (
 	StateCancelled = "cancelled"
 )
 
-// There is deliberately NO ADMISSION GOVERNOR — neither a lifetime run cap nor an in-flight one.
-//
-// The lifetime cap was never the spend ceiling its name implied: stopping and starting the server
-// cleared the counter, so its guarantee lasted exactly as long as the process did.
-//
-// The in-flight cap did hold, but it was the wrong shape. What it really bounded was how many
-// provider CLI subprocesses this machine hosts at once — a fact about the operator's hardware
-// (memory, process budget, whether the model is local and loads weights) and their provider rate
-// limits. A launch-time constant chosen by reviewmesh is a guess about all of those. That number is
-// now stated PER INVOCATION as `maxParallel`, by the caller who knows it, and it bounds the seats of
-// their own run rather than admission to the server.
-//
-// So the registry bounds only RETENTION, which is about this process's memory and nothing else.
+// The registry bounds only retention, which is about this process's memory. There is no admission
+// limit: how many CLIs a machine can run at once depends on its hardware and the caller's provider rate
+// limits, so callers state it per run with maxParallel.
 const (
 	retainFinished = 50
 	finishedTTL    = time.Hour
 )
 
-// decisionSet is a completed report run's inspectable, already-adjudicated output — the exact input
-// a `fromRun` remediation writes from.
+// decisionSet is a completed report run's adjudicated output, which a fromRun remediation applies.
 type decisionSet struct {
-	// Workspace is the LIVE directory the findings were judged against ("" for an inline
-	// workspace, which is why an inline run is not remediable).
+	// Workspace is the directory the findings were judged against; "" for an inline workspace, which is
+	// not remediable.
 	Workspace string
-	// WorkspaceIdentity is that directory's CANONICAL IDENTITY (device+inode plus resolved path)
-	// as it was when the review ran. The path string alone is not the reviewed tree: a symlink
-	// re-pointed, a checkout swapped, or a bind mount changed between the report and the apply
-	// would leave the string valid and the tree different. Captured once, here, and re-verified
-	// by the remediation.
+	// WorkspaceIdentity is that directory's canonical identity (device and inode plus resolved path) when
+	// the review ran. A re-pointed symlink or swapped checkout would keep the path valid but change the
+	// tree, so the remediation re-verifies it.
 	WorkspaceIdentity run.WorkspaceIdentity
 	Inline            bool
 	Profile           string
@@ -75,10 +53,9 @@ type decisionSet struct {
 	Findings          []review.Finding
 	Decisions         []review.Decision
 	Shown             map[string]bool
-	// BaseHashes is path → digest AS REVIEWED. Re-verifying it is what makes a stale decision set
-	// a halt rather than a silent write against a file nobody judged.
+	// BaseHashes maps path to digest as reviewed; re-verifying them makes a stale decision set halt.
 	BaseHashes map[string]string
-	// Accepted is how many findings are in the accepted set (host-computed once, here).
+	// Accepted is the number of findings in the accepted set.
 	Accepted int
 }
 
@@ -91,8 +68,8 @@ type record struct {
 	Start time.Time
 	End   time.Time
 
-	// SourceRunID is set on a REMEDIATION record: the report run whose set it applied. It is what
-	// makes "never apply the same decision set twice" enforceable without an idempotency key.
+	// SourceRunID, on a remediation record, is the report run whose set it applied. It prevents applying a
+	// decision set twice without an idempotency key.
 	SourceRunID string
 
 	done   chan struct{}
@@ -104,16 +81,11 @@ type record struct {
 	text       string
 	isError    bool
 	set        *decisionSet
-	// pick is the panel this run ASKED for, captured at admission. It is held on the record rather
-	// than only on the starting call so that a `review_run_status`/`review_run_result` issued while the run is
-	// still in flight can still answer "which panel is this?" — the requested-vs-executed echo is
-	// required on every branch of the review output schema, including `running`.
+	// pick is the panel this run requested, captured at admission so status and result calls can report
+	// it while the run is in flight.
 	pick panelPick
-	// links are the extra content blocks a terminal result carries beyond its text rendering —
-	// today, the `resource_link` to a remediation's patch. They live on the RECORD rather than only
-	// on the starting call's response so that a `review_run_result` fetched after the inline budget expired
-	// hands back the same link: the call that paid for the write is often not the call that collects
-	// it.
+	// links are the extra content blocks a terminal result carries, such as a patch's resource_link. They
+	// live on the record so a later review_run_result returns them too.
 	links []proto.Content
 }
 
@@ -123,10 +95,8 @@ func (r *record) snapshot() (state string, structured map[string]any, text strin
 	return r.state, r.structured, r.text, r.isError
 }
 
-// timestamps returns Start and End UNDER THE LOCK. End is written by finish() from the run's own
-// goroutine while a poller may be reading it from another, so it is not a field a reader may take
-// directly — and the tasks projection reads it on every `tasks/get`, which makes the unsynchronized
-// read a real one rather than a theoretical one.
+// timestamps returns Start and End under the lock, since finish writes End concurrently with readers
+// such as tasks/get.
 func (r *record) timestamps() (start, end time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -141,8 +111,8 @@ func (r *record) finish(state string, structured map[string]any, text string, is
 	close(r.done)
 }
 
-// attachPick records the requested panel at admission; pickSnapshot reads it back. Both take the
-// mutex because a concurrent review_run_status/review_run_result reads it from another goroutine.
+// attachPick records the requested panel at admission; pickSnapshot reads it back. Both lock, because
+// status and result calls read concurrently.
 func (r *record) attachPick(p panelPick) {
 	r.mu.Lock()
 	r.pick = p
@@ -181,8 +151,7 @@ func (r *record) decisions() *decisionSet {
 	return r.set
 }
 
-// registry holds this process's runs, bounded in two independent ways — concurrency (spend RATE)
-// and retention (memory). `started` is kept as reported telemetry, not as a ceiling.
+// registry holds this process's runs, bounded by retention. started is reported telemetry, not a limit.
 type registry struct {
 	mu       sync.Mutex
 	byID     map[string]*record
@@ -191,9 +160,8 @@ type registry struct {
 	order    []string
 	active   int
 	started  int
-	// onEvict is called with the run id of every record the registry drops. It exists so that the
-	// resources a run published cannot outlive the run itself: a `resource_link` the server can no
-	// longer explain is worse than no link, because a client would retry it.
+	// onEvict is called with the id of every evicted record, so a run's published resources do not
+	// outlive it.
 	onEvict func(runID string)
 }
 
@@ -203,9 +171,8 @@ func newRegistry() *registry {
 	}
 }
 
-// existing returns the run already registered under an idempotency key. A duplicate key is NEVER a
-// second run: a client retrying after a dropped connection must get its original run back, not a
-// second panel billed to the same person — and, on the remediation path, not a second write.
+// existing returns the run registered under an idempotency key. A duplicate key never starts a second
+// run or, for a remediation, a second write.
 func (rg *registry) existing(key string) *record {
 	if key == "" {
 		return nil
@@ -218,11 +185,8 @@ func (rg *registry) existing(key string) *record {
 	return nil
 }
 
-// existingForSource returns the remediation that has already applied a given report run.
-//
-// This is the guard an idempotency key cannot provide: a client that retries WITHOUT a key, or with
-// a fresh one, is still asking to apply a decision set that has already been applied. Returning the
-// prior receipt is the only answer that cannot double-write.
+// existingForSource returns the remediation that already applied sourceRunID. It catches retries
+// without a key or with a new one, which an idempotency key cannot.
 func (rg *registry) existingForSource(sourceRunID string) *record {
 	if sourceRunID == "" {
 		return nil
@@ -235,17 +199,11 @@ func (rg *registry) existingForSource(sourceRunID string) *record {
 	return nil
 }
 
-// reserve is the ATOMIC form of "is this already running/run, and if not, admit it".
+// reserve atomically checks for an existing run and admits a new one. Separate existing and admit
+// calls would let two calls for the same source run both proceed and apply the set twice.
 //
-// existing/existingForSource followed by admit is check-then-act, and on the WRITE primitive that
-// is not a style point: two calls naming the same source run can both find no prior remediation and
-// both proceed, and the second one applies a decision set that has already been applied. The gap is
-// wide — several map lookups plus the whole validation path sit inside it — so it is not a
-// theoretical race either.
-//
-// One lock covers both halves. The first caller to arrive is admitted and becomes the winner;
-// every later caller for the same key or the same source run is handed the WINNER's record and
-// attaches to it rather than starting anything. `prior` and `rec` are never both non-nil.
+// The first caller is admitted; later callers with the same key or source run receive the winner's
+// record as prior. rec and prior are never both non-nil.
 func (rg *registry) reserve(id, tool, mode, key, sourceRunID string, cancel func()) (rec, prior *record, err error) {
 	rg.mu.Lock()
 	defer rg.mu.Unlock()
@@ -270,9 +228,7 @@ func (rg *registry) reserve(id, tool, mode, key, sourceRunID string, cancel func
 	return r, nil, nil
 }
 
-// admit registers a new run. It does not refuse: there is no admission governor (see the note on
-// retention above), so the error return is kept only because callers treat admission as fallible and
-// a future bound would land here.
+// admit registers a new run. There is no admission limit, so it does not currently fail.
 func (rg *registry) admit(id, tool, mode, key, sourceRunID string, cancel func()) (*record, error) {
 	rg.mu.Lock()
 	defer rg.mu.Unlock()
@@ -308,9 +264,8 @@ func (rg *registry) release(id string) {
 	rg.evictLocked()
 }
 
-// evictLocked drops finished runs past the TTL, then past the retention count (oldest first). A
-// RUNNING run is never evicted — losing the handle would leave a live subprocess tree with nothing
-// able to cancel it.
+// evictLocked drops finished runs past the TTL, then past the retention count, oldest first. A running
+// run is never evicted, since that would leave nothing able to cancel it.
 func (rg *registry) evictLocked() {
 	now := time.Now()
 	keep := rg.order[:0]
@@ -369,8 +324,7 @@ func (rg *registry) get(id string) *record {
 	return rg.byID[id]
 }
 
-// cancelAll cancels every in-flight run — used when the transport goes away, so a disconnect never
-// leaves a panel of model CLIs running with nobody to receive their output.
+// cancelAll cancels every in-flight run, so a disconnect leaves no model CLIs running.
 func (rg *registry) cancelAll() {
 	rg.mu.Lock()
 	recs := make([]*record, 0, len(rg.byID))
@@ -385,7 +339,7 @@ func (rg *registry) cancelAll() {
 	}
 }
 
-// counts reports the in-flight and lifetime run counts (for the limits block `review_list` reports).
+// counts returns the in-flight and lifetime run counts.
 func (rg *registry) counts() (active, started int) {
 	rg.mu.Lock()
 	defer rg.mu.Unlock()

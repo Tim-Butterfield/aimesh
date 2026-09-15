@@ -33,10 +33,8 @@ type Info struct {
 	Arch      string `json:"arch"`
 }
 
-// Get returns the current build info. The -ldflags-stamped values win when a release set them;
-// otherwise the facts the Go toolchain embedded on its own are used, so a plain
-// `go install ./cmd/aimesh` from a tagged checkout reports that tag (and a pseudo-version after
-// it) instead of "dev". "dev" remains the answer only when neither source knows better.
+// Get returns the current build info. Values stamped with -ldflags win; otherwise the Go toolchain's
+// embedded build info is used, so a plain `go install` from a tagged checkout reports that tag.
 func Get() Info {
 	i := Info{
 		Version:   Version,
@@ -61,10 +59,8 @@ func Get() Info {
 	return i
 }
 
-// String renders the single user-facing version line: "reviewmesh <version>" (e.g.
-// "reviewmesh dev" for an unstamped local build, "reviewmesh 1.2.0" for a release).
-// The full build metadata (commit/date/dirty/go/os/arch) is retained in Info for the
-// `--version --json` form and release stamping/audit use, but is NOT shown by default.
+// String renders the user-facing version line, "reviewmesh <version>". The full metadata is available
+// through JSON.
 func (i Info) String() string {
 	return "reviewmesh " + i.Version
 }

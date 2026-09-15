@@ -12,50 +12,28 @@ import (
 	"time"
 )
 
-// This file is the OTHER direction of the transport: requests the SERVER sends to the CLIENT.
+// This file implements server-to-client requests, used for `roots/list`. The mechanism is domain-free:
+// an id allocator, a pending table, response routing in the read loop, a timeout, and cancellation.
 //
-// Until it existed, this package could only push notifications, which meant an entire half of the MCP
-// lifecycle was unreachable — `roots/list` is a server→client REQUEST, so a server that cannot issue one
-// cannot learn the roots its client declared no matter how carefully it implements the intersection rule.
-// The transport accepted `notifications/roots/list_changed` and could do nothing with it.
-//
-// The mechanism is deliberately small and DOMAIN-FREE: an id allocator, a pending table, response routing
-// in the read loop, a timeout, and cancellation safety. `roots/list` is the first user; nothing about the
-// plumbing knows what a root is.
-//
-// Two properties are load-bearing:
-//
-//   - OUTGOING IDS ARE NAMESPACED. They are strings with a fixed prefix ("srv:1", "srv:2", …), so a
-//     server-issued id can never collide with a client-issued one, whatever the client's numbering is.
-//     Correlating on a bare integer counter would make a well-behaved client's `id: 1` indistinguishable
-//     from our own.
-//   - A CLIENT THAT NEVER ANSWERS MUST NOT WEDGE THE SERVER. Every outgoing request carries a deadline and
-//     is abandoned when it expires; the waiter is removed from the pending table on EVERY exit path
-//     (answer, timeout, caller cancellation, session end), so a late answer finds no waiter and is dropped
-//     rather than delivered to a channel nobody reads.
+//   - Outgoing ids are namespaced strings ("srv:1", "srv:2", ...), so they never collide with client ids.
+//   - A client that never answers cannot stall the server: every request has a deadline, and its waiter
+//     is removed on every exit path, so a late answer is dropped.
 
 // outgoingIDPrefix namespaces server-issued request ids away from the client's.
 const outgoingIDPrefix = "srv:"
 
-// DefaultRequestTimeout bounds ONE server→client request. It is short on purpose: everything this server
-// asks a client for is a session-setup fact, and a host that cannot answer in this long is a host whose
-// answer the server must proceed without rather than block on.
+// DefaultRequestTimeout bounds one server-to-client request. It is short because the server asks only
+// for session-setup facts and proceeds without an answer.
 const DefaultRequestTimeout = 10 * time.Second
 
 // ErrNoSession is returned by Request when no session is live (before Serve, or after it returned).
 var ErrNoSession = errors.New("mcp: no live session to send a server→client request on")
 
-// ErrModernEra is returned by Request once the process has latched the 2026-07-28 revision.
+// ErrModernEra is returned by Request once the process has latched the 2026-07-28 revision, whose stdio
+// transport forbids a server from writing JSON-RPC requests. The check is in Request itself, the only
+// function that writes a request frame.
 //
-// It is a MUST, quoted from `basic/transports/stdio` §Receiving Messages: "The server MUST NOT write
-// JSON-RPC *requests* to `stdout`." Server-to-client interaction moved to Multi Round-Trip Requests —
-// the server returns an `InputRequiredResult` and the client retries — and this transport implements
-// no MRTR, so on the modern era it simply has no way to ask a client anything.
-//
-// The guard is here, at the one function that writes a request frame, rather than at `roots/list`'s
-// call site: an outgoing-request mechanism that is safe only because today's single caller checks
-// first is not safe, it is lucky. SUNSET-PATH inverted (MCP26-SUNSET) — at legacy removal this whole file goes,
-// because `roots/list` is its only user and Roots is deprecated in 2026-07-28.
+// SUNSET-PATH (MCP26-SUNSET): this whole file goes at legacy removal; `roots/list` is its only user.
 var ErrModernEra = errors.New("mcp: this process is serving MCP 2026-07-28, which forbids a server to write JSON-RPC requests to stdout (server→client interaction moved to Multi Round-Trip Requests)")
 
 // ErrSessionClosed is returned to every request still waiting when the session ends.
@@ -64,12 +42,10 @@ var ErrSessionClosed = errors.New("mcp: the session closed before the client ans
 // ErrRequestTimeout is returned when the client did not answer within the request timeout.
 var ErrRequestTimeout = errors.New("mcp: the client did not answer within the request timeout")
 
-// Request sends a JSON-RPC request to the CLIENT and waits for its response.
-//
-// It returns the response's `result` verbatim. A JSON-RPC error response becomes a *RequestError, so a
-// caller distinguishes "the client refused" from "the client never answered".
+// Request sends a JSON-RPC request to the client and waits for its response, returning the `result`
+// verbatim. An error response becomes a *RequestError, distinct from a timeout.
 func (s *Server) Request(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	// LEGACY-ONLY, checked before anything is allocated and long before anything is written.
+	// Legacy only, checked before anything is allocated or written.
 	if s.era() == EraModern {
 		return nil, ErrModernEra
 	}
@@ -94,9 +70,7 @@ func (s *Server) Request(ctx context.Context, method string, params any) (json.R
 	s.pending[key] = ch
 	s.omu.Unlock()
 
-	// The waiter is removed on EVERY exit path. Without this a timed-out request leaves an entry the
-	// read loop would later deliver into, and a client that answers slowly enough would grow the table
-	// without bound.
+	// The waiter is removed on every exit path, so a late answer finds no entry.
 	defer func() {
 		s.omu.Lock()
 		delete(s.pending, key)
@@ -159,10 +133,9 @@ func rawParams(params any) json.RawMessage {
 	return b
 }
 
-// deliver routes an inbound RESPONSE frame to whichever outgoing request is waiting for it. It reports
-// whether the frame was consumed here — a response for an id nobody is waiting on (a duplicate, or an
-// answer that arrived after its deadline) is dropped, because the alternative is to treat it as a request
-// and reply to it, which is a protocol violation.
+// deliver routes an inbound response frame to the outgoing request waiting for it and reports whether
+// the frame was consumed. A response in the server's id namespace with no waiter is dropped, never
+// answered.
 func (s *Server) deliver(raw []byte) bool {
 	var resp rpcResponse
 	if json.Unmarshal(raw, &resp) != nil {
@@ -198,22 +171,18 @@ func (s *Server) closeOutgoing() {
 
 // --- roots ---
 
-// Root is one filesystem root a CLIENT declares. `uri` is a `file://` URI per the spec.
+// Root is one filesystem root a client declares. `uri` is a `file://` URI per the spec.
 type Root struct {
 	URI  string `json:"uri"`
 	Name string `json:"name,omitempty"`
 }
 
-// Path returns the local filesystem path a root's `file://` URI names, and whether it is one. A root with
-// any other scheme is NOT a path, and reporting a plausible-looking one for it would hand a caller a
-// boundary derived from something that never was a directory.
+// Path returns the local filesystem path a root's `file://` URI names, and whether it is one. A root
+// with any other scheme is not a path.
 func (r Root) Path() (string, bool) { return RootPath(r.URI) }
 
-// RootPath converts a `file://` URI to a local filesystem path.
-//
-// It is deliberately strict: a non-file scheme, a URI naming a remote host, or one that does not parse is
-// refused rather than coerced. Windows drive paths (`file:///C:/proj`) lose the leading slash, which is
-// the only platform-shaped part of the conversion.
+// RootPath converts a `file://` URI to a local filesystem path. A non-file scheme, a remote host or an
+// unparseable URI is refused. A Windows drive path (`file:///C:/proj`) loses its leading slash.
 func RootPath(uri string) (string, bool) {
 	uri = strings.TrimSpace(uri)
 	if uri == "" {
@@ -223,8 +192,7 @@ func RootPath(uri string) (string, bool) {
 	if err != nil || !strings.EqualFold(u.Scheme, "file") {
 		return "", false
 	}
-	// An authority component other than an empty one or `localhost` names ANOTHER machine. There is no
-	// local path for it, and inventing one would silently reinterpret a remote root as a local directory.
+	// An authority other than empty or `localhost` names another machine.
 	if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
 		return "", false
 	}
@@ -232,9 +200,8 @@ func RootPath(uri string) (string, bool) {
 	if p == "" {
 		return "", false
 	}
-	// `/C:/proj` → `C:/proj`. The check is on the SHAPE (a drive letter followed by a colon), not on
-	// runtime.GOOS: a Windows-shaped URI means the same thing wherever it is parsed, and keying it off
-	// the host OS would make the same input mean two things.
+	// `/C:/proj` → `C:/proj`, decided by the path's shape rather than runtime.GOOS so the input means
+	// the same thing on every platform.
 	if len(p) >= 3 && p[0] == '/' && p[2] == ':' && isDriveLetter(p[1]) {
 		p = p[1:]
 	}
@@ -245,21 +212,16 @@ func isDriveLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
-// ClientDeclaredRoots reports whether the client declared the `roots` capability at initialize. It is the
-// gate on the whole round trip: a client that declared nothing is never asked, and — the rule that matters
-// — a server that is never told anything keeps exactly the roots its operator launched it with.
+// ClientDeclaredRoots reports whether the client declared the `roots` capability at initialize. A client
+// that declared nothing is never asked, so the server keeps the roots it was launched with.
 func (s *Server) ClientDeclaredRoots() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.clientRoots
 }
 
-// FetchRoots issues `roots/list` and hands the result to OnRoots. It is called automatically after the
-// client's `notifications/initialized` (when the client declared the capability) and again on every
-// `notifications/roots/list_changed`; it is exported so a server can re-ask on its own schedule.
-//
-// A failure is DIAGNOSED, never fatal, and never silently widening: OnRoots is not called at all, so
-// whatever root set was already in force stays in force.
+// FetchRoots issues `roots/list` and returns the client's roots. It is exported so a server can ask on
+// its own schedule.
 func (s *Server) FetchRoots(ctx context.Context) ([]Root, error) {
 	raw, err := s.Request(ctx, "roots/list", map[string]any{})
 	if err != nil {
@@ -274,7 +236,9 @@ func (s *Server) FetchRoots(ctx context.Context) ([]Root, error) {
 	return out.Roots, nil
 }
 
-// refreshRoots runs one roots/list round trip in the background and reports it to the application.
+// refreshRoots runs one `roots/list` round trip and passes the roots to OnRoots. It runs after
+// `notifications/initialized` and on every `notifications/roots/list_changed`. A failure is written to
+// Diagnostics and leaves the root set in force unchanged.
 func (s *Server) refreshRoots(reason string) {
 	if s.OnRoots == nil || !s.ClientDeclaredRoots() {
 		return
@@ -283,7 +247,7 @@ func (s *Server) refreshRoots(reason string) {
 	defer cancel()
 	roots, err := s.FetchRoots(ctx)
 	if err != nil {
-		// Stated, not swallowed — and stated on the DIAGNOSTICS sink, never on the protocol stream.
+		// Reported on Diagnostics, never on the protocol stream.
 		s.Diagnosticf("mcp: roots/list (%s) failed: %v — the root set in force is unchanged", reason, err)
 		return
 	}

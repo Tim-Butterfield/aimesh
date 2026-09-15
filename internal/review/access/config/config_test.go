@@ -137,12 +137,11 @@ func writeAimesh(t *testing.T, dir, body string) {
 	}
 }
 
-// TestLoadLayered_AdapterPathPrecedence exercises the shared-only adapter-path merge
-// (shared-user < shared-project) with provenance + shadow diagnostics + a presence-aware clear, and
-// proves a path sitting in a legacy config.yaml is IGNORED (paths come solely from adapters.yaml).
+// TestLoadLayered_AdapterPathPrecedence exercises the adapter-path merge (shared-user <
+// shared-project) with provenance, shadow diagnostics and an explicit clear, and checks that a path
+// in config.yaml is ignored.
 func TestLoadLayered_AdapterPathPrecedence(t *testing.T) {
-	// ONE user home carries both files — the legacy review config (.aimesh/review/config.yaml) and the
-	// shared adapters file (.aimesh/adapters.yaml) — which is the whole point of the shared state root.
+	// One user home holds both the review config and the shared adapters file.
 	home := t.TempDir()
 	proj := t.TempDir() // cwd == project root (shared-project lives here)
 	t.Setenv("AIMESH_HOME", home)
@@ -150,9 +149,8 @@ func TestLoadLayered_AdapterPathPrecedence(t *testing.T) {
 		t.Fatal(err) // make proj a VCS root so the shared-project layer (root-anchored) resolves
 	}
 
-	// A legacy config.yaml sets claude-code's path — it must be IGNORED. codex-cli is set at both
-	// shared scopes (project wins, shadowing user). ollama is set at shared-user then CLEARED at
-	// shared-project.
+	// config.yaml sets claude-code's path, which must be ignored. codex-cli is set at both shared
+	// scopes (project wins). ollama is set at shared-user and cleared at shared-project.
 	writeCfg(t, home, "schemaVersion: 1\nadapters:\n  claude-code: {path: /legacy-user/claude}\n")
 	writeAimesh(t, home, "schemaVersion: 1\nadapters:\n  codex-cli: {path: /shared-user/codex}\n  ollama: {path: /shared-user/ollama}\n")
 	writeAimesh(t, proj, "schemaVersion: 1\nadapters:\n  codex-cli: {path: /shared-proj/codex}\n  ollama: {path: \"\"}\n")
@@ -316,11 +314,9 @@ func TestStrict_AllowsFreeMapKeys(t *testing.T) {
 	}
 }
 
-// TestStrict_RejectsInertSections is the inverse of the old accept-and-ignore contract: sections and
-// keys that NOTHING reads (the former reserved `policy`/`validation`/`containment`/`audit`/`timeouts`
-// maps, the review cross-check/stabilization knobs, and the inert adapter/catalog metadata) are no
-// longer part of the schema, so strict parsing REFUSES them instead of silently doing nothing. Each
-// case is loaded on its own so one accidental re-addition cannot hide behind another.
+// TestStrict_RejectsInertSections: sections and keys outside the schema (such as `policy`,
+// `validation`, `containment`, `audit` and `timeouts`) are refused by strict parsing. Each case loads
+// on its own so one cannot mask another.
 func TestStrict_RejectsInertSections(t *testing.T) {
 	for _, tc := range []struct{ name, yaml string }{
 		{"policy", "policy: {providerDiversity: required}\n"},
@@ -363,27 +359,6 @@ func TestStrict_RejectsInertSections(t *testing.T) {
 	}
 }
 
-func TestSetAdapterPathInFile_CreatesAndPreserves(t *testing.T) {
-	p := filepath.Join(t.TempDir(), ".aimesh", "review", "config.yaml")
-	if err := SetAdapterPathInFile(p, "claude-code", "/bin/claude"); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	cfg, err := Load(p)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if cfg.Adapters["claude-code"].Path != "/bin/claude" {
-		t.Errorf("path = %q", cfg.Adapters["claude-code"].Path)
-	}
-	if err := SetAdapterPathInFile(p, "codex-cli", "/bin/codex"); err != nil {
-		t.Fatalf("second: %v", err)
-	}
-	cfg2, _ := Load(p)
-	if cfg2.Adapters["claude-code"].Path != "/bin/claude" || cfg2.Adapters["codex-cli"].Path != "/bin/codex" {
-		t.Errorf("paths not both preserved: %+v", cfg2.Adapters)
-	}
-}
-
 func TestDiscoverProjectConfig_PrefersYAML(t *testing.T) {
 	dir := t.TempDir()
 	rm := filepath.Join(dir, ".aimesh", "review")
@@ -405,9 +380,7 @@ func TestDiscoverProjectConfig_PrefersYAML(t *testing.T) {
 }
 
 func TestResolve_HiddenFakeProfile(t *testing.T) {
-	// The shipped `default` profile is now UNCONFIGURED; the deterministic fake coverage lives in
-	// the shipped-but-hidden FakeProfile, which resolves to the fake adapter — only under the
-	// internal test-harness gate.
+	// The hidden FakeProfile resolves to the fake adapter, only under the internal test gate.
 	t.Setenv(fake.EnvVar, "1")
 	plan, err := Default().Resolve(ResolveRequest{Profile: FakeProfile, Mode: review.ModeReport, Surface: "cli"})
 	if err != nil {
@@ -502,8 +475,7 @@ func TestResolve_NoCloudAutoSelection(t *testing.T) {
 	}
 }
 
-// The shipped `default` profile now ships UNCONFIGURED: resolving it fails (Doctor flags it),
-// rather than silently running the fake adapter.
+// The shipped `default` profile has no adapters, so resolving it fails.
 func TestResolve_UnconfiguredDefaultProfileFails(t *testing.T) {
 	if _, err := Default().Resolve(ResolveRequest{Surface: "cli"}); err == nil {
 		t.Error("resolving the unconfigured shipped default profile must fail (no adapter configured)")
@@ -594,10 +566,8 @@ func TestMerge_BoolExplicitFalseOverrides(t *testing.T) {
 	}
 }
 
-// TestParse_InertKeysAreRejectedNotIgnored pins the rule the whole schema is built on: a key
-// nothing reads is a LOAD ERROR, not a setting that quietly does nothing. `defaults.autoDetect` and
-// `lanes.<role>.optional` are read by no code anywhere, so neither is accepted here: a config that
-// names one must fail rather than look configured.
+// TestParse_InertKeysAreRejectedNotIgnored: keys outside the schema, such as `defaults.autoDetect`
+// and `lanes.<role>.optional`, fail to load rather than being ignored.
 func TestParse_InertKeysAreRejectedNotIgnored(t *testing.T) {
 	cases := []struct {
 		name string

@@ -1,23 +1,21 @@
 package schema
 
-// Phase labels are the opaque model.Call.Phase strings exploremesh sends to an adapter, so a fake
-// (or a real recipe) can tell which bookend/leg of the run it is answering. They are exploremesh's
-// vocabulary — meshcore treats Phase as an opaque string.
+// Phase labels are the model.Call.Phase values sent to an adapter, so a fake or a recording can tell
+// which step of the run a call belongs to. meshcore treats them as opaque strings.
 const (
-	PhaseFormulate    = "formulate"    // collator: raw_task + minimum schema → explorer_task_payload
-	PhaseExplore      = "explore"      // explorer: the shared payload → a schema-valid response
-	PhaseSynthesize   = "synthesize"   // collator: verified responses → collator-output
-	PhaseCanonicalize = "canonicalize" // canonicalizer (decoupled): raw nominations → a proposed canonical partition
-	// PhasePreflight is the CHEAP capability/identity probe issued to the collator + every canonicalizer
-	// BEFORE the explorer fan-out: a fallback swap must be caught before explorer tokens are
-	// spent, not after. Its body is irrelevant — only the resolved model identity is consumed.
+	PhaseFormulate    = "formulate"    // collator: raw task and minimum schema to explorer payload
+	PhaseExplore      = "explore"      // explorer: shared payload to a schema-valid response
+	PhaseSynthesize   = "synthesize"   // collator: verified responses to collator output
+	PhaseCanonicalize = "canonicalize" // canonicalizer: raw nominations to a proposed canonical partition
+	// PhasePreflight is the cheap identity probe sent to the collator and each canonicalizer before the
+	// explorer fan-out, so a model substitution is caught before explorer calls are spent. Only the
+	// reported model identity is used.
 	PhasePreflight = "preflight"
-	// PhaseConfirm is the BINDING confirmation round: each explorer is shown the provisional
-	// raw→canonical ledger (with attribution, in a persisted randomized order) and returns TYPED challenges.
+	// PhaseConfirm is the confirmation round: each explorer sees the provisional canonical ledger, with
+	// attribution in a recorded random order, and returns typed challenges.
 	PhaseConfirm = "confirm"
-	// PhaseBallot is the explicit BALLOT round (Shortlist): each explorer ranks/approves
-	// the CONFIRMED canonical IDs under decision inputs the host froze + hashed beforehand. It is a distinct
-	// phase from PhaseExplore precisely because it is a governance act, not an exploration: an adapter (and a
-	// recording) can tell a preference solicitation apart from a research call.
+	// PhaseBallot is the shortlist ballot round: each explorer ranks and approves the confirmed canonical
+	// IDs under decision inputs frozen beforehand. It is distinct from PhaseExplore so a preference
+	// solicitation can be told apart from a research call.
 	PhaseBallot = "ballot"
 )

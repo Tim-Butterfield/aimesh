@@ -9,29 +9,15 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/jsonschema"
 )
 
-// The caller's W3C trace context reaches the RUN RECORD, and says what it does not measure.
+// TestRunState_CarriesTheCallersTraceContext checks that the caller's W3C trace context reaches the
+// run record together with a statement of what it measures. The end-to-end check over the real wire
+// is TestSubprocess_ModernTraceContextReachesTheRunRecord in the explore MCP surface.
 //
-// HONEST NOTE ON THIS TEST'S STRENGTH, because the repo's rule is that a new test must fail against
-// the code it was written for. This one CANNOT fail at the prior HEAD — it references
-// `Request.Trace` and `review.Trace`, which did not exist, so at HEAD it fails to COMPILE rather
-// than to assert. That is a weaker proof, and it is stated rather than glossed. Two things make up
-// for it:
-//
-//  1. The end-to-end proof over the real wire lives in exploremesh, where the same feature can be
-//     exercised without any new symbol: `TestSubprocess_ModernTraceContextReachesTheRunRecord` sends
-//     `_meta.traceparent` to the shipped binary and reads the run directory back. That test compiles
-//     unchanged at HEAD and FAILS there, because the transport already parsed the key and nothing
-//     recorded it.
-//  2. The MUTATION CHECKS below, which are the real defence for this file. Each was performed by
-//     reverting one line and confirming the failure named beside it.
-//
-// MUTATIONS VERIFIED (revert the change, run this test, get the named failure):
-//   - delete `st["trace"] = o.Trace` in runState  → "run-state.json carries no trace block"
-//   - drop `Trace: req.Trace` from the RunOutcome literal in RunContext → same failure, which is why
-//     the outcome carries it rather than the halt writer taking a request it does not have
-//   - change `Measures: MeasuresCorrelationOnly` to "" → "measures = \"\"": the record would carry a
-//     correlation id with no statement of what it accounts for, which is the one thing this block
-//     must never do silently
+// Mutations this test catches:
+//   - deleting `st["trace"] = o.Trace` in runState;
+//   - dropping `Trace: req.Trace` from the RunOutcome literal in RunContext (the outcome carries the
+//     trace so the halt writer does not need the request);
+//   - setting `Measures` to "", which would record a correlation id without saying what it covers.
 func TestRunState_CarriesTheCallersTraceContext(t *testing.T) {
 	rec := &callRecorder{}
 	m := recorderManager(t, rec)

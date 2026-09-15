@@ -1,31 +1,9 @@
-// Package mcpserve composes the two domains into ONE MCP server: `aimesh mcp`. One binary, one
-// server, one entry in a client's configuration — matching the CLI, where both domains are reached
-// through a single `aimesh`.
+// Package mcpserve composes the review and explore MCP servers into one server, `aimesh mcp`.
 //
-// TOOLS ARE NOT THE HARD PART. proto.Server dispatches `tools/call` by name, and every tool is
-// already domain-prefixed (review_list, explore_list, …), so two registrars sharing one core cannot
-// collide. What needs composing is the pair of ID-ADDRESSED protocol methods, which carry no tool
-// name and so cannot be routed the same way:
-//
-//   - `resources/read <uri>`
-//   - `tasks/get <id>` and `tasks/cancel <id>`
-//
-// A proto.Server has ONE Resources field and ONE Tasks field; both domains supply theirs.
-//
-// HOW THE COMPOSITES ROUTE, AND WHY NOT THE OBVIOUS WAY. The tempting implementation is to parse the
-// identifier — review's run ids look like `<timestamp>-<hex>`, explore's like `run-<hex>`. That
-// difference is INCIDENTAL, nobody declared it, and a routing rule resting on it would keep working
-// right up until one of them changed its id format, at which point `tasks/cancel` would silently
-// stop reaching a run that is spending money.
-//
-// So these route by ASKING, not by parsing. Both provider interfaces already report ownership:
-// TaskProvider.Task returns (view, ok) and ReadResource returns a not-found error for a URI it does
-// not publish. The composite tries each domain and takes the one that claims the identifier. That is
-// exact, survives any id format, and needs no namespacing scheme.
-//
-// It assumes AT MOST ONE owner per identifier. With 64 bits of randomness per id that is already
-// overwhelming, and a test pins that the two formats stay disjoint so the assumption cannot rot
-// quietly.
+// Tool names are domain-prefixed, so tools need no routing. The ID-addressed methods
+// (resources/read, tasks/get and tasks/cancel) carry no tool name, so the composites route them by
+// asking each domain whether it owns the identifier instead of parsing the identifier's format. This
+// relies on at most one domain owning any identifier.
 package mcpserve
 
 import (
@@ -49,16 +27,15 @@ const ServerName = "aimesh"
 type Domain string
 
 const (
-	// DomainAll serves both. The default: one config entry gets you the whole tool.
+	// DomainAll serves both domains. It is the default.
 	DomainAll Domain = ""
-	// DomainReview / DomainExplore serve one. Narrowing is worth having because tool-list size costs
-	// a model attention on every call, and a review-only user should not carry explore's tools.
-	DomainReview  Domain = "review"
+	// DomainReview serves only the review tools.
+	DomainReview Domain = "review"
+	// DomainExplore serves only the explore tools.
 	DomainExplore Domain = "explore"
 )
 
-// ParseDomain validates an --only value. An unrecognized one is refused rather than defaulted: a
-// typo that silently served everything would hand a caller tools they explicitly asked not to have.
+// ParseDomain validates an --only value. An unrecognized value is refused rather than defaulted.
 func ParseDomain(s string) (Domain, error) {
 	switch Domain(strings.TrimSpace(s)) {
 	case DomainAll:
@@ -80,8 +57,7 @@ type Server struct {
 	// Only narrows the served tool set. Zero value serves both.
 	Only Domain
 
-	// Review and Explore are the fully-configured domain servers. A nil one is simply not served —
-	// which is how the caller expresses --only without this package knowing how either is built.
+	// Review and Explore are the configured domain servers. A selected domain must be non-nil.
 	Review  *reviewmcp.Server
 	Explore *exploremcp.Server
 
@@ -100,9 +76,7 @@ func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	return core.Serve(in, out)
 }
 
-// Core builds and returns the composed protocol server (for tests driving an explicit framer).
-func (s *Server) Core() (*proto.Server, error) { return s.build() }
-
+// build assembles the protocol core with the selected domains attached.
 func (s *Server) build() (*proto.Server, error) {
 	core := &proto.Server{
 		Info:         proto.Implementation{Name: ServerName, Title: "aimesh", Version: s.Version},
@@ -133,9 +107,8 @@ func (s *Server) build() (*proto.Server, error) {
 		return nil, fmt.Errorf("aimesh mcp: no domain selected")
 	}
 
-	// `agents_md` is registered ONCE for the whole server. It is one document about one tool, and
-	// proto.Server PANICS on a duplicate name — so the domain servers skip it whenever they are
-	// attached to an external core (see their Attach), and it is registered here instead.
+	// agents_md is registered once here. Domain servers attached to a shared core skip it, because
+	// proto.Server panics on a duplicate tool name.
 	registerAgentGuide(core)
 
 	core.Resources = composeResources(resources)
@@ -143,9 +116,7 @@ func (s *Server) build() (*proto.Server, error) {
 	return core, nil
 }
 
-// instructions is the composed cross-tool contract. Each domain's own instructions are written for a
-// server serving only that domain, so the composed server states the shape rather than concatenating
-// two documents that both open by describing "this server".
+// instructions returns the composed server's instructions, describing only the domains served.
 func (s *Server) instructions() string {
 	var b strings.Builder
 	b.WriteString("aimesh runs provider-diverse, governed AI reviews and explorations.\n\n")
@@ -179,9 +150,9 @@ func registerAgentGuide(core *proto.Server) {
 		Annotations: &proto.ToolAnnotations{
 			Title:           agentguide.ToolAnnotationTitle,
 			ReadOnlyHint:    true,
-			DestructiveHint: proto.Bool(false),
+			DestructiveHint: new(false),
 			IdempotentHint:  true,
-			OpenWorldHint:   proto.Bool(false),
+			OpenWorldHint:   new(false),
 		},
 	}, func(ctx context.Context, c *proto.Call) (*proto.CallToolResult, error) {
 		text, payload, err := agentguide.ToolPayload()
@@ -215,8 +186,8 @@ func (c resourceComposite) ListResources(ctx context.Context) ([]proto.Resource,
 	return out, nil
 }
 
-// ReadResource asks each domain in turn and returns the first that CLAIMS the URI. A not-found from
-// one provider is not the answer — it only means "not mine".
+// ReadResource returns the contents from the first domain that owns the URI. A not-found error from
+// one provider only means the URI belongs to another.
 func (c resourceComposite) ReadResource(ctx context.Context, uri string) ([]proto.ResourceContents, error) {
 	var lastErr error
 	for _, p := range c {
@@ -226,8 +197,7 @@ func (c resourceComposite) ReadResource(ctx context.Context, uri string) ([]prot
 		}
 		lastErr = err
 	}
-	// Every provider disclaimed it: the last refusal is the honest answer, and it is already the
-	// right shape (a *RequestError carrying CodeResourceNotFound).
+	// No provider owns the URI; return the last not-found error unchanged.
 	return nil, lastErr
 }
 
@@ -249,9 +219,7 @@ func (c taskComposite) Task(taskID string) (proto.TaskView, bool) {
 	return proto.TaskView{}, false
 }
 
-// CancelTask delivers the cancel to whichever domain owns the id. Ordering is irrelevant because at
-// most one can own it — and that is the assumption worth stating, since a cancel delivered to the
-// wrong registry would be reported as acknowledged while the real run kept spending.
+// CancelTask delivers the cancel to the domain that owns the id and reports whether one did.
 func (c taskComposite) CancelTask(taskID string) bool {
 	for _, p := range c {
 		if p.CancelTask(taskID) {

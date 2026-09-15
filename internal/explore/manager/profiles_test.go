@@ -8,8 +8,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
 )
 
-// secondProfile is a valid 3-explorer profile distinct from fakeRoster (so an added profile is
-// recognizable after a persistence round-trip), with a non-default defaultMode.
+// secondProfile is a valid three-explorer profile distinct from fakeRoster, with a non-default mode.
 func secondProfile() profile.Profile {
 	return profile.Profile{
 		Explorers: []roster.Explorer{
@@ -22,24 +21,23 @@ func secondProfile() profile.Profile {
 	}
 }
 
-// A fresh manager over an empty home seeds a one-profile `default` set from the caller's starting roster.
-func TestProfilesView_SeedsDefaultProfile(t *testing.T) {
+// A fresh manager over an empty home seeds a one-profile `default` set from the starting roster.
+func TestProfiles_SeedsDefaultProfile(t *testing.T) {
 	m := newTestManager(t, fakeRoster())
-	v := m.ProfilesView()
-	if v.DefaultProfile != profile.DefaultProfileName {
-		t.Fatalf("default profile = %q, want %q", v.DefaultProfile, profile.DefaultProfileName)
+	set := m.Profiles()
+	if set.DefaultProfile != profile.DefaultProfileName {
+		t.Fatalf("default profile = %q, want %q", set.DefaultProfile, profile.DefaultProfileName)
 	}
-	if len(v.Profiles) != 1 || !v.Profiles[0].IsDefault || v.Profiles[0].ExplorerCount != 2 {
-		t.Fatalf("seeded profiles = %+v, want one 2-explorer default", v.Profiles)
+	p, ok := set.Get(profile.DefaultProfileName)
+	if len(set.Profiles) != 1 || !ok || len(p.Explorers) != 2 {
+		t.Fatalf("seeded profiles = %+v, want one 2-explorer default", set.Profiles)
 	}
 }
 
-// TestSaveProfile_AddReplaceAndRoundTrip: add then replace a named profile, each bumping the generation,
-// with the result surviving a reload from the persisted file.
+// Adding then replacing a named profile reports each write, and the result is what a new manager loads.
 func TestSaveProfile_AddReplaceAndRoundTrip(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
-	t.Setenv("AIMESH_HOME", home)
 	t.Setenv("AIMESH_HOME", home)
 
 	m, err := New(cwd, fakeRoster())
@@ -53,11 +51,7 @@ func TestSaveProfile_AddReplaceAndRoundTrip(t *testing.T) {
 	if len(msgs) == 0 || !strings.Contains(msgs[0], "Added") {
 		t.Errorf("add should report Added, got %v", msgs)
 	}
-	if got := m.Generation(); got != 1 {
-		t.Fatalf("generation after add = %d, want 1", got)
-	}
 
-	// Replacing an existing profile reports Updated and bumps again.
 	replaced := secondProfile()
 	replaced.Explorers = replaced.Explorers[:2]
 	replaced.DefaultMode = "map"
@@ -68,32 +62,26 @@ func TestSaveProfile_AddReplaceAndRoundTrip(t *testing.T) {
 	if len(msgs) == 0 || !strings.Contains(msgs[0], "Updated") {
 		t.Errorf("replace should report Updated, got %v", msgs)
 	}
-	if got := m.Generation(); got != 2 {
-		t.Fatalf("generation after replace = %d, want 2", got)
-	}
 
-	// The write round-tripped through the persisted file: a second manager over the same cwd+home reloads it.
 	m2, err := New(cwd, fakeRoster())
 	if err != nil {
 		t.Fatalf("New m2: %v", err)
 	}
-	if err := m2.reload(); err != nil {
-		t.Fatalf("Reload: %v", err)
+	set := m2.Profiles()
+	d, ok := set.Get("wide")
+	if !ok {
+		t.Fatal("the saved profile was not loaded")
 	}
-	d, err := m2.ProfileView("wide")
-	if err != nil {
-		t.Fatalf("ProfileView after reload: %v", err)
+	if len(d.Explorers) != 2 || d.DefaultMode != "map" || set.DefaultProfile == "wide" {
+		t.Fatalf("loaded profile = %+v, want the 2-explorer map profile (not the default)", d)
 	}
-	if len(d.Explorers) != 2 || d.DefaultMode != "map" || d.IsDefault {
-		t.Fatalf("reloaded profile = %+v, want the 2-explorer map profile (not the default)", d)
-	}
-	// The profile editor sees the AUTHORED (preference) order, not a canonicalized one.
+	// Profiles keep their authored order.
 	if d.Explorers[0].Model != "wide-1" || d.Explorers[1].Model != "wide-2" {
 		t.Errorf("profile explorers must keep their authored order: %+v", d.Explorers)
 	}
 }
 
-// TestSaveProfile_Rejections: an empty name and an invalid roster are refused, persisting nothing.
+// An empty name, an invalid roster and an unknown mode are refused, persisting nothing.
 func TestSaveProfile_Rejections(t *testing.T) {
 	m := newTestManager(t, fakeRoster())
 	if _, err := m.SaveProfile("  ", secondProfile()); err == nil {
@@ -109,87 +97,65 @@ func TestSaveProfile_Rejections(t *testing.T) {
 	if _, err := m.SaveProfile("odd", badMode); err == nil {
 		t.Error("an unknown defaultMode must be rejected")
 	}
-	if got := m.Generation(); got != 0 {
-		t.Fatalf("generation after rejected writes = %d, want 0", got)
-	}
-	if got := len(m.ProfilesView().Profiles); got != 1 {
+	if got := len(m.Profiles().Profiles); got != 1 {
 		t.Fatalf("profiles after rejected writes = %d, want just the seeded default", got)
 	}
 }
 
-// TestDefaultProfileIsPinned: there is no set-default seam — as in reviewmesh, a no-flag run always
-// binds to the profile NAMED `default`. Saving another profile must not move the default, and the
-// cached default roster keeps tracking `default`.
+// Saving another profile does not move the default, and the cached roster keeps tracking `default`.
 func TestDefaultProfileIsPinned(t *testing.T) {
 	m := newTestManager(t, fakeRoster())
 	if _, err := m.SaveProfile("wide", secondProfile()); err != nil {
 		t.Fatalf("SaveProfile: %v", err)
 	}
-	if got := m.ProfilesView().DefaultProfile; got != profile.DefaultProfileName {
+	if got := m.Profiles().DefaultProfile; got != profile.DefaultProfileName {
 		t.Fatalf("default profile = %q — saving another profile must never move the default", got)
 	}
-	// The cached roster still tracks `default` (2 explorers), not the newly saved 3-explorer profile.
-	if got := len(m.Roster().Explorers); got != 2 {
+	if got := len(m.RosterView().Explorers); got != 2 {
 		t.Fatalf("default roster explorers = %d, want the default profile's 2", got)
 	}
 }
 
-// TestDeleteProfile: an unknown name errors; the DEFAULT profile is refused (set another default first);
-// a non-default profile deletes and bumps. The "last profile" guard is a defensive second gate — a set's
-// only profile is necessarily its default, so the default rule always fires first.
+// Deleting an unknown or the default profile is refused; a non-default profile deletes.
 func TestDeleteProfile(t *testing.T) {
 	m := newTestManager(t, fakeRoster())
 	if _, err := m.DeleteProfile("nope"); err == nil {
 		t.Error("deleting an unknown profile must error")
 	}
-	// The only profile IS the default → refused, with guidance to re-point the default first.
-	_, err := m.DeleteProfile(m.ProfilesView().DefaultProfile)
+	_, err := m.DeleteProfile(m.Profiles().DefaultProfile)
 	if err == nil {
 		t.Fatal("deleting the default profile must be refused")
 	}
 	if !strings.Contains(err.Error(), "default profile") {
 		t.Errorf("refusal should explain the default-profile rule: %v", err)
 	}
-	if got := m.Generation(); got != 0 {
-		t.Fatalf("generation after refused deletes = %d, want 0", got)
-	}
 
-	// Add a second profile; the non-default one deletes cleanly.
 	if _, err := m.SaveProfile("wide", secondProfile()); err != nil {
 		t.Fatalf("SaveProfile: %v", err)
 	}
 	if _, err := m.DeleteProfile("wide"); err != nil {
 		t.Fatalf("DeleteProfile: %v", err)
 	}
-	if got := m.Generation(); got != 2 {
-		t.Fatalf("generation after save+delete = %d, want 2", got)
-	}
-	if got := len(m.ProfilesView().Profiles); got != 1 {
+	set := m.Profiles()
+	if got := len(set.Profiles); got != 1 {
 		t.Fatalf("profiles after delete = %d, want 1", got)
 	}
-	// …and the deletion round-tripped to disk.
-	if err := m.reload(); err != nil {
-		t.Fatalf("Reload: %v", err)
-	}
-	if _, err := m.ProfileView("wide"); err == nil {
+	if _, ok := set.Get("wide"); ok {
 		t.Error("the deleted profile must be gone from the persisted set")
 	}
 }
 
-// TestProfiles_ReturnsADeepCopy: the caller-facing set must not alias the manager's state.
+// Profiles returns a copy that does not alias the manager's map or explorer slices.
 func TestProfiles_ReturnsADeepCopy(t *testing.T) {
 	m := newTestManager(t, fakeRoster())
 	got := m.Profiles()
-	// DefaultProfile is a value field — a by-value return can never alias it. The aliasing risks are
-	// the Profiles MAP and the explorer SLICES, so those are what this test mutates.
 	delete(got.Profiles, profile.DefaultProfileName)
-	if v := m.ProfilesView(); v.DefaultProfile != profile.DefaultProfileName || len(v.Profiles) != 1 {
-		t.Fatalf("mutating the returned set reached the manager's state: %+v", v)
+	if set := m.Profiles(); set.DefaultProfile != profile.DefaultProfileName || len(set.Profiles) != 1 {
+		t.Fatalf("mutating the returned set reached the manager's state: %+v", set)
 	}
-	// The explorer slices are copied too.
 	ex := m.Profiles().Profiles[profile.DefaultProfileName].Explorers
 	ex[0].Model = "clobbered"
-	if m.Roster().Explorers[0].Model == "clobbered" {
+	if m.RosterView().Explorers[0].Model == "clobbered" {
 		t.Error("mutating a returned profile's explorer slice reached the manager's roster")
 	}
 }

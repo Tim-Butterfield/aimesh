@@ -70,7 +70,7 @@ func TestExplore_ShortlistMode_RendersHostTalliedRankingAndRejects(t *testing.T)
 		}
 	}
 	// The word "consensus" may appear ONLY as a denial.
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if strings.Contains(strings.ToLower(line), "consensus") && !strings.Contains(strings.ToLower(line), "not consensus") {
 			t.Errorf("a ballot must never be rendered as consensus: %q", line)
 		}

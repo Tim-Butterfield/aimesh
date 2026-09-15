@@ -1,24 +1,13 @@
 package cli
 
-// ADDRESSING PART OF AN AUTHORITY DOCUMENT FROM THE COMMAND LINE.
-//
-// `--authority` declares a whole document. `--authority-manifest` declares PART of one: a JSON file
-// naming explicit byte offsets. That is the right wire format and the wrong thing to ask a person for —
-// someone asked for offsets tends to copy a section into a temp file instead, which silently changes
-// what the reviewers were told is authoritative. So a section or a byte range can be named on the
-// command line directly:
+// This file parses --authority selectors, which name part of a document on the command line:
 //
 //	--authority spec.md#The Relevant Part     the named top-level section
-//	--authority spec.md:1012-3033             an explicit byte range, start inclusive, end exclusive
+//	--authority spec.md:1012-3033             a byte range, start inclusive, end exclusive
 //
-// THE SUGAR DISSOLVES HERE. Both forms resolve to the SAME `ranges` declaration the manifest takes,
-// at the flag boundary, before anything else sees them — so the run record, the inclusion manifest
-// and every surface report a concrete byte range rather than a heading that might resolve differently
-// on a later read. What was included stays a recorded fact, which is the whole point of the manifest.
-//
-// It is deliberately CLI-ONLY. On ACP and MCP the caller is a model or a peer process, and it
-// declares authority through the structured manifest where ranges are already expressible; a
-// convenience whose job is to save a human some typing has no reason to exist there.
+// Both forms resolve at the flag boundary to the same ranges declaration --authority-manifest takes,
+// so the run record reports concrete byte ranges rather than a heading that could resolve
+// differently later. The selectors are CLI-only; ACP and MCP callers use the structured manifest.
 
 import (
 	"fmt"
@@ -32,29 +21,27 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/engine/authority"
 )
 
-// byteRangeSuffix matches a trailing `:START-END`. It is anchored at the END of the string and the
-// bounds must be digits, so a Windows path keeps working: `C:\spec.md` has a colon that cannot match,
-// and `C:\spec.md:10-20` still splits at the right one.
+// byteRangeSuffix matches a trailing :START-END. It is anchored at the end and requires digits, so a
+// Windows drive colon never matches.
 var byteRangeSuffix = regexp.MustCompile(`:(\d+)-(\d+)$`)
 
 // authorityRef is one `--authority` value after its selector has been split off.
 type authorityRef struct {
 	Path string
-	// Section is a heading to resolve; Start/End are an explicit range. At most one form is set.
+	// Section is a heading to resolve; Start and End are an explicit range. At most one form is set.
 	Section    string
 	Start, End int
 	HasRange   bool
 }
 
-// parseAuthorityRef splits a `--authority` value into its path and optional selector. A value with
-// neither selector is returned unchanged, which is the ordinary whole-document case.
+// parseAuthorityRef splits a --authority value into its path and optional selector. A value without
+// a selector names the whole document.
 func parseAuthorityRef(raw string) (authorityRef, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
 		return authorityRef{}, fmt.Errorf("empty --authority value")
 	}
-	// A HEADING WINS OVER A RANGE when both appear, because '#' cannot occur in the range syntax:
-	// splitting on '#' first means a heading containing a colon is not mangled.
+	// Split on '#' first: it cannot occur in the range syntax, so a heading containing a colon survives.
 	if path, section, ok := strings.Cut(v, "#"); ok {
 		if strings.TrimSpace(section) == "" {
 			return authorityRef{}, fmt.Errorf("--authority %q names no section after '#'", raw)
@@ -75,16 +62,11 @@ func parseAuthorityRef(raw string) (authorityRef, error) {
 	return authorityRef{Path: v}, nil
 }
 
-// resolveAuthorityRef turns one parsed reference into the declaration the core consumes.
+// resolveAuthorityRef turns a parsed reference into the declaration the core consumes.
 //
-// A SELECTOR MAKES THIS A PARTIAL INCLUSION, so the document is declared `ranges` rather than
-// requireFull — that is what makes the manifest record `complete: false` with its own embedded hash,
-// and what makes the omitted spans explicit in the prompt. Nothing about partial inclusion becomes
-// implicit just because the command line got shorter.
-//
-// A heading is resolved by READING THE FILE HERE. That costs a read the resolver will repeat, and it
-// buys the property that matters: the concrete offsets are fixed at declaration time and recorded,
-// rather than a name being re-resolved later against a document that may have moved on.
+// A selector makes the inclusion partial, declared as ranges, so the manifest records complete:false
+// and the prompt marks omitted spans. A heading is resolved by reading the file here, so the offsets
+// are fixed and recorded at declaration time.
 func resolveAuthorityRef(ref authorityRef, pin string) (review.AuthorityDoc, error) {
 	name := filepath.Base(filepath.Clean(ref.Path))
 	doc := review.AuthorityDoc{

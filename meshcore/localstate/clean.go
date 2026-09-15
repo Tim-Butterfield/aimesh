@@ -1,25 +1,19 @@
 package localstate
 
-// REMOVING PRIOR RUN ARTIFACTS.
+// Removing prior run artifacts.
 //
-// Run output accumulates, and it is not innocuous: each run directory holds the prompts, which embed
-// VERBATIM COPIES of everything the models were shown — roughly one copy per seat, plus the same text
-// again in a seat's stderr. So this is a disk-space command and a privacy command at once, and the
-// second reading is the one that decides its rules.
+// Run directories hold prompts that embed verbatim copies of everything the models were shown, so
+// cleaning is a privacy operation as well as a disk-space one.
 //
-// IT SWEEPS BOTH LOCATIONS. Where a run writes depends on whether `init` has been run in the tree:
-// the project `.aimesh/<component>/runs`, else `<os temp>/aimesh/<component>/runs`. A clean that knew
-// about only one would leave the other quietly accumulating — and it would be the temp one, which is
-// where a user who never ran `init` has every artifact they have ever produced.
+// Both locations a run can write to are swept: the project `.aimesh/<component>/runs`, and the temp
+// fallback `<os temp>/aimesh/<component>/runs` used when `init` has not been run.
 //
-// WHAT IT WILL NOT TOUCH, enforced structurally rather than promised:
+// The sweep never touches:
 //
-//   - Anything that is not a DIRECT CHILD of a resolved runs root. No recursion into a run to delete
-//     part of it, no walking upward, no globs.
-//   - The runs root itself, and every sibling of it — config, ledgers, containment copies. Only
-//     `<root>/runs/*` is ever a candidate.
-//   - A run younger than the grace period, because a review in progress is writing into its own run
-//     directory right now and this command has no way to ask it whether it has finished.
+//   - anything that is not a direct child of a resolved runs root (no recursion, no walking upward,
+//     no globs);
+//   - the runs root itself or its siblings, such as configuration and ledgers;
+//   - a run modified within the grace period, since a run in progress may still be writing to it.
 
 import (
 	"fmt"
@@ -29,16 +23,12 @@ import (
 	"time"
 )
 
-// CleanGrace is how recently a run directory may have been modified and still be spared. It exists
-// because a concurrently running review owns a directory this command can see but cannot ask about:
-// the alternative to a grace period is deleting a live run's journal mid-write.
+// CleanGrace is how recently a run directory may have been modified and still be spared, so a run that
+// is still writing is not deleted.
 const CleanGrace = 2 * time.Minute
 
-// CleanSelector says WHICH prior runs to remove. Exactly one field is set; a zero selector removes
-// nothing and is how a caller asks for an inventory.
-//
-// There is deliberately no default policy. Retention is a judgement about someone else's data, and a
-// command that guessed it would delete review artifacts nobody asked it to.
+// CleanSelector says which prior runs to remove. At most one field is set; a zero selector removes
+// nothing and requests an inventory. There is no default retention policy.
 type CleanSelector struct {
 	// All removes every run outside the grace period.
 	All bool
@@ -63,9 +53,8 @@ type RunDirInfo struct {
 	Skipped string
 }
 
-// CleanLocation is one runs root and what happened in it. Present even when empty, so a caller can
-// see that a location was CONSIDERED — "nothing in temp" and "temp was never looked at" are different
-// facts, and only the first is reassuring.
+// CleanLocation is one runs root and what happened in it. It is present even when empty, so a caller
+// can report that the location was checked.
 type CleanLocation struct {
 	Root      string
 	Component string
@@ -74,7 +63,7 @@ type CleanLocation struct {
 	Runs   []RunDirInfo
 }
 
-// Removed / Freed tally this location's actual deletions.
+// Removed counts this location's deletions and the bytes they freed.
 func (l CleanLocation) Removed() (int, int64) {
 	n, bytes := 0, int64(0)
 	for _, r := range l.Runs {
@@ -95,29 +84,22 @@ func (l CleanLocation) Total() (int, int64) {
 	return len(l.Runs), bytes
 }
 
-// SkipReasons — stable machine codes.
+// Skip reasons, as stable machine codes.
 const (
-	// SkipInProgress — modified within CleanGrace. A run being written right now looks exactly like
-	// a run that finished a second ago, so both are spared.
+	// SkipInProgress — modified within CleanGrace, so possibly still being written.
 	SkipInProgress = "possibly_in_progress"
 	// SkipRetained — the selector kept it (a --keep slot, or newer than --older-than).
 	SkipRetained = "retained_by_selector"
-	// SkipNotADirectory — an entry in the runs root that is not a run directory. It is REPORTED
-	// rather than removed: this command deletes run directories, and something else being there is
-	// a fact for the user, not a thing to tidy away.
+	// SkipNotADirectory — an entry in the runs root that is not a run directory; it is reported, not
+	// removed.
 	SkipNotADirectory = "not_a_run_directory"
 	// SkipRemoveFailed — deletion was attempted and failed (permissions, a file held open).
 	SkipRemoveFailed = "remove_failed"
 )
 
-// CleanRuns sweeps the run directories of one component in ONE location.
-//
-// `at` is the reference time for the grace period and for OlderThan, supplied rather than read so the
-// behaviour is testable and so a single sweep judges every location against one instant.
-//
-// dryRun computes exactly the same answer and deletes nothing — the report a caller prints is
-// therefore the same code path whether or not anything was removed, which is what keeps a preview
-// honest about what the real run would do.
+// CleanRuns sweeps the run directories of one component in one location. at is the reference time for
+// the grace period and OlderThan, so one sweep judges every location against one instant. dryRun
+// computes the same result without deleting anything.
 func CleanRuns(root, component string, sel CleanSelector, dryRun bool, at time.Time) (CleanLocation, error) {
 	loc := CleanLocation{Root: root, Component: component}
 	entries, err := os.ReadDir(root)
@@ -141,7 +123,7 @@ func CleanRuns(root, component string, sel CleanSelector, dryRun bool, at time.T
 		}
 		loc.Runs = append(loc.Runs, RunDirInfo{Path: p, Name: e.Name(), Modified: mod, Bytes: dirBytes(p)})
 	}
-	// NEWEST FIRST — the order --keep counts in, and the order a human reads a listing in.
+	// Newest first: the order --keep counts in.
 	sort.SliceStable(loc.Runs, func(i, j int) bool { return loc.Runs[i].Modified.After(loc.Runs[j].Modified) })
 
 	kept := 0
@@ -189,9 +171,8 @@ func selected(r RunDirInfo, sel CleanSelector, kept *int, at time.Time) bool {
 	}
 }
 
-// dirBytes sums a run directory's file sizes. An unreadable entry contributes 0 rather than failing
-// the sweep: the size is a courtesy for the report, and refusing to clean because one file could not
-// be measured would be the tail wagging the dog.
+// dirBytes sums a run directory's file sizes. Unreadable entries count as 0, since the size is only
+// informational.
 func dirBytes(dir string) int64 {
 	var total int64
 	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
@@ -206,13 +187,8 @@ func dirBytes(dir string) int64 {
 	return total
 }
 
-// CleanTargets resolves EVERY runs root a component's output can be written to, in the order a
-// reader should see them: the project location first (where an initialized tree writes), then the
-// temp fallback (where an uninitialized one does).
-//
-// Both are always returned, present or not. The caller reports what it found at each, so "your temp
-// fallback is empty" is a statement the command actually makes rather than an omission a user has to
-// interpret.
+// CleanTargets returns every runs root a component can write to: the project location first, then the
+// temp fallback. Both are always returned, so a caller can report each.
 func CleanTargets(component string) []string {
 	var out []string
 	if dir, ok := ComponentDir(component); ok {

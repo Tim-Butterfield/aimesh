@@ -5,12 +5,9 @@ import (
 	"testing"
 )
 
-// A protocol exemption that fails to match does not report itself — it just re-adds the failures the
-// exemption exists to suppress, on one GOOS only. scanMeshcore derives the file from filepath.Rel,
-// so the exemption must hold for a NATIVELY joined path: keyed on "mcp/", it silently missed
-// `mcp\tasks.go` and turned every exempt identifier in meshcore/mcp into a FAIL on Windows while the
-// Unix gate stayed green. filepath.Join is deliberate — a hardcoded backslash would assert nothing
-// on Unix, where a backslash is a legal filename character rather than a separator.
+// scanMeshcore derives paths with filepath.Rel, so the "mcp/" exemption must also match a natively
+// joined path such as mcp\tasks.go on Windows. filepath.Join is used because a literal backslash is an
+// ordinary filename character on Unix.
 func TestExemptTerm_MatchesANativelyJoinedPath(t *testing.T) {
 	if file := filepath.Join("mcp", "tasks.go"); !exemptTerm(file, "task") {
 		t.Errorf("exemptTerm(%q, \"task\") = false, want true (the mcp/ protocol exemption must apply)", file)

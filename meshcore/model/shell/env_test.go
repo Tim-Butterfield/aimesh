@@ -32,7 +32,7 @@ func spawnedEnv(t *testing.T, rec Recipe) map[string]string {
 		t.Fatalf("invoke: %v", err)
 	}
 	out := map[string]string{}
-	for _, line := range strings.Split(string(res.Stdout), "\n") {
+	for line := range strings.SplitSeq(string(res.Stdout), "\n") {
 		if k, v, ok := strings.Cut(line, "="); ok {
 			out[k] = v
 		}

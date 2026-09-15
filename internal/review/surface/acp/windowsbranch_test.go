@@ -5,21 +5,11 @@ import (
 	"testing"
 )
 
-// The over-broad-root refusal is the rule that stops `--root /`, `--root ~` or a declared
-// `C:\Windows` from widening a scope — and its WINDOWS half is the half a non-Windows machine cannot run.
-//
-// Substituting `windowsPaths` exercises the CASE-FOLDING branch on any platform. What it cannot reach
-// is stated here rather than left as a passing test that proves nothing:
-//
-// `matchSystemRoot`'s Windows arm strips the volume with `filepath.VolumeName` and compares against
-// `\`-separated entries with `filepath.Clean`. Both come from `path/filepath`, which is selected by
-// BUILD CONSTRAINT and is not substitutable — on unix `VolumeName("D:\\Windows")` is `""` and
-// `Clean` leaves the backslashes as a single opaque component, so the comparison cannot succeed no
-// matter what `windowsPaths` says. The drive-letter-agnostic rule is therefore verifiable only on
-// Windows (TestMatchSystemRoot_WindowsIsDriveLetterAgnostic).
-//
-// What IS covered below is that entering the Windows arm does not misclassify: an ordinary directory
-// is still not a system root.
+// Substituting windowsPaths exercises the case-folding branch of the over-broad-root rule on any
+// platform. The drive-letter-agnostic match cannot be reached off Windows: filepath.VolumeName and
+// filepath.Clean are chosen by build constraint, so on Unix a `D:\Windows` path never matches. That
+// half is covered on Windows by TestMatchSystemRoot_WindowsIsDriveLetterAgnostic; these tests check
+// that the Windows arm does not misclassify ordinary directories.
 
 func withWindowsPaths(t *testing.T, v bool) {
 	t.Helper()
@@ -30,8 +20,7 @@ func withWindowsPaths(t *testing.T, v bool) {
 
 func TestMatchSystemRoot_WindowsBranch_DoesNotMisclassifyAnOrdinaryDirectory(t *testing.T) {
 	withWindowsPaths(t, true)
-	// A project directory is not a system root. This is the half of the branch that can be asserted
-	// on a non-Windows filepath; the positive half cannot (see the note above).
+	// A project directory is not a system root.
 	for _, p := range []string{`C:\code\project`, `D:\work\thing`, `/code/project`} {
 		if got := matchSystemRoot(p); got != "" {
 			t.Errorf("matchSystemRoot(%q) = %q; an ordinary project directory must not be refused as a system root", p, got)
@@ -41,8 +30,8 @@ func TestMatchSystemRoot_WindowsBranch_DoesNotMisclassifyAnOrdinaryDirectory(t *
 
 func TestSameRootPath_WindowsBranch_FoldsCase(t *testing.T) {
 	withWindowsPaths(t, true)
-	// `/`-separated on purpose: the separator half is not substitutable (see the note above), so a
-	// `\`-separated fixture would test the string comparison and nothing about Windows.
+	// Use `/` separators: separator handling cannot be substituted, so a `\` fixture would test nothing
+	// about Windows.
 	if !sameRootPath(`/Code/Project`, `/code/project`) {
 		t.Error("sameRootPath must fold case on the Windows branch")
 	}

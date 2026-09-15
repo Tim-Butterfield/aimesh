@@ -12,11 +12,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// This file is the adapter-owned model DISCOVERY mechanism (model.Lister): a per-recipe
-// metadata/listing command (never a model invocation, never token spend) plus its parser.
-// Discovery runs strictly ON DEMAND — the web UI's explicit refresh — never from default
-// tests, doctor, or page load. Recipes without a mechanism leave Discovery nil, and the
-// projection reports discovery as unsupported for them.
+// This file implements model discovery (model.Lister): a per-recipe listing command, never a model
+// invocation, plus its parser. Discovery runs only on demand, never from default tests or doctor.
+// Recipes without a mechanism leave Discovery nil.
 
 // Discovery describes a recipe's model-listing mechanism.
 type Discovery struct {
@@ -32,8 +30,7 @@ type Discovery struct {
 // a hang usually means a CLI waiting on interactive input, which discovery must never do.
 const discoveryTimeout = 30 * time.Second
 
-// DiscoveryMechanism implements model.Lister (names the mechanism for honest display).
-// Empty strings mean the recipe has no discovery mechanism.
+// DiscoveryMechanism implements model.Lister. Empty strings mean the recipe has no discovery mechanism.
 func (a *Adapter) DiscoveryMechanism() (string, string) {
 	if a.Recipe.Discovery == nil {
 		return "", ""
@@ -41,10 +38,8 @@ func (a *Adapter) DiscoveryMechanism() (string, string) {
 	return strings.TrimSpace(a.Recipe.Detect + " " + strings.Join(a.Recipe.Discovery.Args, " ")), a.Recipe.Discovery.Kind
 }
 
-// ListModels implements model.Lister: it runs the recipe's listing command under a short
-// timeout and parses the output. Errors are descriptive so the UI can show WHY discovery
-// is unavailable/failed (binary missing, non-zero exit, unparseable output) and fall back
-// to catalog/manual entry per the Go-owned policy.
+// ListModels implements model.Lister: it runs the recipe's listing command under a timeout and parses
+// the output. Errors say why discovery failed (binary missing, non-zero exit, unparseable output).
 func (a *Adapter) ListModels(ctx context.Context) ([]model.DiscoveredModel, error) {
 	d := a.Recipe.Discovery
 	if d == nil {
@@ -93,9 +88,8 @@ var (
 	_ model.ArgPreviewer = (*Adapter)(nil)
 )
 
-// PreviewArgs implements model.ArgPreviewer: the effective argv composed by the SAME
-// recipe used for real calls (prompt shown as the "<prompt>" placeholder; no workspace
-// dir), prefixed with the binary name.
+// PreviewArgs implements model.ArgPreviewer: the argv built by the same recipe real calls use, prefixed
+// with the binary name, with the prompt shown as "<prompt>".
 func (a *Adapter) PreviewArgs(modelArg, effort string) []string {
 	args := a.Recipe.BuildArgs(model.Call{
 		ModelArg: core.ModelArg(modelArg),
@@ -103,16 +97,15 @@ func (a *Adapter) PreviewArgs(modelArg, effort string) []string {
 		Prompt:   "<prompt>",
 	})
 	out := append([]string{a.Recipe.Detect}, args...)
-	// A preview names every input, including the one that is not an argument. Recipes that pipe
-	// the prompt (Recipe.PromptOnStdin) would otherwise render as a command with no prompt at all,
-	// which reads as a bug in the preview rather than as the delivery mechanism it is.
+	// Show the prompt's stdin redirection, so a PromptOnStdin recipe does not look like it takes no
+	// prompt.
 	if a.Recipe.PromptOnStdin {
 		out = append(out, "<", "<prompt>")
 	}
 	return out
 }
 
-// --- per-recipe discovery parsers (fixture-tested; captured 2026-07-03) ---
+// --- per-recipe discovery parsers (tested against captured fixtures) ---
 
 // parseOllamaList parses `ollama list` table output: a NAME/ID/SIZE/MODIFIED header line
 // followed by one row per locally installed model; the first column is the model tag.
@@ -182,7 +175,7 @@ func parseCodexBundled(stdout, _ []byte) ([]model.DiscoveredModel, error) {
 // name-bound (encoded in the variant suffix), so no separate effort is reported.
 func parseAgyModels(stdout, _ []byte) ([]model.DiscoveredModel, error) {
 	var out []model.DiscoveredModel
-	for _, line := range strings.Split(string(stdout), "\n") {
+	for line := range strings.SplitSeq(string(stdout), "\n") {
 		name := strings.TrimSpace(line)
 		if name == "" {
 			continue

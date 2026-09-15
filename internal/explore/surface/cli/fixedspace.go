@@ -1,13 +1,9 @@
 package cli
 
-// This file holds the CLI surface of the FIXED-SPACE modes: the
-// structured `--criterion` spec parser and the two renderers.
-//
-// The renderers exist as their own functions for the same reason the adjudicative ones do: what a
-// fixed-space result must NOT be allowed to look like is a scoreboard. So they lead with the trade-off
-// frontier rather than a winner, print the DISAGREED cells prominently with every explorer's value intact,
-// say out loud when no scalar ranking was computed and why, and — for a forecast — print the outlier WITH
-// its forecaster's reasoning rather than as a footnote to a number.
+// This file holds the CLI parts of the fixed-space modes: the `--criterion` spec parser and the compare and
+// forecast renderers. The renderers avoid reading as a scoreboard: they lead with the trade-off frontier,
+// show every explorer's value for disagreed cells, state when no scalar ranking was computed, and print
+// each forecast outlier with its forecaster's reasoning.
 
 import (
 	"fmt"
@@ -21,8 +17,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// criterionSpecs collects the repeatable --criterion specs (order preserved — the declared order is the
-// order the criteria are rendered to the explorers and the order the matrix is built in).
+// criterionSpecs collects the repeatable --criterion specs in order; that order is used in the prompt and
+// the matrix.
 type criterionSpecs []string
 
 func (s *criterionSpecs) String() string { return strings.Join(*s, "; ") }
@@ -31,13 +27,12 @@ func (s *criterionSpecs) Set(v string) error {
 	return nil
 }
 
-// parseCriterion parses ONE `name=<n>,direction=<d>[,role=<r>][,weight=<w>]` spec. It uses the same
-// structured grammar the ad-hoc `--explorer` specs use — fields split on commas, each field on its FIRST
-// '=' — so a criterion NAME may safely contain '=' or ':' without being mangled.
+// parseCriterion parses one `name=<n>,direction=<d>[,role=<r>][,weight=<w>]` spec. Like the `--explorer`
+// grammar, fields split on commas and each field on its first '=', so a name may contain '=' or ':'.
 func parseCriterion(spec string) (schema.CompareCriterion, error) {
 	var out schema.CompareCriterion
 	seen := map[string]bool{}
-	for _, field := range strings.Split(spec, ",") {
+	for field := range strings.SplitSeq(spec, ",") {
 		field = strings.TrimSpace(field)
 		if field == "" {
 			continue
@@ -89,9 +84,8 @@ func parseCriteria(specs []string) ([]schema.CompareCriterion, error) {
 	return out, nil
 }
 
-// printCompareOutput renders the Compare mode's consolidated matrix. It leads with the Pareto frontier and
-// the cells the panel DISAGREED on, prints every explorer's value for a disagreed cell (never an average),
-// and states plainly when no scalar ranking was computed.
+// printCompareOutput writes the compare result: the Pareto frontier first, then the matrix with every
+// explorer's value for each cell, and either the weighted ranking or the reason none was computed.
 func printCompareOutput(w io.Writer, res pipeline.Result, out mode.CompareOutput) {
 	fmt.Fprintf(w, "\nCompare: %s\n", out.Summary())
 	fmt.Fprintf(w, "  %s\n", out.SpaceNote)
@@ -173,8 +167,7 @@ func conditionalTag(e govern.ParetoEntry) string {
 	return ""
 }
 
-// agreementDisplay SHOUTS a disagreement. A split cell that reads like an agreed one is the single most
-// misleading thing a comparison could print.
+// agreementDisplay describes a cell's agreement, marking a split cell prominently.
 func agreementDisplay(c govern.CompareCell) string {
 	if c.Agreement == govern.AgreementSplit {
 		return fmt.Sprintf("DISAGREEMENT across %d explorer(s)", c.Sources)
@@ -197,7 +190,7 @@ func cellValueDisplay(c govern.CompareCell) string {
 	}
 }
 
-// valueDisplay renders ONE explorer's reported value verbatim.
+// valueDisplay renders one explorer's reported value verbatim.
 func valueDisplay(v govern.AttributedEvaluation) string {
 	if v.Verdict == schema.VerdictPass || v.Verdict == schema.VerdictFail {
 		return string(v.Verdict)
@@ -216,9 +209,8 @@ func rationaleSuffix(r string) string {
 	return ": " + r
 }
 
-// printForecastOutput renders the Forecast mode's HOST-pooled estimate. It names who computed the aggregate,
-// prints the dispersion beside it (a tight panel and a wildly split one must never look alike), and gives
-// every identified outlier its forecaster's own reasoning.
+// printForecastOutput writes the forecast result: the host-pooled estimate with its method and dispersion,
+// the individual estimates, and each outlier with its forecaster's reasoning.
 func printForecastOutput(w io.Writer, res pipeline.Result, out mode.ForecastOutput) {
 	fmt.Fprintf(w, "\nForecast: %s\n", out.Summary())
 	fmt.Fprintf(w, "  %s\n", out.SpaceNote)

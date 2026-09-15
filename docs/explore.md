@@ -354,6 +354,8 @@ aimesh explore export --sqlite evidence.db --run <run-dir> --verify
 
 The consent model is the CLI's own: you typed the path, so that path — and nothing wider — is the allowed root for the operation. What your consent cannot lift is the denylist.
 
+The overwrite flag is `--force` rather than `--yes`: `--yes` confirms destructive configuration actions such as `setup --delete-profile`, while `--force` is the usual gate for overwriting an output file. The published database keeps mode `0600`, because it holds prompts and model output. A run directory that cannot be read is a configuration error (exit 3), since the directory is your input. The SQLite driver is confined to the evidence package, so meshcore carries no database dependency.
+
 ## Driving it over ACP
 
 `aimesh explore acp` runs exploremesh as a local [Agent Client Protocol](https://agentclientprotocol.com/) agent over stdio, so an ACP-capable IDE or host can drive one exploration as a session. The prompt text becomes the task **purpose**; the load-bearing **criteria** (and any mode-specific input) arrive under `_meta.exploremesh`, together with the panel the turn composes. Like `aimesh explore mcp`, it reads no aimesh configuration: its adapters are the ones named at launch with `--adapter <name>[=<path>]` (or `AIMESH_ADAPTERS`), so it works on a fresh install. Unlike reviewmesh's ACP surface there is no workspace and no write-mode gating, because an exploration edits no file you own — the only thing an ACP turn can write is its own run directory, and only when `dumpRun` asks for it.

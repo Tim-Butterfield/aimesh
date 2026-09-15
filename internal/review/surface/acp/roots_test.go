@@ -10,8 +10,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// ValidateRoot judges one root — an operator's --root or a path a call declares. The degenerate rule
-// refuses locations that are never a project; only an operator's explicit --root can waive it.
+// The degenerate rule refuses locations that are never a project; only an operator's --root can
+// waive it.
 func TestValidateRoot_RefusesDegenerateRoots(t *testing.T) {
 	home := t.TempDir()
 	proj := projectDir(t, "proj")
@@ -34,7 +34,7 @@ func TestValidateRoot_RefusesDegenerateRoots(t *testing.T) {
 			}
 		})
 	}
-	// The rule is not a blanket refusal: an ordinary root still works.
+	// An ordinary root still works.
 	if got, _, err := ValidateRoot(proj, ValidateOptions{Label: "--root", Home: home}); err != nil {
 		t.Fatalf("an ordinary --root must still be accepted: %v", err)
 	} else if got != proj {
@@ -77,12 +77,11 @@ func TestValidateRoot_RefusesANonDirectoryRoot(t *testing.T) {
 	}
 }
 
-// AllowBroad admits a broad root and says why it is broad — and never waives the denylist.
+// AllowBroad admits a broad root and says why, but never waives the denylist.
 func TestValidateRoot_AllowBroadIsAnExplicitOptIn(t *testing.T) {
 	home := t.TempDir()
 	root := string(filepath.Separator)
-	// On Windows `\` is drive-relative and resolves to the current volume's root, so the expected value
-	// is the resolved form rather than the separator that was typed.
+	// On Windows `\` resolves to the current volume's root, so compare against the resolved form.
 	want, err := filepath.Abs(root)
 	if err != nil {
 		t.Fatalf("resolve the filesystem root: %v", err)
@@ -105,7 +104,7 @@ func TestValidateRoot_AllowBroadIsAnExplicitOptIn(t *testing.T) {
 	}
 }
 
-// Both rules judge the CANONICAL root, so a symlink with an innocuous name is not an alias past them.
+// Both rules judge the canonical root, so an innocuously named symlink cannot alias past them.
 func TestValidateRoot_JudgesTheCanonicalRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs developer mode/elevation on Windows")
@@ -142,13 +141,11 @@ func TestValidateRoot_JudgesTheCanonicalRoot(t *testing.T) {
 	})
 }
 
-// EVERY degenerate family is pinned, one case per entry, so deleting any single entry from the list
-// fails a named subtest. The matcher (a pure function over a canonical path) is tested rather than a
-// full launch, because `/mnt`, `/srv` and friends do not exist on every machine.
+// Every degenerate entry has its own subtest, so deleting one fails by name. The matcher is tested
+// directly because /mnt, /srv and similar do not exist on every machine.
 func TestMatchSystemRoot_CoversEveryDegenerateFamily(t *testing.T) {
 	list := unixSystemRoots
-	// wantPresent is written out in full and independently of the implementation list, so removing an
-	// entry from the rule fails a named assertion here. Additions are allowed.
+	// wantPresent is written independently of the implementation list, so removing an entry fails here.
 	wantPresent := []string{
 		"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libexec",
 		"/etc", "/dev", "/proc", "/sys", "/boot", "/run",
@@ -179,8 +176,8 @@ func TestMatchSystemRoot_CoversEveryDegenerateFamily(t *testing.T) {
 	}
 	for _, entry := range list {
 		t.Run(entry, func(t *testing.T) {
-			// The probe is CANONICAL, because that is what degenerateRoot passes (and on macOS `/etc`,
-			// `/var` and `/tmp` are symlinks into `/private`).
+			// The probe is canonical, as in degenerateRoot; on macOS /etc, /var and /tmp are symlinks into
+			// /private.
 			probe := canonicalRoot(entry)
 			if runtime.GOOS == "windows" {
 				probe = `C:` + entry
@@ -190,7 +187,7 @@ func TestMatchSystemRoot_CoversEveryDegenerateFamily(t *testing.T) {
 			}
 		})
 	}
-	// It stays EXACT-match: a project UNDER a system tree is a legitimate root.
+	// Matching is exact: a project under a system tree is a legitimate root.
 	for _, under := range []string{"/usr/local/src/myproject", "/srv/git/myrepo", "/Volumes/Data/work"} {
 		if runtime.GOOS == "windows" {
 			continue

@@ -1,13 +1,13 @@
-// Package fake is exploremesh's deterministic in-process adapter for the CLI's fake path + tests.
-// Unlike meshcore's review-shaped fake, it emits EXPLOREMESH-shaped output: a formulate payload,
-// schema-valid explorer responses (varied per explorer so they genuinely disagree), and a collator
-// synthesis. Scenarios drive the failure-path/identity tests. It implements meshcore/model.Adapter.
+// Package fake provides a deterministic in-process model.Adapter for tests and demos. It returns
+// explore-shaped output for every phase, varied per explorer so a panel disagrees, and Scenario values
+// select failure and identity cases.
 package fake
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/Tim-Butterfield/aimesh/meshcore/core"
@@ -17,62 +17,49 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// Scenario selects the fake's behavior for identity/failure-path coverage.
+// Scenario selects the fake's behavior.
 type Scenario string
 
+// Scenarios.
 const (
 	Valid            Scenario = "valid"             // schema-valid response, verified identity
-	SchemaInvalid    Scenario = "schema_invalid"    // explorer response missing a required field → dropped
-	IdentityMismatch Scenario = "identity_mismatch" // reports a different model → mismatch → halt
-	SelfReported     Scenario = "self_reported"     // self-report evidence, matching model → self_reported (weak)
-	UnknownIdentity  Scenario = "unknown"           // reports no model → unknown (weak)
-	InvokeError      Scenario = "invoke_error"      // returns a Go error → dropped/halt depending on role
-	BadFormulate     Scenario = "bad_formulate"     // collator: malformed formulate output → deterministic fallback
-	FencedResponse   Scenario = "fenced_response"   // explorer wraps VALID JSON in a ```json fence → recovered via extraction
-	// CanonMergeAll is an AGGRESSIVELY MERGING canonicalizer: it proposes ONE cluster containing every
-	// nomination. Paired with a normal canonicalizer under the dual merge-agreement rule it
-	// produces a CONTESTED merge — the case the whole dual rule exists for, since an aggressive merger is
-	// precisely how a canonicalizer would manufacture corroboration if its proposal were authoritative.
+	SchemaInvalid    Scenario = "schema_invalid"    // explorer response missing a required field
+	IdentityMismatch Scenario = "identity_mismatch" // reports a different model
+	SelfReported     Scenario = "self_reported"     // self-reported evidence for the requested model
+	UnknownIdentity  Scenario = "unknown"           // reports no model
+	InvokeError      Scenario = "invoke_error"      // Invoke returns an error
+	BadFormulate     Scenario = "bad_formulate"     // malformed formulate output
+	FencedResponse   Scenario = "fenced_response"   // valid JSON wrapped in a ```json fence
+	// CanonMergeAll proposes one cluster containing every nomination, producing a contested merge when
+	// paired with a normal canonicalizer.
 	CanonMergeAll Scenario = "canon_merge_all"
-	// ChallengeWrongMerge makes the explorer raise ONE typed `wrong_merge` challenge in the confirmation round,
-	// against the first presented entity that groups nominations from >=2 explorers.
+	// ChallengeWrongMerge raises one wrong_merge challenge against the first entity with nominations from
+	// two or more explorers.
 	ChallengeWrongMerge Scenario = "challenge_wrong_merge"
-	// Abstain makes the explorer DELIBERATELY abstain (a schema-valid response carrying `"abstain": true`) —
-	// distinct from a technical absence, and the case the dual denominators exist to keep honest.
+	// Abstain returns a schema-valid deliberate abstention.
 	Abstain Scenario = "abstain"
-	// BallotReverse makes the explorer cast its ballot in the EXACT REVERSE of the presented order.
-	// Paired with the default forward ballot it produces a total tie under the positional tally — the case the
-	// frozen tie rule exists for, and the only way to reach it deliberately.
+	// BallotReverse ranks the presented options in reverse, producing a full tie against a forward ballot.
 	BallotReverse Scenario = "ballot_reverse"
-	// ChallengeRefute makes the explorer REFUTE every pooled finding in the cross-review round instead of
-	// deepening it — so the "surviving strengths" half of a Challenge register has a real case.
+	// ChallengeRefute refutes every pooled finding in the cross-review round.
 	ChallengeRefute Scenario = "challenge_refute"
-	// CompareSparse makes the explorer SKIP every cell of the LAST declared option and say so in
-	// missingEvidence. It is the case the explicit missing-evidence reporting exists for: a cell nobody
-	// could judge must be visibly empty rather than scored as zero, and the option must be carried as
-	// incomparable rather than quietly losing the comparison.
+	// CompareSparse skips every cell of the last declared option and reports missing evidence for each.
 	CompareSparse Scenario = "compare_sparse"
-	// ForecastNonNumeric makes the explorer answer a forecast with a NARRATIVE estimate ("about one hundred")
-	// instead of a number — the response the typed explorer schema must reject at the envelope boundary
-	// rather than interpret.
+	// ForecastNonNumeric returns a text estimate, which the forecast schema rejects.
 	ForecastNonNumeric Scenario = "forecast_non_numeric"
-	// CollatorCiteAll makes the Map collator cite a REAL `envelope#k` alias on every finding — and makes one
-	// of them additionally CLAIM `"uncited": true`. It is the fixture for the two halves of the
-	// host-authoritative citation rule that the default fake cannot show at once: a fully-cited collation
-	// carries no `uncited` finding, and a model's assertion ABOUT its own sourcing is overwritten by the
-	// host rather than believed.
+	// CollatorCiteAll makes the Map collator cite a real alias on every finding and falsely mark one finding
+	// uncited, which the host overrides.
 	CollatorCiteAll Scenario = "collator_cite_all"
 )
 
-// Adapter is a deterministic exploremesh fake keyed on the phase label + a scenario. `tag` varies
-// explorer output so a panel of fakes produces a real disagreement to synthesize.
+// Adapter is a deterministic fake whose output depends on the call's phase and prompt and on its scenario.
+// tag varies explorer output so a panel disagrees.
 type Adapter struct {
 	name     string
 	tag      string
 	scenario Scenario
 }
 
-// New builds a fake adapter named `name`. `tag` distinguishes this explorer's stance (e.g. "A"/"B").
+// New returns a fake adapter named name. tag distinguishes this explorer's answers, such as "A" or "B".
 func New(name, tag string, s Scenario) *Adapter { return &Adapter{name: name, tag: tag, scenario: s} }
 
 func (a *Adapter) Name() string { return a.name }
@@ -80,29 +67,25 @@ func (a *Adapter) Available() (bool, string) {
 	return true, "fake exploremesh adapter (" + a.name + ")"
 }
 
-// Evidence declares the ceiling this fake may be classified on — its strongest emitted tier
-// (invocation_tag). Required so exploremesh's fail-closed CapEvidence does not clamp fake identities to
-// `none` (which would fail the ≥2-verified minimum and break the suite + demo).
+// Evidence returns the fake's identity-evidence ceiling. Without it the pipeline would cap fake identities
+// at `none`.
 func (a *Adapter) Evidence() core.IdentityEvidence { return core.EvidenceInvocationTag }
 
 func (a *Adapter) Invoke(_ context.Context, c model.Call) (model.Result, error) {
 	if a.scenario == InvokeError {
 		return model.Result{}, fault.New(fault.Internal, "fake: simulated invoke error")
 	}
-	// Identity: default verified (matching model, medium+ evidence); scenarios weaken/break it.
 	actual, ev := c.Model, core.EvidenceInvocationTag
 	switch a.scenario {
 	case IdentityMismatch:
 		actual = "fake-wrong-model-9"
 	case SelfReported:
-		ev = core.EvidenceSelfReport // matching model + self-report → self_reported
+		ev = core.EvidenceSelfReport
 	case UnknownIdentity:
-		actual = "" // no model reported → unknown
+		actual = ""
 	}
 	res := model.Result{ExitCode: 0, ActualModel: actual, Evidence: ev}
-	// The fake is mode-aware without a mode field: the app-owned prompt renders the mode's exact contract,
-	// so the fake keys on a distinctive phrase to emit the RIGHT explorer/collator shape for the mode
-	// (Map vs Synthesize). This lets a `--mode synthesize` demo/test run end-to-end on fakes alone.
+	// The fake recognizes each mode by a phrase in the mode's prompt.
 	switch c.Phase {
 	case schema.PhaseFormulate:
 		res.Stdout = a.formulate()
@@ -110,8 +93,7 @@ func (a *Adapter) Invoke(_ context.Context, c model.Call) (model.Result, error) 
 		switch {
 		case a.scenario == Abstain:
 			res.Stdout = a.abstain()
-		// The two adjudicative mediated rounds are checked BEFORE the generic mediated branch: a ballot and a
-		// cross-review both carry the host's untrusted-data block, and they need different answer shapes.
+		// Ballot and cross-review prompts also contain the untrusted-data block, so check them first.
 		case isBallotPrompt(c.Prompt):
 			res.Stdout = a.ballot(c.Prompt)
 		case isCrossReviewPrompt(c.Prompt):
@@ -149,55 +131,46 @@ func (a *Adapter) Invoke(_ context.Context, c model.Call) (model.Result, error) 
 	case schema.PhaseConfirm:
 		res.Stdout = a.confirm(c.Prompt)
 	default:
-		// Includes the identity PRE-FLIGHT probe: its body is irrelevant — the probe exists so the
-		// adapter performs a real invocation and the identity engine gets evidence before the fan-out.
+		// Includes the pre-flight probe, whose body is not parsed.
 		res.Stdout = []byte("{}")
 	}
 	return res, nil
 }
 
-// isSynthesizePrompt reports whether the explorer prompt is the Synthesize mode's app-owned prompt (it
-// asks for the explorer's single best COMPLETE answer — a phrase the Map prompt never contains).
+// isSynthesizePrompt reports whether prompt is the Synthesize explorer prompt.
 func isSynthesizePrompt(prompt string) bool { return strings.Contains(prompt, "best COMPLETE answer") }
 
-// isSynthesizeCollatorPrompt reports whether the collator prompt is the Synthesize contract (it renders
-// the componentProvenance field — a name the Map collator prompt never contains).
+// isSynthesizeCollatorPrompt reports whether prompt is the Synthesize collator prompt.
 func isSynthesizeCollatorPrompt(prompt string) bool {
 	return strings.Contains(prompt, "componentProvenance")
 }
 
-// isCatalogPrompt reports whether the explorer prompt is the Catalog mode's app-owned prompt (it asks the
-// explorer to "Enumerate as many DISTINCT candidates" — a phrase no other mode's prompt contains).
+// isCatalogPrompt reports whether prompt is the Catalog explorer prompt.
 func isCatalogPrompt(prompt string) bool {
 	return strings.Contains(prompt, "Enumerate as many DISTINCT")
 }
 
-// isMediatedRoundPrompt reports whether this is a LATER (mediated) explorer round: the host wraps the carried
-// round artifact in its untrusted-data delimiters, which round 1 never has.
+// isMediatedRoundPrompt reports whether prompt is a later round's, which carries an untrusted-data block.
 func isMediatedRoundPrompt(prompt string) bool {
 	return strings.Contains(prompt, "BEGIN UNTRUSTED DATA")
 }
 
-// isFindingsPrompt reports whether the round-1 prompt asks for typed FINDINGS — the shape Challenge and the
-// ai-collab composition share (they render the identical findings-object instruction, which is exactly the
-// reuse the composition is meant to demonstrate).
+// isFindingsPrompt reports whether prompt asks for typed findings, as Challenge and ai-collab do.
 func isFindingsPrompt(prompt string) bool {
 	return strings.Contains(prompt, `Each entry of "findings" MUST be a JSON object`)
 }
 
-// isShortlistPrompt reports whether the round-1 prompt is Shortlist's ("enumerate the CANDIDATE OPTIONS" — a
-// phrase no other mode's prompt contains).
+// isShortlistPrompt reports whether prompt is the Shortlist explorer prompt.
 func isShortlistPrompt(prompt string) bool {
 	return strings.Contains(prompt, "Enumerate the CANDIDATE OPTIONS")
 }
 
-// isCrossReviewPrompt reports whether this is Challenge's round-2 mediated CROSS-REVIEW.
+// isCrossReviewPrompt reports whether prompt is Challenge's cross-review round.
 func isCrossReviewPrompt(prompt string) bool {
 	return strings.Contains(prompt, "This is the CROSS-REVIEW round")
 }
 
-// isBallotPrompt reports whether this is Shortlist's round-2 BALLOT. It keys on the FROZEN DECISION header the
-// host prepends, so the fake only ever answers with a ballot when the framing really was frozen first.
+// isBallotPrompt reports whether prompt is Shortlist's ballot round, including the frozen decision header.
 func isBallotPrompt(prompt string) bool {
 	return strings.Contains(prompt, "This is the BALLOT round") && strings.Contains(prompt, "FROZEN DECISION INPUTS")
 }
@@ -236,15 +209,13 @@ func (a *Adapter) explore() []byte {
 	}
 	b, _ := json.Marshal(resp)
 	if a.scenario == FencedResponse {
-		// A schema-valid body, but wrapped in a markdown code fence (a failure real providers produce): the
-		// pipeline must strip the fence and recover it rather than drop on "invalid character '`'".
 		return []byte("```json\n" + string(b) + "\n```")
 	}
 	return b
 }
 
 // exploreSynthesize returns a schema-valid Synthesize-mode explorer response — one best complete answer
-// varied by tag, so a panel of fakes gives the collator genuinely DISTINCT answers to select/compose.
+// varied by tag, so a panel of fakes gives the collator distinct answers to choose from.
 func (a *Adapter) exploreSynthesize() []byte {
 	resp := map[string]any{
 		"answer":      "best answer from explorer " + a.tag,
@@ -273,11 +244,8 @@ func (a *Adapter) synthesizeCompose() []byte {
 	return b
 }
 
-// exploreCatalog returns a schema-valid Catalog-mode explorer response — a list of candidate nominations
-// varied by tag so a panel of fakes produces genuine OVERLAP (a duplicate to merge) + UNIQUE singletons
-// (a minority to carry). A ("Postgres","SQLite") and B ("Postgres","MySQL") share "Postgres" (merged,
-// multi-source) and each carry a singleton (single-source). Other tags reuse the shared candidate + a
-// unique one so a larger panel still yields a mergeable duplicate.
+// exploreCatalog returns a Catalog explorer response. Every tag nominates "Postgres" (a shared candidate)
+// plus one unique candidate.
 func (a *Adapter) exploreCatalog() []byte {
 	var cands []any
 	switch a.tag {
@@ -293,13 +261,8 @@ func (a *Adapter) exploreCatalog() []byte {
 	return b
 }
 
-// --- The adjudicative modes ---
-
-// exploreFindings returns a schema-valid round-1 CHALLENGE / ai-collab response: typed findings varied by tag
-// so a panel of fakes produces genuine OVERLAP (a finding two reviewers independently raise → corroborated,
-// with the two of them disagreeing on severity so the host's max-severity triage has something to do) and
-// UNIQUE singletons (a minority finding that must survive into the register). With a 3-explorer panel the
-// shared finding is 2-of-3, which is the case the dual denominators are most easily got wrong on.
+// exploreFindings returns a Challenge or ai-collab round-1 response. Tags A and B share one finding at
+// different severities; each tag also has unique findings.
 func (a *Adapter) exploreFindings() []byte {
 	shared := map[string]any{
 		"statement":       "Race condition on shutdown",
@@ -317,12 +280,9 @@ func (a *Adapter) exploreFindings() []byte {
 			"evidence":        "no validation between parse and load",
 		}}
 	case "B":
-		// The SAME defect at a different severity: the host register reports the MAX any blind source assigned,
-		// so this escalates the shared finding to critical without averaging anyone's judgment away.
+		// The shared finding at a higher severity.
 		crit := map[string]any{}
-		for k, v := range shared {
-			crit[k] = v
-		}
+		maps.Copy(crit, shared)
 		crit["severity"] = "critical"
 		findings = []any{crit, map[string]any{
 			"statement":       "Missing rate limit on the public endpoint",
@@ -342,10 +302,8 @@ func (a *Adapter) exploreFindings() []byte {
 	return b
 }
 
-// crossReview returns the round-2 CROSS-REVIEW response: it ECHOES every pooled canonical ref back with a
-// stance + its own severity. Echoing is deliberate — a reviewer repeating a finding it has now SEEN is exactly
-// the contamination the anti-echo invariant must neutralize, and a fake that quietly declined to echo
-// would make the anti-echo test prove nothing.
+// crossReview returns a cross-review response that echoes every pooled item with a stance and severity.
+// The echo lets tests confirm that later rounds cannot raise counts.
 func (a *Adapter) crossReview(prompt string) []byte {
 	stance := "deepens"
 	if a.scenario == ChallengeRefute {
@@ -365,9 +323,7 @@ func (a *Adapter) crossReview(prompt string) []byte {
 	return b
 }
 
-// exploreShortlist returns a schema-valid round-1 SHORTLIST response: candidate options varied by tag so the
-// panel produces one shared candidate (merged, multi-source) plus per-explorer singletons — the same overlap
-// shape the Catalog fake uses, because it is the shape that exercises both merge and minority carry-through.
+// exploreShortlist returns a Shortlist round-1 response with the same overlap as exploreCatalog.
 func (a *Adapter) exploreShortlist() []byte {
 	var cands []any
 	switch a.tag {
@@ -382,11 +338,8 @@ func (a *Adapter) exploreShortlist() []byte {
 	return b
 }
 
-// ballot returns the BALLOT response: a ranking over the canonical refs the host presented, plus approvals for
-// its top half. The order varies deterministically by tag so a panel of fakes produces a real preference
-// disagreement rather than unanimity — tag "A" votes the presented order, "B" rotates the last option to the
-// front, and the BallotReverse scenario votes the exact reverse (which, against a forward ballot, produces the
-// total tie the frozen tie rule exists for).
+// ballot returns a ballot ranking the presented refs and approving the top half. Tag A keeps the presented
+// order, tag B moves the last option first, and BallotReverse reverses it.
 func (a *Adapter) ballot(prompt string) []byte {
 	items := pooledItems(prompt)
 	refs := make([]string, 0, len(items))
@@ -416,14 +369,13 @@ func (a *Adapter) ballot(prompt string) []byte {
 	return b
 }
 
-// pooledItem mirrors one entry of the host's projected round payload (ref + text), so a fake can react to the
-// canonical entities it was actually shown rather than inventing IDs the host would reject.
+// pooledItem is one item of the host's projected round payload.
 type pooledItem struct {
 	Ref  string `json:"ref"`
 	Text string `json:"text"`
 }
 
-// pooledItems extracts the projected items out of the host's untrusted-data block.
+// pooledItems returns the items in prompt's untrusted-data block.
 func pooledItems(prompt string) []pooledItem {
 	var payload struct {
 		Items []pooledItem `json:"items"`
@@ -434,39 +386,29 @@ func pooledItems(prompt string) []pooledItem {
 	return payload.Items
 }
 
-// --- The FIXED-SPACE modes ---
-
-// isComparePrompt reports whether the round-1 prompt is Compare's (it renders the declared option set as a
-// machine-readable block — a marker no other mode's prompt contains).
+// isComparePrompt reports whether prompt is the Compare explorer prompt.
 func isComparePrompt(prompt string) bool {
 	return strings.Contains(prompt, schema.CompareOptionSetMarker)
 }
 
-// isForecastPrompt reports whether the round-1 prompt is Forecast's (same idea: the declared estimation
-// target block).
+// isForecastPrompt reports whether prompt is the Forecast explorer prompt.
 func isForecastPrompt(prompt string) bool {
 	return strings.Contains(prompt, schema.ForecastTargetMarker)
 }
 
-// isCompareCollatorPrompt / isForecastCollatorPrompt report whether a PhaseSynthesize call is a FIXED-SPACE
-// NARRATIVE call. They key on the host's "here is the finished result" block, so the fake can only ever
-// answer with narrative when it really was shown one.
+// isCompareCollatorPrompt reports whether prompt is the Compare narrative prompt.
 func isCompareCollatorPrompt(prompt string) bool {
 	return strings.Contains(prompt, "host-computed comparison:")
 }
 
+// isForecastCollatorPrompt reports whether prompt is the Forecast narrative prompt.
 func isForecastCollatorPrompt(prompt string) bool {
 	return strings.Contains(prompt, "host-pooled forecast:")
 }
 
-// fixedSpaceTag picks the fake's PERSONA for one fixed-space call. It prefers a `-a`/`-b`/`-c` suffix on the
-// REQUESTED MODEL and falls back to the adapter's construction tag.
-//
-// The model suffix is there for a real reason rather than convenience: the CLI registry keys adapters by
-// NAME, so a demo panel of `fake` slots shares ONE adapter instance and would otherwise give every explorer
-// the identical answer. A panel that cannot disagree cannot exercise the one thing these two modes exist to
-// report — a per-cell disagreement, and an outlier estimate — so the persona keys on the per-call model,
-// which really does differ across a panel. Every other mode's fake behavior is untouched.
+// fixedSpaceTag returns the persona for a fixed-space call: the `-a`, `-b` or `-c` suffix of the requested
+// model, else the adapter's tag. The CLI shares one fake instance across a panel, so the per-call model is
+// what lets its members disagree.
 func (a *Adapter) fixedSpaceTag(model string) string {
 	m := strings.ToLower(strings.TrimSpace(model))
 	for _, t := range []string{"a", "b", "c"} {
@@ -477,47 +419,40 @@ func (a *Adapter) fixedSpaceTag(model string) string {
 	return a.tag
 }
 
-// declaredCriterion mirrors one entry of the criteria block the compare prompt embeds.
+// declaredCriterion is one entry of the criteria block in the Compare prompt.
 type declaredCriterion struct {
 	Name      string `json:"name"`
 	Direction string `json:"direction"`
 	Role      string `json:"role"`
 }
 
-// compareDeclaration recovers the DECLARED space out of the compare prompt: the option set and the criteria
-// with their direction + role. The fake reads exactly what a real evaluator is shown, so a fake response can
-// never name an option the host did not declare (which the host would — correctly — record as unrecognized).
+// compareDeclaration returns the options and criteria declared in the Compare prompt.
 func compareDeclaration(prompt string) (options []string, criteria []declaredCriterion) {
 	decodeAfter(prompt, schema.CompareOptionSetMarker, &options)
 	decodeAfter(prompt, schema.CompareCriteriaMarker, &criteria)
 	return options, criteria
 }
 
-// decodeAfter decodes the FIRST JSON value following a marker. A json.Decoder is used rather than
-// json.Unmarshal because a prompt carries several blocks and Unmarshal rejects the trailing text.
+// decodeAfter decodes the first JSON value after marker into v. A Decoder is used because text follows the
+// value.
 func decodeAfter(prompt, marker string, v any) {
-	idx := strings.Index(prompt, marker)
-	if idx < 0 {
+	_, after, ok := strings.Cut(prompt, marker)
+	if !ok {
 		return
 	}
-	_ = json.NewDecoder(strings.NewReader(prompt[idx+len(marker):])).Decode(v)
+	_ = json.NewDecoder(strings.NewReader(after)).Decode(v)
 }
 
-// compareScoreGrid is the fake's deterministic option×criterion score table (rows = criterion index parity,
-// columns = option index mod 3). The values are chosen so the HOST's Pareto frontier is non-trivial under
-// MIXED directions: with an even criterion read higher-is-better and an odd one read lower-is-better,
-// option 1 is DOMINATED by option 0 (9≥6 and 7≤8) while option 2 survives on the odd criterion (2 is the
-// best low value) — a real frontier of two rather than "every option is optimal", which would prove nothing.
+// compareScoreGrid holds scores by criterion index parity (rows) and option index mod 3 (columns). With an
+// even criterion higher-is-better and an odd one lower-is-better, option 0 dominates option 1 and option 2
+// stays on the frontier.
 var compareScoreGrid = [2][3]float64{
-	{9, 6, 3}, // criterion index EVEN
-	{7, 8, 2}, // criterion index ODD
+	{9, 6, 3}, // even criterion index
+	{7, 8, 2}, // odd criterion index
 }
 
-// compareScore is the fake's score for one (option, criterion) pair, plus the ONE deliberate disagreement:
-// evaluator "B" scores the (first option, first criterion) cell four points lower than everyone else. That
-// cell is the fixture for "a cell where explorers disagree is SURFACED as disagreement" — and it is placed
-// on the frontier's leading option on purpose, so the split is impossible to miss and the conditional flag
-// on a Pareto entry has a real case.
+// compareScore returns the score for an option and criterion. Evaluator B scores the first option on the
+// first criterion four points lower, creating one split cell on the frontier.
 func compareScore(tag string, optionIdx, criterionIdx int) float64 {
 	v := compareScoreGrid[criterionIdx%2][optionIdx%3]
 	if tag == "B" && optionIdx == 0 && criterionIdx == 0 {
@@ -526,11 +461,8 @@ func compareScore(tag string, optionIdx, criterionIdx int) float64 {
 	return v
 }
 
-// exploreCompare returns a schema-valid round-1 COMPARE response over the DECLARED space it was shown: a
-// value for every option×criterion cell, a gate verdict for every filter criterion (the LAST declared option
-// fails every gate, unanimously across the panel — the fixture for "a filter criterion excludes an option"),
-// and, under the CompareSparse scenario, no evaluation at all for the last option plus an explicit
-// missing-evidence line for each of its cells.
+// exploreCompare returns a Compare response covering every declared cell. The last option fails every
+// filter. Under CompareSparse the last option is skipped and reported as missing evidence.
 func (a *Adapter) exploreCompare(prompt, model string) []byte {
 	tag := a.fixedSpaceTag(model)
 	options, criteria := compareDeclaration(prompt)
@@ -552,8 +484,6 @@ func (a *Adapter) exploreCompare(prompt, model string) []byte {
 				"rationale": "evaluation of " + opt + " on " + crit.Name + " by evaluator " + tag,
 			}
 			if crit.Role == string(schema.RoleFilter) {
-				// The gate: the LAST declared option fails, everything else passes. Every evaluator says the
-				// same, so the host's "exclusion requires no dissent" rule really does exclude it.
 				verdict := string(schema.VerdictPass)
 				if oi == len(options)-1 {
 					verdict = string(schema.VerdictFail)
@@ -572,14 +502,10 @@ func (a *Adapter) exploreCompare(prompt, model string) []byte {
 	return b
 }
 
-// exploreForecast returns a schema-valid round-1 FORECAST response: a numeric estimate + interval +
-// reasoning, varied by tag so a three-explorer panel produces two close estimates and ONE far outlier — the
-// fixture for "an outlier is identified WITH its rationale retained". Under ForecastNonNumeric the estimate
-// is deliberately a STRING, which the typed explorer schema must reject rather than interpret.
+// exploreForecast returns a Forecast response. Tags A and B give close estimates and any other tag gives a
+// far outlier with its reasoning. Under ForecastNonNumeric the estimate is text.
 func (a *Adapter) exploreForecast(model string) []byte {
 	if a.scenario == ForecastNonNumeric {
-		// A narrative estimate. `estimate` is a typed number in the app-owned schema, so this response is
-		// schema-INVALID and the explorer is dropped with a reason — never parsed into a number.
 		return []byte(`{"estimate":"about one hundred","low":"ninety","high":"one hundred and twenty","reasoning":"a narrative estimate, deliberately not machine-readable"}`)
 	}
 	tag := a.fixedSpaceTag(model)
@@ -589,8 +515,6 @@ func (a *Adapter) exploreForecast(model string) []byte {
 	case "B":
 		est, low, high, why = 110, 95, 130, "the same trend with a small allowance for seasonality"
 	default:
-		// The OUTLIER, and it has a reason. The host identifies it and carries this sentence with it — the
-		// point being that a forecaster far from the panel may be the only one who noticed something.
 		est, low, high, why = 300, 250, 400, "a step change nobody else priced in: the capacity constraint lifts inside the horizon, which roughly triples the ceiling"
 	}
 	b, _ := json.Marshal(map[string]any{
@@ -601,10 +525,7 @@ func (a *Adapter) exploreForecast(model string) []byte {
 	return b
 }
 
-// compareNarrative / forecastNarrative return the FIXED-SPACE collator's narrative-only output. Note what
-// they do NOT contain: a number, a ranking, a "corrected" aggregate. The shape the host asks for has no
-// field for one, and the fake honors that — a fake that smuggled a number in would be testing a contract
-// exploremesh does not offer.
+// compareNarrative returns the Compare collator's narrative output, which contains no numbers.
 func (a *Adapter) compareNarrative() []byte {
 	b, _ := json.Marshal(map[string]any{
 		"reading":           "the options trade off against each other rather than ordering cleanly (fake collator).",
@@ -615,6 +536,7 @@ func (a *Adapter) compareNarrative() []byte {
 	return b
 }
 
+// forecastNarrative returns the Forecast collator's narrative output, which contains no numbers.
 func (a *Adapter) forecastNarrative() []byte {
 	b, _ := json.Marshal(map[string]any{
 		"reading":      "the panel clusters tightly with one far estimate (fake collator).",
@@ -625,48 +547,39 @@ func (a *Adapter) forecastNarrative() []byte {
 	return b
 }
 
-// abstain returns a schema-valid DELIBERATE ABSTENTION: the reserved `abstain` marker plus the
-// required fields left empty. It is the honest "I decline to answer", tallied separately from a technical
-// absence so a denominator can never quietly absorb it.
+// abstain returns a deliberate abstention: the reserved abstention marker with every mode's required
+// fields present and empty, so it is schema-valid in every mode.
 func (a *Adapter) abstain() []byte {
 	resp := map[string]any{
 		schema.AbstentionField: true,
 		"candidates":           []any{},
-		// The adjudicative schemas' required fields, present-and-empty: an abstention must be SCHEMA-VALID
-		// in every mode (that is what makes it a recorded position rather than a dropped explorer), and the
-		// host tells it apart from a real answer by the reserved marker, never by an empty field.
-		"findings":    []any{},
-		"assessments": []any{},
-		"ranking":     []any{},
-		"approved":    []any{},
-		// The FIXED-SPACE schemas' required fields, present-and-empty for the same reason: an abstention
-		// must be schema-VALID in every mode, and the host tells it apart from a real answer by the reserved
-		// marker — never by a zero estimate, which is exactly the value a forecast must not silently pool.
-		"evaluations":      []any{},
-		"optionsEvaluated": []any{},
-		"missingEvidence":  []any{},
-		"estimate":         0,
-		"low":              0,
-		"high":             0,
-		"reasoning":        "abstaining: outside this forecaster's competence",
-		"claims":           []any{},
-		"answer":           "",
-		"rationale":        "",
-		"evidence":         "abstaining: outside this explorer's competence",
-		"confidence":       0,
-		"sources":          []any{},
-		"assumptions":      []any{},
-		"uncertainties":    []any{},
-		"notes":            "abstained",
+		"findings":             []any{},
+		"assessments":          []any{},
+		"ranking":              []any{},
+		"approved":             []any{},
+		"evaluations":          []any{},
+		"optionsEvaluated":     []any{},
+		"missingEvidence":      []any{},
+		"estimate":             0,
+		"low":                  0,
+		"high":                 0,
+		"reasoning":            "abstaining: outside this forecaster's competence",
+		"claims":               []any{},
+		"answer":               "",
+		"rationale":            "",
+		"evidence":             "abstaining: outside this explorer's competence",
+		"confidence":           0,
+		"sources":              []any{},
+		"assumptions":          []any{},
+		"uncertainties":        []any{},
+		"notes":                "abstained",
 	}
 	b, _ := json.Marshal(resp)
 	return b
 }
 
-// exploreMediated returns the LATER-round response: the fake echoes back the canonical items it was
-// shown in the untrusted-data block as `candidates`, plus a refinement per item. Echoing is deliberate — it is
-// exactly the contamination the ANTI-ECHO invariant must neutralize: a later round repeating an item
-// must not raise any independence count, because counts are computed over blind round-1 artifacts only.
+// exploreMediated returns a later-round response that echoes the items it was shown as `candidates`, so
+// tests can confirm the echo does not raise independence counts.
 func (a *Adapter) exploreMediated(prompt string) []byte {
 	var payload struct {
 		Items []struct {
@@ -684,7 +597,7 @@ func (a *Adapter) exploreMediated(prompt string) []byte {
 		refs = append(refs, it.Ref)
 	}
 	resp := map[string]any{
-		"candidates":    cands, // the echo (see the doc comment)
+		"candidates":    cands,
 		"echoedRefs":    refs,
 		"refinements":   []any{"depth added by explorer " + a.tag},
 		"severity":      "medium",
@@ -700,8 +613,7 @@ func (a *Adapter) exploreMediated(prompt string) []byte {
 	return b
 }
 
-// untrustedBlock extracts the JSON payload the host embedded between its untrusted-data delimiters, so the fake
-// consumes the carried artifact exactly the way a real model would read it.
+// untrustedBlock returns the JSON payload between the untrusted-data delimiters in prompt.
 func untrustedBlock(prompt string) (string, bool) {
 	const begin, end = "BEGIN UNTRUSTED DATA -----", "----- END UNTRUSTED DATA"
 	i := strings.Index(prompt, begin)
@@ -716,8 +628,7 @@ func untrustedBlock(prompt string) (string, bool) {
 	return "", false
 }
 
-// confirmEntityWire mirrors the provisional-entity shape the confirmation prompt embeds, so the fake can pick a
-// real target for a typed challenge instead of inventing an ID (which the host would reject).
+// confirmEntityWire is one provisional entity in the confirmation prompt.
 type confirmEntityWire struct {
 	CanonicalID string `json:"canonicalId"`
 	Name        string `json:"name"`
@@ -726,15 +637,13 @@ type confirmEntityWire struct {
 	} `json:"members"`
 }
 
-// confirm returns the CONFIRMATION-round response. The default is an empty challenge list — the
-// common, valid answer. Under the ChallengeWrongMerge scenario it raises exactly ONE typed `wrong_merge` against
-// the first presented entity that groups nominations from two different explorers (the only kind of entity whose
-// split can change a corroboration count), so the host rule has something real to adjudicate.
+// confirm returns a confirmation-round response: no challenges, or under ChallengeWrongMerge one wrong_merge
+// against the first entity with nominations from two explorers.
 func (a *Adapter) confirm(prompt string) []byte {
 	target := ""
-	if idx := strings.Index(prompt, "provisional entities:\n"); a.scenario == ChallengeWrongMerge && idx >= 0 {
+	if _, after, ok := strings.Cut(prompt, "provisional entities:\n"); a.scenario == ChallengeWrongMerge && ok {
 		var ents []confirmEntityWire
-		_ = json.Unmarshal([]byte(prompt[idx+len("provisional entities:\n"):]), &ents)
+		_ = json.Unmarshal([]byte(after), &ents)
 		for _, e := range ents {
 			sources := map[schema.ExplorerIdentity]bool{}
 			for _, m := range e.Members {
@@ -758,25 +667,20 @@ func (a *Adapter) confirm(prompt string) []byte {
 	return b
 }
 
-// canonicalizeNominationWire mirrors the per-nomination shape the canonicalizer prompt embeds (index/raw/
-// sourceExplorer) so the fake canonicalizer can recover the exact nomination indexing to cluster over.
+// canonicalizeNominationWire is one nomination in the canonicalizer prompt.
 type canonicalizeNominationWire struct {
 	Index          int                     `json:"index"`
 	Raw            string                  `json:"raw"`
 	SourceExplorer schema.ExplorerIdentity `json:"sourceExplorer"`
 }
 
-// canonicalize is the deterministic FAKE canonicalizer: it recovers the nominations JSON array embedded in
-// the canonicalizer prompt and clusters them by EXACT raw text (exact synonyms merge; distinct names stay
-// separate) — so it honors the surjectivity contract (every nomination lands in exactly one cluster,
-// singletons survive) without any real model. It emits the exact proposal structure the contract parses.
+// canonicalize clusters the prompt's nominations by exact raw text, in first-seen order.
 func (a *Adapter) canonicalize(prompt string) []byte {
 	const marker = "nominations:\n"
 	var noms []canonicalizeNominationWire
-	if idx := strings.Index(prompt, marker); idx >= 0 {
-		_ = json.Unmarshal([]byte(prompt[idx+len(marker):]), &noms)
+	if _, after, ok := strings.Cut(prompt, marker); ok {
+		_ = json.Unmarshal([]byte(after), &noms)
 	}
-	// Cluster by exact raw text, preserving first-seen order for a deterministic partition.
 	order := []string{}
 	byRaw := map[string][]int{}
 	for _, n := range noms {
@@ -792,9 +696,6 @@ func (a *Adapter) canonicalize(prompt string) []byte {
 	}
 	clusters := make([]cluster, 0, len(order))
 	if a.scenario == CanonMergeAll {
-		// The AGGRESSIVE merger: every nomination in ONE entity. Under the dual merge-agreement rule this
-		// proposal wins nothing it does not share with the other canonicalizer — its extra merges are recorded
-		// as CONTESTED and resolved by SPLITTING.
 		all := make([]int, 0, len(noms))
 		for _, n := range noms {
 			all = append(all, n.Index)
@@ -818,10 +719,7 @@ func (a *Adapter) canonicalize(prompt string) []byte {
 	return b
 }
 
-// collatorAliases recovers the citable `envelope#k` aliases out of the Map collator prompt's labeled
-// responses block. The fake cites what it was actually SHOWN — never a hardcoded alias — for the same
-// reason the ballot fake reads the host's projected refs: a fake that invented its citations would pass the
-// host's validation for the wrong reason, and would keep passing after the prompt stopped teaching them.
+// collatorAliases returns the `envelope#k` aliases in the Map collator prompt's responses block.
 func collatorAliases(prompt string) []string {
 	var envs []struct {
 		Envelope string `json:"envelope"`
@@ -836,22 +734,16 @@ func collatorAliases(prompt string) []string {
 	return out
 }
 
-// synthesize returns a fixed collator-output with a non-empty summary + a disagreement entry. The
-// weak-response appendix is left empty — the pipeline fills it from the weak envelopes.
-//
-// Its CITATIONS deliberately exercise BOTH host outcomes in one default run: the first finding cites
-// the real aliases it was shown (including one narrowed to a specific claim, `envelope#k/claims/0`, so the
-// narrowing half of the grammar is exercised hermetically), and the second cites the legacy free-text
-// "s1" — which is not an alias, so the host drops it and labels that finding uncited. Under the
-// CollatorCiteAll scenario every finding cites a real alias and one lies about being uncited.
+// synthesize returns a Map collator output with a summary, two findings and a disagreement entry. The first
+// finding cites every alias shown (the first narrowed to `/claims/0`); the second cites "s1", which is not an
+// alias, so the host marks it uncited. Under CollatorCiteAll both findings cite real aliases and the second
+// falsely claims to be uncited.
 func (a *Adapter) synthesize(prompt string) []byte {
 	aliases := collatorAliases(prompt)
-	// Finding 1: cite everything shown, with the first ref narrowed to a claim index.
 	cited := append([]string(nil), aliases...)
 	if len(cited) > 0 {
 		cited[0] += "/claims/0"
 	}
-	// Finding 2: free text, not an alias → dropped by the host → the finding is recorded uncited.
 	second, claimsUncited := []string{"s1"}, false
 	if a.scenario == CollatorCiteAll {
 		second, claimsUncited = aliases, true
@@ -860,8 +752,7 @@ func (a *Adapter) synthesize(prompt string) []byte {
 		SynthesisSummary: "Synthesis of the explorer panel (fake collator).",
 		Findings: []schema.Finding{
 			{Statement: "A well-evidenced conclusion", Evidence: "cross-explorer support", Confidence: 0.8, Sources: cited},
-			// `Uncited` is HOST-owned; a collator that sets it is asserting something about its own
-			// sourcing, and the host overwrites it either way.
+			// The host overwrites Uncited regardless of what the collator sets.
 			{Statement: "A conclusion the collator did not source", Evidence: "asserted without attribution",
 				Confidence: 0.5, Sources: second, Uncited: claimsUncited},
 		},

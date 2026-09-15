@@ -1,12 +1,8 @@
 package run
 
-// THE RUN HANDLE IS EVIDENCE, NOT AUTHORITY.
-//
-// `fromRun` arrives from a peer process. Treating it as "the run directory to apply" would let any
-// local caller point a governed write at an arbitrary directory — and, just as bad, would turn the
-// resolver into an existence oracle over every absolute path a peer cared to name. These tests hold
-// the resolution to both halves: it accepts only a run this agent produced, and it answers every
-// failure alike.
+// The run handle is evidence, not authority. `fromRun` comes from a peer process, so resolution accepts
+// only a run this agent produced and answers every failure alike; otherwise a caller could aim a write
+// at any directory or probe which absolute paths exist.
 
 import (
 	"context"
@@ -57,7 +53,7 @@ func TestReadDecisionSet_AcceptsARunThisAgentProduced(t *testing.T) {
 	if set.RunID != filepath.Base(runDir) {
 		t.Errorf("set.RunID = %q, want the run directory's own name", set.RunID)
 	}
-	// The pins are the SOURCE run's, captured as reviewed — not re-derived at apply time, which
+	// The pins are the source run's, captured as reviewed — not re-derived at apply time, which
 	// would make a changed file look unchanged.
 	if set.BaseHashes["a.go"] == "" || set.BaseHashes["a.go"] == BaseHashAbsent {
 		t.Errorf("baseHashes = %v, want a real digest for the accepted finding's target", set.BaseHashes)
@@ -70,9 +66,8 @@ func TestReadDecisionSet_AcceptsARunThisAgentProduced(t *testing.T) {
 	}
 }
 
-// TestReadDecisionSet_RefusesAnythingElse is the fail-closed half. Each case fails for a DIFFERENT
-// reason and every one answers with the SAME code — a resolver that distinguished them would tell a
-// peer which absolute paths exist.
+// TestReadDecisionSet_RefusesAnythingElse checks the fail-closed half: each case fails for a different
+// reason and all answer with the same code, so a peer cannot learn which absolute paths exist.
 func TestReadDecisionSet_RefusesAnythingElse(t *testing.T) {
 	m, runDir, _ := decisionSetFixture(t)
 	art := m.ArtifactDir
@@ -85,8 +80,8 @@ func TestReadDecisionSet_RefusesAnythingElse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A SYMLINK that is SPELLED like a run of ours and is not one. This is the case the lexical
-	// check alone would admit, which is why the canonical check exists.
+	// A symlink spelled like one of our runs. The lexical check alone would admit it; the canonical
+	// check refuses it.
 	link := filepath.Join(art, "20990101T000000-0000")
 	if lerr := os.Symlink(outside, link); lerr != nil {
 		t.Skipf("symlinks unavailable: %v", lerr)
@@ -189,9 +184,8 @@ func TestBindWorkspace_RefusesATreeThatIsNoLongerTheOneReviewed(t *testing.T) {
 	}
 }
 
-// TestBindWorkspace_RefusesAnUnboundSet. A set whose run could not capture an identity has nothing to
-// verify against — and an empty canonical path would resolve to the PROCESS WORKING DIRECTORY, which
-// is a silent substitution of a tree nobody reviewed. It is refused rather than resolved.
+// TestBindWorkspace_RefusesAnUnboundSet checks that a set with no captured identity is refused: an
+// empty canonical path would resolve to the process working directory, a tree nobody reviewed.
 func TestBindWorkspace_RefusesAnUnboundSet(t *testing.T) {
 	set := &StoredDecisionSet{RunID: "r", Accepted: 1}
 	if _, err := set.BindWorkspace(); err == nil {
@@ -201,10 +195,9 @@ func TestBindWorkspace_RefusesAnUnboundSet(t *testing.T) {
 	}
 }
 
-// TestBindWorkspace_NoDurableKeyStillBinds is the Windows branch, exercised on any platform: a set
-// captured where `fs.FileInfo.Sys()` carries no file index records no key, and the binding then
-// rests on the canonical path plus the content pins. It must still BIND rather than fail closed on
-// a platform difference — the alternative is an agent that can never apply its own decisions there.
+// TestBindWorkspace_NoDurableKeyStillBinds exercises the Windows branch on any platform: a set captured
+// without a file-index key binds on the canonical path plus the content pins rather than failing
+// closed.
 func TestBindWorkspace_NoDurableKeyStillBinds(t *testing.T) {
 	m, runDir, _ := decisionSetFixture(t)
 	set, _, err := m.ReadDecisionSet(runDir)
@@ -217,10 +210,9 @@ func TestBindWorkspace_NoDurableKeyStillBinds(t *testing.T) {
 	}
 }
 
-// TestRunHandle_IsASpellingNotABypass. A surface that hands out an OPAQUE RUN ID and no path (MCP)
-// cannot form a handle itself, so RunHandle spells one for it. What it must NOT do is extend any
-// trust: the joined path faces the same four checks, so an id that is really a traversal, an
-// absolute path or a nested path is refused exactly as the same string handed in as a handle is.
+// TestRunHandle_IsASpellingNotABypass checks that RunHandle, which forms a handle from an opaque run id
+// for MCP, extends no trust: an id that is a traversal, an absolute path or a nested path is refused
+// exactly as the same string passed as a handle.
 func TestRunHandle_IsASpellingNotABypass(t *testing.T) {
 	m, runDir, _ := decisionSetFixture(t)
 	id := filepath.Base(runDir)
@@ -259,10 +251,8 @@ func TestRunHandle_IsASpellingNotABypass(t *testing.T) {
 	}
 }
 
-// TestRunID_NamesTheRunDirectory. A surface that must hand its caller a durable handle BEFORE the run
-// exists supplies the run id, and the run's directory is named for it — which is the whole reason
-// MCP's `review_remediate {fromRun}` can read a set it recorded: the only handle a client holds is
-// the directory's own name.
+// TestRunID_NamesTheRunDirectory checks that a caller-supplied run id names the run directory, which is
+// how MCP's `review_remediate {fromRun}` reads the set a run recorded.
 func TestRunID_NamesTheRunDirectory(t *testing.T) {
 	m := syntheticAdjManager(t, fake.Empty)
 	ws, _ := makeWorkspace(t)
@@ -275,8 +265,7 @@ func TestRunID_NamesTheRunDirectory(t *testing.T) {
 	if out.RunID != "run-deadbeef" || filepath.Base(out.RunDir) != "run-deadbeef" {
 		t.Fatalf("runId = %q, runDir = %q, want both to be the supplied id", out.RunID, out.RunDir)
 	}
-	// And the set that run recorded is readable BY THAT NAME, which is the property the whole
-	// arrangement exists for.
+	// The set that run recorded is readable by that name.
 	if _, _, rerr := m.ReadDecisionSet(m.RunHandle("run-deadbeef")); rerr != nil {
 		t.Fatalf("the run must be resolvable from the id its caller was handed: %v", rerr)
 	}

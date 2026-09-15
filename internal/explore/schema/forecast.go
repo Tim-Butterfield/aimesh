@@ -1,32 +1,15 @@
 package schema
 
-// This file holds the FORECAST mode's app-owned TASK INPUTS + round artifact.
-//
-// Forecast is the other FIXED-SPACE mode, and it is the most deterministic thing exploremesh does. The
-// TARGET, the UNIT and the HORIZON are declared by the user before any explorer speaks, so every explorer
-// answers the same question in the same units and the panel's answers are directly poolable arithmetic —
-// no entity resolution, no partition, no confirmation round.
-//
-// Two rules do the work here, and both are about refusing a tempting shortcut:
-//
-//   - THE ESTIMATE IS MACHINE-READABLE OR IT IS NOT AN ESTIMATE. `estimate`, `low` and `high` are typed
-//     NUMBERS in the explorer schema, so a narrative answer ("somewhere in the low hundreds") fails
-//     validation and the response is dropped with a reason instead of being interpreted. A host that
-//     extracted a number out of prose would be inventing precision; a collator that "split the difference"
-//     in words is exactly what this mode exists to replace.
-//   - THE HOST POOLS; THE COLLATOR NARRATES. The aggregate, the interval, the dispersion and the outlier
-//     set are computed in internal/pool by a declared, versioned rule over the recorded blind estimates.
-//     The collator sees those numbers already final and may only write prose about them.
+// This file holds the Forecast mode's task validation, round-1 prompt and schema, and response parsing. The
+// user declares the target, unit and horizon, and estimate, low and high are typed as numbers, so
+// non-numeric answers fail validation instead of being interpreted.
 
 import (
 	"fmt"
 	"strings"
 )
 
-// ValidateForecastTask checks the DECLARED estimation target is usable BEFORE any spend: what
-// is being estimated, in what unit, over what horizon. It is the mode's ValidateTask, so every surface
-// refuses an under-declared forecast with the same message — pooling numbers whose units nobody fixed is
-// arithmetic over things that are not the same quantity.
+// ValidateForecastTask is Forecast's ValidateTask. It requires a target, unit and horizon.
 func ValidateForecastTask(raw RawTask) error {
 	missing := make([]string, 0, 3)
 	if strings.TrimSpace(raw.Target) == "" {
@@ -45,9 +28,8 @@ func ValidateForecastTask(raw RawTask) error {
 		"forecast", strings.Join(missing, "; "))
 }
 
-// forecastExplorerFields is the Forecast mode's FIXED round-1 explorer schema. `estimate`, `low` and `high`
-// are TYPED NUMBERS and REQUIRED: the type is the rejection mechanism for a non-numeric answer, applied at
-// the envelope boundary before any pooling can see it (see the file comment).
+// forecastExplorerFields is the Forecast round-1 explorer schema. The number types on estimate, low and
+// high reject non-numeric answers during validation.
 var forecastExplorerFields = []Field{
 	{Name: "estimate", Type: TypeNumber, Required: true, Repeated: false},
 	{Name: "low", Type: TypeNumber, Required: true, Repeated: false},
@@ -57,18 +39,18 @@ var forecastExplorerFields = []Field{
 	{Name: "reasoning", Type: TypeString, Required: true, Repeated: false},
 }
 
-// ForecastExplorerSchema returns a fresh copy of the Forecast round-1 explorer schema.
+// ForecastExplorerSchema returns a new copy of the Forecast round-1 explorer schema.
 func ForecastExplorerSchema() Schema {
 	fields := make([]Field, len(forecastExplorerFields))
 	copy(fields, forecastExplorerFields)
 	return Schema{Fields: fields}
 }
 
-// ForecastTargetMarker prefixes the machine-readable declaration block in the prompt (a constant so the
-// exact bytes are assertable and a deterministic fake reads the same declaration a real model is shown).
+// ForecastTargetMarker introduces the JSON target declaration in the Forecast prompt. The fake model parses
+// it.
 const ForecastTargetMarker = "declared estimation target (JSON):\n"
 
-// forecastTargetWire is the declared target rendered as JSON into the prompt.
+// forecastTargetWire is the declared target as rendered into the prompt.
 type forecastTargetWire struct {
 	Target            string `json:"target"`
 	Unit              string `json:"unit"`
@@ -76,11 +58,9 @@ type forecastTargetWire struct {
 	ConditioningEvent string `json:"conditioningEvent,omitempty"`
 }
 
-// ForecastExplorerPrompt is the deterministic, app-owned round-1 prompt: one numeric estimate, one
-// interval, and the reasoning behind them. It states the unit twice (in prose and in the JSON block)
-// because a pooled aggregate over mixed units is not an aggregate, and it tells the explorer plainly that
-// a hedged non-numeric answer will be REJECTED — a refusal it can make deliberately, by abstaining, rather
-// than by writing prose into a numeric field.
+// ForecastExplorerPrompt builds the Forecast round-1 prompt, asking for a numeric estimate, an interval and
+// reasoning. It states the unit in prose and JSON, and tells explorers to abstain rather than answer
+// non-numerically.
 func ForecastExplorerPrompt(raw RawTask) string {
 	var b strings.Builder
 	b.WriteString("You are an independent FORECASTER. Give your own numeric estimate for the target below. ")
@@ -133,8 +113,7 @@ func ForecastExplorerPrompt(raw RawTask) string {
 	return b.String()
 }
 
-// ForecastEstimate is ONE explorer's estimate, lifted out of a validated round-1 response. It is a
-// mechanical projection of typed fields — the host reads numbers that are already numbers.
+// ForecastEstimate is one explorer's estimate from a validated round-1 response.
 type ForecastEstimate struct {
 	Estimate    float64  `json:"estimate"`
 	Low         float64  `json:"low"`
@@ -145,14 +124,9 @@ type ForecastEstimate struct {
 	Reasoning   string   `json:"reasoning,omitempty"`
 }
 
-// ParseForecast lifts ONE validated response into a typed estimate. It REFUSES a non-numeric estimate with
-// an error rather than returning a zero value: the pipeline's schema validation already rejects such a
-// response at the envelope boundary, and this is the second, explicit refusal — a zero silently pooled as
-// an estimate is the single worst thing this mode could do.
-//
-// The INTERVAL is treated separately from the point estimate: a missing or inverted interval does not
-// invalidate a usable point estimate, it just means this explorer contributes no bound (HasInterval false),
-// which the pooled interval then reports over a smaller denominator.
+// ParseForecast returns the estimate in a validated response. It returns an error, not a zero value, when
+// estimate is not a number. A missing or inverted interval leaves HasInterval false without rejecting the
+// estimate.
 func ParseForecast(response map[string]any) (ForecastEstimate, error) {
 	est, ok := numericValue(response["estimate"])
 	if !ok {

@@ -1,8 +1,6 @@
-// Package doctor holds meshcore's DOMAIN-FREE readiness primitives: the readiness result types
-// (Check/Report), the optional adapter binary-probe capability (Prober), a writable-dir check,
-// and adapter availability/probe scans over a model.Adapter registry. It knows nothing of any
-// app's profiles/lanes/roles — an app composes these primitives with its own roster-aware checks
-// (which adapters a profile requires, whether a plan resolves) to build the final Report.
+// Package doctor holds domain-free readiness primitives: the Check and Report types, a writable
+// directory check, and adapter availability and probe scans over a model.Adapter registry.
+// Applications add their own checks to build the final Report.
 package doctor
 
 import (
@@ -66,9 +64,8 @@ const ReportSchemaVersion = 1
 // without pattern-matching the human check name itself.
 const probePrefix = "probe: "
 
-// deepProbePrefix marks the checks produced by ProbeAdaptersDeep. It is a DIFFERENT prefix rather than
-// a suffix on the same one because the two answer different questions and cost different amounts: a
-// `probe:` row is free, a `probe-deep:` row spent real tokens, and a consumer must never confuse them.
+// deepProbePrefix marks the checks produced by ProbeAdaptersDeep. It differs from probePrefix because a
+// deep probe spends tokens and a consumer must not confuse the two.
 const deepProbePrefix = "probe-deep: "
 
 // CheckView is one readiness check in the machine projection.
@@ -79,9 +76,8 @@ type CheckView struct {
 	// Probe marks a check produced by an executed adapter probe (as opposed to a static
 	// check). Absent means static.
 	Probe bool `json:"probe,omitempty"`
-	// Deep marks a check produced by a DEEP probe: a real, bounded invocation in an isolated
-	// directory, which SPENT tokens. Deep implies Probe. A consumer that treats readiness data as
-	// free must be able to tell the two apart, and the name is not a machine contract.
+	// Deep marks a check produced by a deep probe, a real bounded invocation that spent tokens. Deep
+	// implies Probe.
 	Deep bool `json:"deep,omitempty"`
 }
 
@@ -130,7 +126,7 @@ func AdapterAvailability(adapters map[string]model.Adapter, names []string, requ
 	return out
 }
 
-// ProbeAdapters runs a safe no-model readiness probe (via model.Prober) for the REQUIRED, available
+// ProbeAdapters runs a safe no-model readiness probe (via model.Prober) for the required, available
 // adapters in names, under the caller's ctx (so a cancel/timeout propagates). An adapter that is not
 // required, not registered, or unavailable is skipped (availability is reported separately by
 // AdapterAvailability). Adapters without a Prober report "no probe". A classified blocker signal
@@ -163,26 +159,19 @@ func ProbeAdapters(ctx context.Context, adapters map[string]model.Adapter, names
 	return out
 }
 
-// DeepSeat names one adapter to deep-probe and the model argument a real run would pass it. The model
-// argument is part of the question: a recipe builds it into the argv, so probing an adapter with a
-// model the roster never uses answers a question nobody asked.
+// DeepSeat names one adapter to deep-probe with the model argument and effort a real run would pass,
+// since a recipe builds the model argument into the argv.
 type DeepSeat struct {
 	Adapter  string
 	ModelArg string
 	Effort   string
 }
 
-// ProbeAdaptersDeep runs the DEEP readiness probe (via model.DeepProber) for the named seats, in the
-// order given, at most ONCE PER ADAPTER — the first seat naming an adapter wins.
-//
-// Once per adapter is the honest granularity AND the spend bound. The question a deep probe answers is
-// "does this CLI do real work in a throwaway directory?", which is a property of the CLI's own trust
-// and auth posture, not of a seat; probing five seats of one adapter would spend five times to learn
-// the same fact.
-//
-// This SPENDS REAL TOKENS. Every caller must gate it behind an explicit human opt-in, and no surface
-// that advertises itself as free may call it. An adapter that is unavailable or unregistered is
-// skipped (availability is reported separately); one without the capability reports "no deep probe".
+// ProbeAdaptersDeep runs the deep readiness probe (model.DeepProber) for the named seats, in order, at
+// most once per adapter (the first seat naming it wins), because the result depends on the CLI's trust
+// and authentication rather than on the seat. It spends tokens, so callers must gate it behind an
+// explicit opt-in. Unavailable or unregistered adapters are skipped; one without the capability
+// reports "no deep probe".
 func ProbeAdaptersDeep(ctx context.Context, adapters map[string]model.Adapter, seats []DeepSeat) []Check {
 	var out []Check
 	seen := map[string]bool{}

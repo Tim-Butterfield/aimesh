@@ -1,31 +1,17 @@
 package mode
 
-// This file is the SHORTLIST mode — diverge, confirm the universe, then
-// put it to an explicit ballot:
+// This file implements the Shortlist mode:
 //
-//	round 1 (BLIND)   each explorer enumerates candidate options broadly; nobody chooses yet
-//	canonicalize      TWO independent canonicalizers; only merges BOTH propose hold
-//	confirm           the BINDING confirmation round fixes the CANDIDATE UNIVERSE the ballot runs over
-//	FREEZE            the host fixes + hashes the decision inputs — universe revision, presented order,
-//	                  criteria (with origin + aggregation method), method, shortlist size, quorum, tie rule,
-//	                  missing-response policy — BEFORE the ballot exists
-//	round 2 (BALLOT)  each explorer ranks/approves the CONFIRMED canonical IDs in a randomized presented order
-//	tally             the HOST computes the ranking (govern.Tally) and pins a claim to every shortlisted entry
+//	round 1 (blind)   each explorer enumerates candidate options
+//	canonicalize      two canonicalizers; only merges both propose hold
+//	confirm           the confirmation round fixes the candidate set
+//	freeze            the host hashes the decision inputs before any ballot exists
+//	round 2 (ballot)  each explorer ranks and approves the confirmed candidates, in a seeded random order
+//	tally             the host computes the ranking with govern.Tally
 //
-// Three separations do the work, and none of them is a matter of style:
-//
-//   - The universe is fixed BEFORE anyone votes, by a process the voters themselves could contest. A ballot
-//     over a universe one party assembled after seeing the options is a ballot that party has already won.
-//   - The framing is fixed BEFORE anyone votes, and its hash is rendered into the ballot prompt. The governance rule is
-//     that a criterion introduced after seeing which candidate it favors is not a criterion; the freeze is
-//     what makes that checkable from the persisted bytes.
-//   - The RANKING is computed by the host from the ballots. A mode contract here cannot produce an ordering —
-//     BallotContract has no method that returns one — because a ranking a model could assert is a ranking the
-//     artifacts do not support.
-//
-// And the label stays honest: a ballot is an INFORMED PREFERENCE UNDER SHARED FRAMING. It is not consensus,
-// and `voted` is not `emergent` — emergent is host-counted blind round-1 salience (who NAMED a candidate),
-// which the same run also reports, side by side, so the two can never be quietly substituted for each other.
+// The panel can contest the candidate set before voting, the frozen framing's hash appears in the ballot
+// prompt, and the ranking comes only from the host tally. The result is reported as an informed preference
+// under shared framing, alongside each candidate's blind round-1 salience.
 
 import (
 	"encoding/json"
@@ -38,43 +24,33 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// maxShortlistSize caps the frozen cut. A "shortlist" that holds most of the universe has not decided
-// anything, so the cut is the top half of the confirmed universe, never more than this.
+// maxShortlistSize caps the shortlist size.
 const maxShortlistSize = 5
 
-// --- the terminal output ---
-
-// ShortlistOutput is the FIXED, exploremesh-owned terminal output of the Shortlist mode: the host-tallied
-// ranked subset with each entry pinned to its govern.Claim, per-candidate provenance, the rejects WITH host
-// reasons, the frozen criteria with their origin + method, the tie/quorum outcome, and any contested-partition
-// sensitivity. It lives in this package rather than internal/schema because it embeds govern types, and
-// govern sits above schema in the import graph.
+// ShortlistOutput is the Shortlist mode's output: the ranked candidates with their claims and provenance,
+// the rejected candidates with reasons, the frozen criteria, and the tie and quorum outcome. It is defined
+// here rather than in package schema because it uses govern types.
 type ShortlistOutput struct {
-	// Decision is the honest rendering of what this result IS (host-authored, persisted with the value):
-	// an informed preference under shared framing, tallied by the host — never consensus, never emergent.
+	// Decision is the host's description of the result.
 	Decision string `json:"decision"`
-	// DecisionInputsHash is the hash of the inputs frozen BEFORE the ballot was solicited; the same value the
-	// voters saw rendered in their prompt.
+	// DecisionInputsHash is the hash of the frozen decision inputs, as shown in the ballot prompt.
 	DecisionInputsHash    string `json:"decisionInputsHash"`
 	PartitionRevisionHash string `json:"partitionRevisionHash"`
 	Method                string `json:"method"`
-	// Ranked is the shortlist in host-tallied order. An entry whose definitive `ranked` label was WITHHELD is
-	// still here — withholding a label is not the same as removing a candidate.
+	// Ranked is the shortlist in tally order, including entries whose label was withheld.
 	Ranked []ShortlistEntry `json:"ranked"`
-	// Rejects are the candidates that did not make the frozen cut, carried with the HOST's reason. The panel
-	// nominated them, so they are never silently dropped (the minority carry-through rule, applied to a decision).
+	// Rejects are the candidates below the cut, with the host's reasons.
 	Rejects []ShortlistReject `json:"rejects,omitempty"`
-	// Criteria are the FROZEN criteria with their origin + aggregationMethod.
+	// Criteria are the frozen criteria.
 	Criteria []govern.Criterion `json:"criteria"`
-	// BallotsCast / PanelSize / Respondents are the participation facts behind the tally.
+	// BallotsCast, PanelSize and Respondents describe participation in the tally.
 	BallotsCast int  `json:"ballotsCast"`
 	PanelSize   int  `json:"panelSize"`
 	Respondents int  `json:"respondents"`
 	QuorumMet   bool `json:"quorumMet"`
-	// TieOutcome states the frozen tie rule's effect when a tie straddled the cut ("" when none did).
+	// TieOutcome describes a tie at the cut, or is empty.
 	TieOutcome string `json:"tieOutcome,omitempty"`
-	// CollatorNarrative is the quarantined MODEL PROSE namespace — voters' rationales and the
-	// canonicalizers' coverage notes live here and nowhere else.
+	// CollatorNarrative holds model prose: voters' rationales and canonicalizer notes.
 	CollatorNarrative []govern.Narrative `json:"collatorNarrative,omitempty"`
 }
 
@@ -83,23 +59,18 @@ type ShortlistEntry struct {
 	Rank        int    `json:"rank"`
 	CanonicalID string `json:"canonicalId"`
 	Name        string `json:"name"`
-	// Score / Approvals / Support are HOST arithmetic over the recorded ballots (positional points; the
-	// separate acceptability tally; the number of ballots that placed this candidate at all).
+	// Score, Approvals and Support come from the host tally: positional points, approvals, and the number
+	// of ballots that placed the candidate.
 	Score     int `json:"score"`
 	Approvals int `json:"approvals"`
 	Support   int `json:"support"`
-	// Claim is the pinned governance claim: the label (ranked | withheld_contested_partition |
-	// withheld_below_quorum | withheld_tie), BOTH denominators, the frozen policy + partition + rules, and a
-	// sensitivity range when a contested mapping reaches this candidate.
+	// Claim is the candidate's ballot claim, with its label, denominators and any sensitivity range.
 	Claim govern.Claim `json:"claim"`
-	// Voters are the explorers that placed this candidate on their ballot (attribution, not a tally).
+	// Voters are the explorers that placed the candidate.
 	Voters []schema.ExplorerIdentity `json:"voters"`
-	// Provenance is who NOMINATED this candidate in the immutable BLIND round 1, with their exact wording —
-	// deliberately a different measurement from the ballot support above, reported alongside it so `emergent`
-	// and `voted` can be compared rather than confused.
+	// Provenance lists who nominated the candidate in blind round 1, with their wording.
 	Provenance []ShortlistNomination `json:"provenance"`
-	// EmergentSalience is the host's BLIND round-1 corroboration claim for the same entity, when one was
-	// emitted — the explicit side-by-side of salience and preference.
+	// EmergentSalience is the candidate's blind round-1 corroboration claim, when one was emitted.
 	EmergentSalience *govern.Claim `json:"emergentSalience,omitempty"`
 }
 
@@ -110,7 +81,7 @@ type ShortlistNomination struct {
 	RawNomination string                  `json:"rawNomination"`
 }
 
-// ShortlistReject is a candidate that did not make the frozen cut, with the HOST's arithmetic reason.
+// ShortlistReject is a candidate below the cut, with the host's reason.
 type ShortlistReject struct {
 	Rank        int                   `json:"rank"`
 	CanonicalID string                `json:"canonicalId"`
@@ -122,8 +93,7 @@ type ShortlistReject struct {
 	Provenance  []ShortlistNomination `json:"provenance"`
 }
 
-// Summary returns the one-line human summary. It names the ranked subset and how many labels were withheld —
-// it never says "chosen" or "consensus".
+// Summary returns a one-line summary of the ranking and how many labels were withheld.
 func (o ShortlistOutput) Summary() string {
 	withheld := 0
 	for _, e := range o.Ranked {
@@ -136,8 +106,7 @@ func (o ShortlistOutput) Summary() string {
 		len(o.Ranked)-withheld, withheld, shortHash(o.DecisionInputsHash))
 }
 
-// Validate checks the shortlist is usable: a non-empty ranked subset and a recorded decision rendering (the
-// honest label is not optional — a result that lost it could be read as a consensus claim).
+// Validate requires at least one ranked candidate and a decision description.
 func (o ShortlistOutput) Validate() error {
 	if len(o.Ranked) == 0 {
 		return fmt.Errorf("shortlist output ranked no candidates")
@@ -148,16 +117,10 @@ func (o ShortlistOutput) Validate() error {
 	return nil
 }
 
-// --- the round-2 (BALLOT) contract ---
-
-// shortlistBallot is BOTH the Shortlist mode's LaterRoundContract (it renders the ballot round) and its
-// BallotContract (it declares the frozen criteria and parses one ballot). Note again what it cannot do: no
-// method here returns an ordering. The host freezes, solicits and tallies.
+// shortlistBallot is the Shortlist mode's LaterRoundContract and BallotContract.
 type shortlistBallot struct{}
 
-// Accepts declares the round→round edge: only the pooled confirmed-canonical uniques, at the current artifact
-// schema version. A ballot over anything else — raw peer output, an unconfirmed partition — is rejected before
-// spend, which is what makes "the ballot ran over the CONFIRMED universe" mechanical.
+// Accepts accepts only confirmed canonical entities, so the ballot always runs over the confirmed set.
 func (shortlistBallot) Accepts() round.Accepts {
 	return round.Accepts{Kinds: []round.Kind{round.KindCanonicalUniques}, SchemaVersion: round.SchemaVersion}
 }
@@ -168,11 +131,7 @@ func (shortlistBallot) Prompt(raw schema.RawTask, untrustedDataBlock string) str
 
 func (shortlistBallot) ExplorerSchema() schema.Schema { return schema.BallotSchema() }
 
-// Criteria are the FROZEN decision criteria. They are derived from the USER's stated criteria and carry
-// origin `user` + aggregationMethod `ballot`: the user said what matters, and the panel's ballots are how
-// those criteria are aggregated. Nothing here is collator-proposed, so no authorization event is required —
-// and a criterion this mode did NOT get from the user could not be smuggled in, because there is no code path
-// that adds one.
+// Criteria returns the task's criteria, each with origin `user` and aggregation method `ballot`.
 func (shortlistBallot) Criteria(raw schema.RawTask) []govern.Criterion {
 	out := make([]govern.Criterion, 0, len(raw.Criteria))
 	for _, c := range raw.Criteria {
@@ -186,27 +145,17 @@ func (shortlistBallot) Criteria(raw schema.RawTask) []govern.Criterion {
 	return out
 }
 
-// Method is the versioned HOST tally rule.
+// Method returns the positional ballot tally method.
 func (shortlistBallot) Method() govern.DecisionMethod { return govern.MethodPositionalBallot }
 
-// ShortlistSize is the frozen cut: the top half of the confirmed universe, at least 1 and at most
-// maxShortlistSize. It is a pure function of the UNIVERSE SIZE — it cannot depend on the tally, because it is
-// computed and hashed before any ballot exists.
+// ShortlistSize returns half the universe size rounded up, between 1 and maxShortlistSize.
 func (shortlistBallot) ShortlistSize(universeSize int) int {
-	n := (universeSize + 1) / 2
-	if n > maxShortlistSize {
-		n = maxShortlistSize
-	}
-	if n < 1 {
-		n = 1
-	}
+	n := max(min((universeSize+1)/2, maxShortlistSize), 1)
 	return n
 }
 
-// ParseBallot lifts ONE explorer's ballot out of its recorded ballot-round envelope and validates it against
-// the confirmed universe. An entry naming a candidate outside the universe is an ERROR: the pipeline records
-// that explorer as having cast no usable ballot rather than silently deleting the entry, because deleting it
-// would change the voter's expressed preference without saying so.
+// ParseBallot extracts and validates an explorer's ballot. A candidate outside universe is an error, so
+// the explorer is recorded as casting no usable ballot rather than having the entry silently removed.
 func (shortlistBallot) ParseBallot(env schema.Envelope, universe map[string]bool) (govern.Ballot, error) {
 	resp := schema.ParseBallotResponse(env.Response)
 	b := govern.Ballot{
@@ -218,14 +167,10 @@ func (shortlistBallot) ParseBallot(env schema.Envelope, universe map[string]bool
 	return b, nil
 }
 
-// --- the canonicalizing + governed terminal contract ---
-
-// shortlistCollator is the Shortlist mode's terminal contract: a CanonicalizingContract over the raw candidate
-// nominations, and a GovernedCollator that assembles the ranked subset as a view over the host tally.
+// shortlistCollator is the Shortlist mode's CanonicalizingContract and GovernedCollator.
 type shortlistCollator struct{}
 
-// Nominations flattens the verified blind round-1 panel into raw candidate nominations, one per candidate
-// string per explorer.
+// Nominations returns one nomination per candidate string in each primary envelope.
 func (shortlistCollator) Nominations(primary []schema.Envelope) []canon.Nomination {
 	var out []canon.Nomination
 	for _, env := range primary {
@@ -243,16 +188,15 @@ func (shortlistCollator) Nominations(primary []schema.Envelope) []canon.Nominati
 	return out
 }
 
-// shortlistNominationWire is the per-nomination shape rendered into the canonicalizer prompt.
+// shortlistNominationWire is one nomination as shown to the canonicalizer.
 type shortlistNominationWire struct {
 	Index          int                     `json:"index"`
 	Raw            string                  `json:"raw"`
 	SourceExplorer schema.ExplorerIdentity `json:"sourceExplorer"`
 }
 
-// CanonicalizerPrompt renders the canonicalizer instruction for a BALLOT universe. It carries one instruction
-// Catalog's does not need: the labels become the ballot's option names, so a label that editorializes is a
-// thumb on the scale — the canonicalizer is told to name entities neutrally and told why.
+// CanonicalizerPrompt builds the Shortlist canonicalizer prompt. Labels become ballot option names, so it
+// asks for neutral labels.
 func (shortlistCollator) CanonicalizerPrompt(noms []canon.Nomination) (string, error) {
 	wire := make([]shortlistNominationWire, len(noms))
 	for i, n := range noms {
@@ -286,22 +230,18 @@ func (shortlistCollator) CanonicalizerPrompt(noms []canon.Nomination) (string, e
 		"nominations:\n" + string(arr) + "\n", nil
 }
 
-// ParseProposal decodes the proposed partition via the package-shared decoder, stamping the deciding call +
-// verified canonicalizer identity. Surjectivity remains canon's gate.
+// ParseProposal decodes the canonicalizer's output with parseClusterProposal.
 func (shortlistCollator) ParseProposal(raw []byte, _ []canon.Nomination, decidedByCall string, identity schema.ExplorerIdentity) (canon.Proposal, error) {
 	return parseClusterProposal(raw, decidedByCall, identity)
 }
 
-// Collate is the PARTITION-ONLY fallback required by CanonicalizingContract. Shortlist always runs governed:
-// without the host tally there is no ranking, and a "shortlist" assembled from a partition alone would be the
-// host silently choosing.
+// Collate always returns an error: a ranking requires the host tally, so Shortlist uses CollateGoverned.
 func (shortlistCollator) Collate(canon.Result) (ModeOutput, error) {
 	return nil, fmt.Errorf("shortlist: a ranking may only be assembled from the HOST TALLY of the recorded ballots; a partition-only collation would be the host choosing without a ballot")
 }
 
-// CollateGoverned assembles the ranked subset as a deterministic view over the host tally: every number comes
-// from govern.Tally, every claim from the same place, and the provenance from the confirmed partition's
-// attributed members. It computes no ordering of its own.
+// CollateGoverned builds the output from the host tally and the confirmed partition's attributions. It
+// computes no ordering of its own.
 func (shortlistCollator) CollateGoverned(in CollateInput) (ModeOutput, error) {
 	if in.Decision == nil {
 		return nil, fmt.Errorf("shortlist: no host tally was recorded — a ranking asserted without one is not a ranking the artifacts support")
@@ -314,8 +254,7 @@ func (shortlistCollator) CollateGoverned(in CollateInput) (ModeOutput, error) {
 			})
 		}
 	}
-	// The BLIND round-1 salience claims, reported alongside the ballot claims so `emergent` and `voted` sit
-	// side by side and neither can be read as the other.
+	// Blind round-1 corroboration claims, reported beside the ballot claims.
 	salience := map[string]govern.Claim{}
 	if in.Governance != nil {
 		for _, c := range in.Governance.Claims {
@@ -369,9 +308,6 @@ func (shortlistCollator) CollateGoverned(in CollateInput) (ModeOutput, error) {
 }
 
 func init() {
-	// Shortlist. Formulation-free; ballot-bearing, so the full ranking-grade policy applies
-	// (Dual + Confirm — the confirmed partition IS the ballot's option set) and the pipeline freezes + hashes
-	// the decision inputs before dispatching the ballot round.
 	register(ModeSpec{
 		Name:             Shortlist,
 		FormulationFree:  true,
@@ -383,8 +319,6 @@ func init() {
 		Rounds:           2,
 		LaterRound:       shortlistBallot{},
 		Ballot:           shortlistBallot{},
-		// EMERGENT space: the candidate universe is explorer-authored, so grouping it is entity resolution and
-		// may only happen through the recorded ledger.
-		Class: schema.EmergentSpace,
+		Class:            schema.EmergentSpace,
 	})
 }

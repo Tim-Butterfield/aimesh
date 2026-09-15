@@ -11,20 +11,13 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/acp"
 )
 
-// A Client owns exactly ONE read loop over its Framer, because a Framer's buffered reader admits
-// only one owner — two read loops split frames between them, which is a data race and a corrupted
-// stream, not merely an interleaving.
-//
-// This file pins that with the exact shape the web-UI ACP validator uses: a goroutine parked in
-// CallCollecting("session/prompt") while the CALLER cancels from another goroutine. Sending that
-// cancel as a request is the coupling that made this a race; sending it as a notification is the
-// fix, and it is what the test drives.
+// A Client owns exactly one read loop over its Framer: two read loops would split frames between
+// them. These tests cancel from another goroutine while a session/prompt call is in flight, sending
+// the cancel as a notification so nothing else reads.
 
-// streamingAgent is a minimal in-process agent over one Framer, shaped like the real server: an
-// inline dispatch loop, plus a goroutine per run that streams `session/update` notifications until
-// the run is cancelled and then answers the prompt. The continuous stream is what makes a second
-// reader collide with the first rather than merely coexist with it. `started` is closed once the
-// first update of a run is on the wire.
+// streamingAgent is a minimal in-process agent shaped like the real server: an inline dispatch loop
+// and a goroutine per run that streams session/update notifications until cancelled, then answers
+// the prompt. started is closed once a run's first update is written.
 func streamingAgent(f acp.Framer, started chan<- struct{}) {
 	cancelled := make(chan struct{})
 	var cancelOnce, startedOnce sync.Once
@@ -80,8 +73,8 @@ func streamingAgent(f acp.Framer, started chan<- struct{}) {
 	}
 }
 
-// pipedClient wires a Client to streamingAgent over two in-memory pipes — the same Framer pair a
-// spawned child gives, without the subprocess. The returned channel closes once a run is streaming.
+// pipedClient wires a Client to streamingAgent over in-memory pipes. The returned channel closes
+// once a run is streaming.
 func pipedClient(t *testing.T) (*Client, <-chan struct{}) {
 	t.Helper()
 	cr, sw := io.Pipe() // agent → client
@@ -102,9 +95,8 @@ func pipedClient(t *testing.T) (*Client, <-chan struct{}) {
 	return NewClient(acp.FramingNewline, cr, cw), started
 }
 
-// TestClient_CancelDuringInFlightPromptNeverStartsASecondReader is the validator's cancel path in
-// miniature. It fails against a Client that lets a second request through: the two read loops race
-// on one bufio.Reader (reported under -race) and split the agent's frames between them.
+// A second request during an in-flight prompt must be refused; otherwise two read loops race on one
+// bufio.Reader and split the agent's frames.
 func TestClient_CancelDuringInFlightPromptNeverStartsASecondReader(t *testing.T) {
 	c, started := pipedClient(t)
 
@@ -120,14 +112,13 @@ func TestClient_CancelDuringInFlightPromptNeverStartsASecondReader(t *testing.T)
 	}()
 	<-started // the prompt owns the reader and updates are flowing
 
-	// A second REQUEST must be refused, not served: serving it would mean a second read loop over
-	// the reader the prompt above owns.
+	// A second request would need a second read loop, so it is refused.
 	if resp, err := c.Call("session/cancel", map[string]any{"sessionId": "s-1"}); !errors.Is(err, ErrRequestInFlight) {
 		t.Fatalf("a request issued while one is in flight must be refused with ErrRequestInFlight "+
 			"(serving it puts a second read loop on one buffered reader), got resp=%+v err=%v", resp, err)
 	}
 
-	// A NOTIFICATION is the way through: it writes and never reads, so it cannot race the reader.
+	// A notification only writes, so it cannot race the reader.
 	if err := c.Notify("session/cancel", map[string]any{"sessionId": "s-1"}); err != nil {
 		t.Fatalf("notify session/cancel: %v", err)
 	}

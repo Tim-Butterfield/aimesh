@@ -9,19 +9,14 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 )
 
-// Payload is WHAT A RUN WOULD CARRY out of a workspace and into a prompt: which files, how many
-// bytes of each, and what containment withheld. It is the answer to the half of "what is this
-// about to cost me" that a call count cannot express.
-//
-// It is produced WITHOUT making the containment copy and without keeping a single byte of
-// content — see PreviewPayload for why that matters and what it costs.
+// Payload describes what a run would send from a workspace into a prompt: which files, their byte
+// counts, and what containment withheld. PreviewPayloadWith produces it without copying or retaining
+// content.
 type Payload struct {
-	// Files is every file the run would show a reviewer, in the order the walk met them, each
-	// with the byte count that would be sent. Files are sent WHOLE, so the count is the size on
-	// disk; nothing here is a post-budget figure, because there is no budget (see Snippet).
+	// Files is every file the run would send, in walk order, with its size. Files are sent whole,
+	// so the size is the size on disk.
 	Files []PayloadFile
-	// Withheld lists files kept out for a containment reason rather than simply absent — the
-	// same Caveats the real run records, from the same rules. See Caveat.
+	// Withheld lists files kept out for a containment reason, by the same rules a run applies.
 	Withheld []Caveat
 	// TotalBytes is the sum of Files' bytes: everything the prompt would carry.
 	TotalBytes int
@@ -33,33 +28,12 @@ type PayloadFile struct {
 	Bytes int
 }
 
-// PreviewPayload reports what a review of `root` would carry into its reviewer prompts, WITHOUT
-// making the containment copy and without retaining any content.
-//
-// It exists for a dry run. Pricing a run in model calls answers half the question; the other half
-// is what those calls would be shown, and the two differ enormously between `--dry-run .` on a
-// monorepo and `--dry-run internal/review` — a difference a call count alone cannot express, and
-// which (measured 2026-08-11) made those two disclosures byte-identical.
-//
-// EQUIVALENCE IS THE POINT, AND IT IS TESTED. A real run copies the workspace and then collects
-// from the copy; this walks the live tree once and collects nothing. Both go through collectUnder,
-// which owns every rule, so the file set and the byte counts are the same set the run would send
-// — see TestPreviewPayload_MatchesWhatTheRunWouldCarry, which asserts it against an actual
-// Copy + CollectSnippetsWithCaveats rather than against an expectation.
-// The one deliberate difference is bookkeeping: a hardlinked file is withheld by the COPY in a
-// real run and by the COLLECTOR here, so the real run's withheld list is the union of two stages
-// and this one is a single list with the same contents.
-//
-// IT READS THE LIVE TREE. That is what makes it exact, and it is the same read the copy performs
-// moments later under the same rules — no path is opened here that a real run would not open. It
-// creates nothing, writes nothing and copies nothing, so it costs a walk and no spend, which is
-// what puts it on the free side of the dry-run stop.
-func PreviewPayload(root string) (Payload, error) { return PreviewPayloadWith(root, false) }
-
-// PreviewPayloadWith is PreviewPayload with the operator's protected-ancestor waiver applied,
-// so a dry run can describe the same tree the run itself would be allowed to copy. Passing a
-// value that disagrees with the run's own Access.AllowProtectedRoots is what would make the
-// preview describe a run that cannot happen — the equivalence this function exists to hold.
+// PreviewPayloadWith reports what a run over root would send to its prompts, without making the
+// containment copy or retaining content. It reads the live tree through collectUnder, the rules a
+// run applies to its copy, so the file set and byte counts match the run's; a test asserts this
+// against a real Copy. A hardlinked file is withheld by the collector here and by the copy in a run.
+// It writes nothing. Pass the allowProtected value the run uses, or the preview describes a run that
+// cannot happen.
 func PreviewPayloadWith(root string, allowProtected bool) (Payload, error) {
 	const op = "preview"
 	var p Payload
@@ -71,10 +45,7 @@ func PreviewPayloadWith(root string, allowProtected bool) (Payload, error) {
 	if err != nil {
 		return Payload{}, err
 	}
-	// A SINGLE-FILE workspace is previewed as that one file, never as its directory. Copy treats
-	// a file target as the whole subject of the run (the copy holds exactly it), so walking the
-	// parent here would report a payload of files no reviewer would ever be shown — the precise
-	// over-statement this function exists to remove.
+	// A single-file workspace is previewed as that file, matching Copy, which copies only it.
 	if !info.IsDir() {
 		if err := previewOneFile(op, root, info, allowProtected, keep); err != nil {
 			return Payload{}, err
@@ -89,13 +60,9 @@ func PreviewPayloadWith(root string, allowProtected bool) (Payload, error) {
 	return p, nil
 }
 
-// previewOneFile is PreviewPayload's single-file branch: the collector's per-file rules applied to
-// one named file, read through its PARENT as an identity-bound root so the read is confined the
-// same way every other containment read is.
-//
-// A containment refusal here is FATAL rather than a caveat, matching Copy: when the file IS the
-// workspace, withholding it leaves nothing to review, and reporting an empty payload would say
-// "this run carries nothing" where the run itself will refuse to start.
+// previewOneFile applies the collector's per-file rules to one file, read through its parent as an
+// identity-bound root. A containment refusal is returned rather than recorded as a caveat, matching
+// Copy: when the file is the workspace, the run itself would refuse to start.
 func previewOneFile(op, path string, info os.FileInfo, allowProtected bool, keep func(string, []byte)) error {
 	if ref := rootRefusal(op, path, allowProtected); ref != nil {
 		return ref
@@ -107,14 +74,14 @@ func previewOneFile(op, path string, info os.FileInfo, allowProtected bool, keep
 		}
 	}
 	if !info.Mode().IsRegular() {
-		return nil // a device or socket is not review material: nothing would be carried
+		return nil // devices and sockets are never sent
 	}
 	base := filepath.Base(path)
 	if IsExcluded(base) || scope.DeniedRead(base) != "" {
 		return nil
 	}
-	// The parent may legitimately BE a symlink (a file reached through a linked directory), so
-	// its identity is captured with a following stat — the same distinction Copy draws.
+	// The parent may be a linked directory, so its identity comes from a following stat, as in
+	// Copy.
 	parent := filepath.Dir(path)
 	wantParent, err := os.Stat(parent)
 	if err != nil {

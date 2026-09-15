@@ -1,10 +1,6 @@
-// Package setup is the SetupManager: the interactive setup/repair use case (CUC-3).
-// It is the only config-store writer: write/update the selected-scope config, detect
-// adapters, behave safely when non-interactive, and never write secrets. The wizard
-// (`setup --interactive`) supports default-profile choice, validated adapter binary-path
-// capture, and per-role lane **model selection from the catalog** (when a lane's adapter has
-// >=2 catalog entries). The richer halt-class-keyed repairs (model choice / identity
-// mismatch) and a pre-write live model-identity probe remain target/future.
+// Package setup configures reviewmesh: it writes the selected-scope config and shared adapter paths,
+// runs the interactive setup wizard, guides doctor repairs, and provides read projections of the
+// resolved config. It never writes secrets.
 package setup
 
 import (
@@ -23,33 +19,28 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// Manager owns setup/repair. It writes only the config store, never secrets. It also exposes
-// pure read projections (config/profiles/adapters/privacy DTOs — see views.go) so a Client
-// surface (CLI, web UI) can render config state without importing ResourceAccess directly.
+// Manager owns setup and repair. It writes only the config store, never secrets, and exposes read
+// projections of the resolved config (see views.go).
 type Manager struct {
 	Adapters map[string]model.Adapter
 	Out      io.Writer
-	// Read state for the projection methods (views.go). Optional for the write-only paths.
+	// Cfg, Layers and ArtifactDir are the read state for the projections in views.go.
 	Cfg         config.Config
 	Layers      config.Layers
 	ArtifactDir string
-	// WriteScope selects the config LAYER governed mutations write to: "" / "user" = user/global
-	// (the default; every existing caller is unchanged), "project" = the project config for this
-	// folder. Go owns scope resolution + layer semantics; a Client sets it per request. A project
-	// scope with no project config is BLOCKED (never a silent user write).
+	// WriteScope selects the config layer mutations write to: empty or "user" for the user config,
+	// "project" for this folder's project config. A project scope without a project config is blocked.
 	WriteScope string
 }
 
-// Result reports what setup/repair did.
+// Result reports what setup or repair did.
 type Result struct {
 	ConfigWritten bool
 	Path          string
 	Backup        string // path of the pre-write backup, when one was taken (model-key cleanup)
 	Messages      []string
-	// Conflict is set (and ConfigWritten stays false) when EditProfileLane needs a governed
-	// saved-model conflict resolution: the discovered/manual choice would overwrite an existing
-	// generated catalog key with different content and the caller did not pass Replace. The web
-	// UI surfaces it (Replace/Cancel + used-by) rather than failing with an opaque error.
+	// Conflict is set, and ConfigWritten stays false, when EditProfileLane's choice would overwrite a
+	// different existing catalog entry and Replace was not passed.
 	Conflict *SavedModelConflict
 }
 
@@ -62,10 +53,8 @@ func (m *Manager) log(msg string) {
 // engine returns the pure SetupEngine (stateless) the manager delegates planning to.
 func (m *Manager) engine() *esetup.Engine { return esetup.New() }
 
-// targetConfigPath resolves which config file under baseDir to write/patch: the existing
-// discovered config (e.g. a legacy `config.json`) if present, else the default
-// `config.yaml`. This avoids creating a shadowing `config.yaml` next to an existing
-// `config.json` (which LoadLayered would then prefer, hiding the user's config).
+// targetConfigPath returns the config file under baseDir to write: an existing discovered config if
+// present, else config.yaml, so a new config.yaml never shadows an existing config.json.
 func targetConfigPath(baseDir string) string {
 	if p := config.DiscoverProjectConfig(baseDir); p != "" {
 		return p
@@ -73,10 +62,8 @@ func targetConfigPath(baseDir string) string {
 	return config.ProjectConfigPath(baseDir)
 }
 
-// Setup initializes/updates the config under baseDir (the caller-chosen scope —
-// user/global by default, project when requested). When ask is nil
-// (non-interactive) it writes the default seed config idempotently and reports;
-// when interactive it confirms first. It never writes secrets.
+// Setup writes the shipped seed config under baseDir unless a config already exists. With a non-nil
+// ask it confirms first. It never writes secrets.
 func (m *Manager) Setup(baseDir string, ask review.Prompter) (Result, error) {
 	path := targetConfigPath(baseDir)
 
@@ -87,8 +74,8 @@ func (m *Manager) Setup(baseDir string, ask review.Prompter) (Result, error) {
 	return m.writeConfigIfAbsent(path, config.Default(), ask, "default profile: default (unconfigured — configure its lanes or copy a ready-made profile)", esetup.SetupKindDefault)
 }
 
-// availableAdapters returns the sorted names of registered adapters that report runnable
-// (a safe presence check — no model call, no auth).
+// availableAdapters returns the sorted names of registered adapters that report available. It makes
+// no model call.
 func (m *Manager) availableAdapters() []string {
 	avail := make([]string, 0, len(m.Adapters))
 	for name, a := range m.Adapters {
@@ -100,16 +87,11 @@ func (m *Manager) availableAdapters() []string {
 	return avail
 }
 
-// SetupWizard runs the interactive setup flow on the shared interactive stack — the
-// prompted counterpart of Setup. It inspects the existing config, detects adapters, lets
-// the user pick the PROFILE TO CONFIGURE (`defaultProfile` is never repointed — the one
-// default profile is the profile named `default`) and record adapter binary paths (each
-// validated before it is recorded), shows a summary, and writes ONLY after explicit confirmation: a fresh
-// config is written as the seed plus the chosen values; an existing config is surgically
-// patched (unrelated fields preserved, a malformed file refused). It writes through
-// ConfigAccess only and never writes secrets. With a nil Prompter it prints deterministic
-// guidance and returns a usage error — a non-interactive surface gets guidance, not prompts
-// (RB-17).
+// SetupWizard runs interactive setup: it picks a profile to configure, records validated adapter
+// binary paths, optionally chooses lane models from the catalog, shows a summary, and writes only after
+// confirmation. An existing config is patched with unrelated fields preserved; a new one starts from
+// the shipped seed. defaultProfile is never changed. With a nil Prompter it prints guidance and returns
+// a usage error.
 func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, error) {
 	var res Result
 	if ask == nil {
@@ -123,8 +105,7 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 	m.log(fmt.Sprintf("Detected runnable adapters: %v", m.availableAdapters()))
 	m.log("Authentication stays with each adapter's own CLI; reviewmesh never stores secrets.")
 
-	// Working config: an existing one is strict-loaded so a malformed file is refused up
-	// front (never silently overwritten); otherwise start from the shipped seed.
+	// Strict-load an existing config so a malformed file is refused rather than overwritten.
 	var cfg config.Config
 	if exists {
 		loaded, err := config.Load(path)
@@ -137,17 +118,11 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 		cfg = config.Default()
 	}
 
-	// 1. Choose the profile to CONFIGURE (its lane models, step 3) — only among profiles
-	// actually present in the config. This deliberately does NOT choose or write
-	// `defaultProfile`: the one default profile is the profile named `default`, and changing
-	// the effective default means editing `default`'s lanes or copying another profile onto
-	// it — never repointing the `defaultProfile` key (the same fixed semantics as the web UI;
-	// a stale non-`default` pointer from an older build is a legacy posture the web UI offers
-	// a confirmed repair for).
+	// 1. Choose the profile to configure. This never writes defaultProfile: the default profile is the
+	// profile named `default`.
 	profiles := make([]string, 0, len(cfg.Profiles))
 	for name := range cfg.Profiles {
-		// The shipped-but-HIDDEN fake profile (config.FakeProfile) is test-only — never offer it as a
-		// profile the user configures (it mirrors the `fake` ADAPTER being hidden from the UI).
+		// Never offer the hidden test profile.
 		if config.IsHiddenProfile(name) {
 			continue
 		}
@@ -164,7 +139,7 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 		}
 	}
 
-	// 2. Record adapter binary paths (loop) — validate each before recording it.
+	// 2. Record adapter binary paths, validating each first.
 	paths := map[string]string{}
 	cfgNames := m.configurableNames()
 	for len(cfgNames) > 0 && ask.Confirm("Record a binary path for an adapter?") {
@@ -188,13 +163,8 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 	}
 	sort.Strings(pathNames)
 
-	// 3. Per-role model selection from the catalog — configure a lane's model without
-	// hand-editing config. Offered ONLY for the chosen profile's non-fake lanes that have
-	// >=2 catalog entries for their adapter; choosing a catalog entry selects the model AND
-	// its effort/thinking together (effort lives on the catalog entry — the schema-consistent
-	// shape; no per-lane effort field is invented). With the shipped one-entry-per-adapter
-	// catalog there is nothing to choose, so no prompt is shown — add catalog entries (or a
-	// project config) to surface choices.
+	// 3. Offer model selection for the chosen profile's non-fake lanes whose adapter has at least two
+	// catalog entries. A catalog entry sets the model and its effort together.
 	var laneChoices []esetup.LaneChoice
 	if prof, ok := cfg.Profiles[chosenProfile]; ok {
 		roles := make([]string, 0, len(prof.Lanes))
@@ -225,7 +195,7 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 		}
 	}
 
-	// 4. Summary + 5. confirm before any write.
+	// 4. Summarize, then 5. confirm before any write.
 	summary := "(none)"
 	if len(pathNames) > 0 {
 		summary = strings.Join(pathNames, ", ")
@@ -245,10 +215,8 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 		return res, nil
 	}
 
-	// 6. Write through ConfigAccess only (atomic; no secrets). `defaultProfile` is never written here
-	// (see step 1). This is a SPLIT write: lane models → config.yaml (profiles), adapter binary paths →
-	// the scope's shared adapters.yaml. Resolve the shared target FIRST so a project-scope-with-no-root
-	// case blocks before either file is touched (no partial write).
+	// 6. Write lane models to config.yaml and adapter paths to the scope's shared adapters.yaml.
+	// Resolve the shared target first, so project scope outside a repository blocks before any write.
 	var shared string
 	if len(pathNames) > 0 {
 		s, err := m.sharedWriteTarget()
@@ -258,7 +226,7 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 		shared = s
 	}
 
-	// config.yaml: lane models (+ create a base config on the absent path).
+	// config.yaml: lane models, creating the file when absent.
 	if exists {
 		if len(laneChoices) > 0 {
 			lanePatch, err := m.engine().PlanLaneChoices(chosenProfile, laneChoices)
@@ -282,8 +250,7 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 		res.Messages = append(res.Messages, "wrote "+path)
 	}
 
-	// Shared adapters.yaml: each chosen adapter path. Per-file partial-failure honesty — the config.yaml
-	// write above already landed, so a failure here is reported as such (not silently swallowed).
+	// Shared adapters.yaml: config.yaml is already written, so a failure here is reported as partial.
 	for _, name := range pathNames {
 		if err := config.SetSharedAdapterPath(shared, name, paths[name]); err != nil {
 			return res, fmt.Errorf("config written to %s, but recording adapters.%s.path in %s failed: %w", path, name, shared, err)
@@ -298,14 +265,12 @@ func (m *Manager) SetupWizard(baseDir string, ask review.Prompter) (Result, erro
 	return res, nil
 }
 
-// SetupLocalOllama writes a selected-scope config for the opt-in fully-local-ollama
-// profile (no secrets, no cloud). The model tag comes from modelTag (typically
-// REVIEWMESH_OLLAMA_MODEL); an empty tag still writes a usable config and prints a
-// recommendation to set the tag. The `default` profile (fake adapter) remains the default.
+// SetupLocalOllama writes a selected-scope config with the fully-local-ollama profile, using modelTag
+// (typically REVIEWMESH_OLLAMA_MODEL). An empty tag still writes a usable config and recommends setting
+// one. The `default` profile remains the default.
 func (m *Manager) SetupLocalOllama(baseDir, modelTag string, ask review.Prompter) (Result, error) {
 	path := targetConfigPath(baseDir)
-	// fully-local-ollama is an EXAMPLE profile (not shipped in the seed); compose it here so
-	// `setup --profile fully-local-ollama` still writes a usable config for it.
+	// fully-local-ollama is an example profile, not part of the seed, so add it here.
 	cfg := config.WithOllamaModel(config.Default(), modelTag)
 	if p, ok := config.ExampleProfile("fully-local-ollama"); ok {
 		if cfg.Profiles == nil {
@@ -322,14 +287,11 @@ func (m *Manager) SetupLocalOllama(baseDir, modelTag string, ask review.Prompter
 	return m.writeConfigIfAbsent(path, cfg, ask, "fully-local-ollama available; default profile: "+cfg.DefaultProfile, esetup.SetupKindFullyLocalOllama)
 }
 
-// SetAdapterPath records an adapter's binary path in the selected-scope SHARED adapters.yaml
-// (`.aimesh/adapters.yaml`) — NOT in config.yaml — preserving every other adapter entry. It validates
-// the adapter name and binary path BEFORE writing (so a bad input never touches disk); it writes no
-// secrets, runs no authentication, and makes no model call. The write scope comes from the Manager's
-// WriteScope (the CLI sets it from --scope); baseDir is retained for signature compatibility but the
-// shared target is scope-anchored (user → AIMESH_HOME; project → repo root) rather than baseDir-derived.
+// SetAdapterPath records an adapter's binary path in the write scope's shared adapters.yaml, preserving
+// other entries. It validates the name and path before writing and writes no secrets. The target comes
+// from WriteScope; baseDir is unused.
 func (m *Manager) SetAdapterPath(baseDir, name, binPath string) (Result, error) {
-	_ = baseDir // shared target is scope-anchored, not baseDir-derived (see doc)
+	_ = baseDir // the target is scope-anchored
 	if err := m.engine().ValidateAdapterForPathCapture(name, m.configurableNames()); err != nil {
 		return Result{}, err
 	}
@@ -339,14 +301,10 @@ func (m *Manager) SetAdapterPath(baseDir, name, binPath string) (Result, error) 
 	return m.writeAdapterPathShared(name, binPath)
 }
 
-// PromoteUserToProject copies a **minimal, selected** set of project-relevant overrides from
-// the user/global config into the project config under projectBaseDir. It is **explicit only**
-// — never a side effect of plain `setup`, and never a bulk copy. By default it promotes only
-// `defaultProfile`; machine-specific `adapters.<name>.path` values are promoted ONLY when
-// includePaths is true. It writes through the single `ConfigPatch` path (`ConfigAccess`),
-// preserving every unrelated project field and refusing a malformed project file; it never
-// writes secrets. Gating: an interactive `ask` confirms after a summary; a non-interactive
-// call must pass assumeYes, else it prints the plan and returns a usage error without writing.
+// PromoteUserToProject copies selected overrides from the user config into the project config under
+// projectBaseDir: defaultProfile, plus adapter paths when includePaths is set. It preserves unrelated
+// project fields, refuses a malformed project file, and writes no secrets. An interactive ask confirms
+// after a summary; otherwise assumeYes is required, and without it nothing is written.
 func (m *Manager) PromoteUserToProject(projectBaseDir string, includePaths, assumeYes bool, ask review.Prompter) (Result, error) {
 	var res Result
 	userPath := config.DiscoverUserConfig()
@@ -357,9 +315,8 @@ func (m *Manager) PromoteUserToProject(projectBaseDir string, includePaths, assu
 	if err != nil {
 		return res, err
 	}
-	patch := m.engine().PlanPromotion(userRaw) // defaultProfile → project config.yaml
-	// Adapter binary paths live in the shared adapters.yaml; promote them dual-target (user shared →
-	// project shared) only when requested. Resolve names up front for the summary + no-op check.
+	patch := m.engine().PlanPromotion(userRaw) // defaultProfile into the project config.yaml
+	// Adapter paths are copied between shared adapters files only when requested.
 	var pathNames []string
 	if includePaths {
 		if userShared, serr := config.SharedUserLocationsPath(); serr == nil {
@@ -392,7 +349,7 @@ func (m *Manager) PromoteUserToProject(projectBaseDir string, includePaths, assu
 		m.log("Nothing written. Re-run with --yes to promote (or --interactive to confirm).")
 		return res, fault.New(fault.Usage, "promotion needs --yes (non-interactive) or --interactive")
 	}
-	// Resolve the project shared target BEFORE any write so a no-repo case blocks without a partial write.
+	// Resolve the project shared target before any write, so a missing repository blocks cleanly.
 	var projShared string
 	if len(pathNames) > 0 {
 		s, ok := config.SharedProjectLocationsPath(projectBaseDir)
@@ -421,9 +378,8 @@ func (m *Manager) PromoteUserToProject(projectBaseDir string, includePaths, assu
 	return res, nil
 }
 
-// ProjectPromotionPreview is the NON-writing preview of a user→project promotion, for the web UI's
-// confirmation summary. It reports the target path, whether a project config already exists (creation
-// is refused when it does), and exactly which keys PromoteUserToProject would write.
+// ProjectPromotionPreview describes what PromoteUserToProject would write: the target path, whether a
+// project config already exists, and the keys to write.
 type ProjectPromotionPreview struct {
 	TargetPath     string   `json:"targetPath"`
 	Exists         bool     `json:"exists"`
@@ -432,83 +388,8 @@ type ProjectPromotionPreview struct {
 	Ops            int      `json:"ops"`
 }
 
-// PlanProjectPromotion computes what PromoteUserToProject WOULD write — WITHOUT writing — so the web UI
-// can show a confirmation summary before the user commits. It reuses the SAME planner (PlanPromotion)
-// and target-path resolution as the write, and only reads the user config + probes whether a project
-// config already exists. No config write path is duplicated: the actual write stays PromoteUserToProject.
-func (m *Manager) PlanProjectPromotion(projectBaseDir string, includePaths bool) (ProjectPromotionPreview, error) {
-	var pv ProjectPromotionPreview
-	userPath := config.DiscoverUserConfig()
-	if userPath == "" {
-		return pv, fault.New(fault.Config, "no user/global config found to promote from (run `reviewmesh setup` first)")
-	}
-	userRaw, err := config.LoadRawMap(userPath)
-	if err != nil {
-		return pv, err
-	}
-	pv.TargetPath = targetConfigPath(projectBaseDir)
-	pv.Exists = config.DiscoverProjectConfig(projectBaseDir) != "" // covers .yaml/.yml/.json (legacy paths)
-	patch := m.engine().PlanPromotion(userRaw)
-	pv.Ops = len(patch.Ops)
-	for _, op := range patch.Ops {
-		if len(op.Path) == 1 && op.Path[0] == "defaultProfile" {
-			pv.DefaultProfile, _ = op.Value.(string)
-		}
-	}
-	// Adapter binary paths would be copied from the user shared adapters.yaml → project shared file.
-	if includePaths {
-		if userShared, err := config.SharedUserLocationsPath(); err == nil {
-			pv.AdapterPaths = config.SharedAdapterNames(userShared)
-			pv.Ops += len(pv.AdapterPaths)
-		}
-	}
-	return pv, nil
-}
-
-// CreateProjectConfig writes a NEW, valid, minimal project config (an override-only layer) under base,
-// through the single ConfigAccess write path — the governed primitive behind the web UI's "Create
-// project config" action. It is create-only (refuses when a project config already exists) and ALWAYS
-// writes a valid, non-empty file: `schemaVersion: 1` plus whatever PlanPromotion selects from the user
-// config (defaultProfile always; machine-specific adapter paths only when includePaths). So the user
-// never has to hand-create a blank file, and an empty/invalid file is never produced. No second write
-// path: it reuses the same PlanPromotion planner + config.ApplyPatchToFile as PromoteUserToProject.
-func (m *Manager) CreateProjectConfig(base string, includePaths bool) (Result, error) {
-	var res Result
-	if config.DiscoverProjectConfig(base) != "" {
-		return res, fault.New(fault.Usage, "a project config already exists under this folder — this action only creates one when none exists")
-	}
-	var patch config.ConfigPatch
-	if userPath := config.DiscoverUserConfig(); userPath != "" {
-		if userRaw, err := config.LoadRawMap(userPath); err == nil {
-			patch = m.engine().PlanPromotion(userRaw)
-		}
-	}
-	// Guarantee a valid minimal override even when there is nothing to promote (schemaVersion first).
-	patch.Ops = append([]config.SetOp{{Path: []string{"schemaVersion"}, Value: 1}}, patch.Ops...)
-	projPath := targetConfigPath(base)
-	if err := config.ApplyPatchToFile(projPath, patch); err != nil {
-		return res, err
-	}
-	res.ConfigWritten, res.Path = true, projPath
-	res.Messages = append(res.Messages, "created a project config at "+projPath+" (override-only; no secrets)")
-	// Copy the user's saved adapter paths into the project shared adapters.yaml when requested.
-	if includePaths {
-		if projShared, ok := config.SharedProjectLocationsPath(base); ok {
-			if userShared, err := config.SharedUserLocationsPath(); err == nil {
-				if copied, cerr := config.CopySharedAdapterPaths(userShared, projShared); cerr != nil {
-					return res, fmt.Errorf("created %s, but copying adapter paths into %s failed: %w", projPath, projShared, cerr)
-				} else if len(copied) > 0 {
-					res.Messages = append(res.Messages, fmt.Sprintf("copied %d adapter path(s) into %s", len(copied), projShared))
-				}
-			}
-		}
-	}
-	m.log(res.Messages[0])
-	return res, nil
-}
-
-// detectHint returns the binary name to suggest in a repair command (e.g. "claude"
-// for "claude-code"), falling back to the adapter name.
+// detectHint returns the binary name to suggest in a repair command (for example "claude" for
+// "claude-code"), falling back to the adapter name.
 func (m *Manager) detectHint(name string) string {
 	if a, ok := m.Adapters[name]; ok {
 		if d, ok := a.(interface{ DetectName() string }); ok {
@@ -518,6 +399,7 @@ func (m *Manager) detectHint(name string) string {
 	return name
 }
 
+// configurableNames returns the sorted names of registered adapters other than `fake`.
 func (m *Manager) configurableNames() []string {
 	out := make([]string, 0, len(m.Adapters))
 	for n := range m.Adapters {
@@ -620,15 +502,9 @@ func (m *Manager) isConfigurable(name string) bool {
 	return ok
 }
 
-// Repair surfaces doctor issues and, on an interactive surface, offers a guided repair.
-// For every failed check it prints the plain-English issue + (for an adapter binary issue)
-// the exact `setup` command. When `ask` is non-nil (interactive) it additionally offers to
-// fix an adapter **binary path** in place — prompt → validate the path → write via the
-// shared `ConfigPatch` path (`SetupEngine.PatchFor` → `ConfigAccess`), the same single
-// config writer setup uses; it never writes secrets and never automates native CLI
-// login/trust (auth stays with the adapter's CLI). Non-adapter issues (and any
-// re-authentication need) stay **guidance-only**. With a nil `Prompter` it prints guidance
-// and writes nothing (RB-17). Model-choice / identity-mismatch repairs are target/future.
+// Repair prints guidance for each failed doctor check, including the setup command for an adapter
+// issue. With a non-nil ask it also offers to set a validated binary path for an adapter issue. Other
+// issues, including authentication, are guidance only. With a nil Prompter it writes nothing.
 func (m *Manager) Repair(baseDir string, rep doctor.Report, ask review.Prompter) Result {
 	var res Result
 	if rep.OK {
@@ -641,9 +517,7 @@ func (m *Manager) Repair(baseDir string, rep doctor.Report, ask review.Prompter)
 		if c.OK {
 			continue
 		}
-		// The manager resolves the binary hint (live adapter) for an adapter issue; the
-		// SetupEngine maps the issue → plain-English guidance + (for adapter issues) the
-		// exact repair command.
+		// Resolve the binary hint here; the engine maps the issue to guidance and a repair command.
 		name, isAdapter := strings.CutPrefix(c.Name, "adapter: ")
 		hint := ""
 		if isAdapter {
@@ -654,7 +528,7 @@ func (m *Manager) Repair(baseDir string, rep doctor.Report, ask review.Prompter)
 		if g.Command != "" {
 			m.log("  Fix: " + g.Command)
 		}
-		// Interactive guided repair: for an adapter binary issue, offer to set the path now.
+		// For an adapter issue, offer to set the path now.
 		if ask != nil && isAdapter && m.isConfigurable(name) {
 			if ask.Confirm("Set a binary path for " + name + " now?") {
 				p := ask.AskPath("Full path to the " + name + " binary:")

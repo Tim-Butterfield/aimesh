@@ -1,6 +1,5 @@
-// Package app wires the reviewmesh components together (dependency assembly) and
-// is shared by the surface Clients. The deterministic fake adapter is wired only
-// when the internal test-harness gate (meshcore fake.Enabled) is on.
+// Package app wires the review components together for the surfaces. The deterministic fake
+// adapter is wired only under the internal test gate (fake.Enabled).
 package app
 
 import (
@@ -24,23 +23,22 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/shell"
 )
 
-// App holds the resolved configuration and wired components. The config snapshot (Cfg/Layers/
-// Adapters) is guarded by mu so a web-UI write's ReloadConfig cannot race a concurrent read
-// handler (net/http serves each request in its own goroutine). Read the snapshot only via the
-// accessor methods; they hand back a consistent copy taken under the lock.
+// App holds the resolved configuration and wired components. The config snapshot (Cfg, Layers,
+// Adapters) is guarded by mu so ReloadConfig cannot race a concurrent reader; use the accessor
+// methods, which read it under the lock.
 type App struct {
 	Cfg         config.Config
-	Layers      config.Layers // which config layers were discovered/loaded (for doctor)
+	Layers      config.Layers // which config layers were discovered and loaded
 	Adapters    map[string]model.Adapter
 	ArtifactDir string
 	TempBase    string
 
-	mu         sync.RWMutex  // guards Cfg/Layers/Adapters (swapped wholesale by loadConfig)
-	configPath string        // explicit --config path (retained so ReloadConfig re-reads it)
-	scenario   fake.Scenario // resolved fake scenario (retained for adapter rebuild on reload)
-	launch     *LaunchConfig // non-nil: configured from launch arguments only (MCP, ACP)
+	mu         sync.RWMutex  // guards Cfg, Layers and Adapters, which loadConfig replaces wholesale
+	configPath string        // explicit --config path, re-read by ReloadConfig
+	scenario   fake.Scenario // fake scenario, kept for rebuilding adapters on reload
+	launch     *LaunchConfig // non-nil when configured from launch arguments only (MCP, ACP)
 	// artifactOverride is the explicit run-directory base (Options.ArtifactDir, else
-	// REVIEWMESH_ARTIFACT_DIR); it wins over the per-workspace location in launch mode too.
+	// REVIEWMESH_ARTIFACT_DIR); it wins over the per-workspace location.
 	artifactOverride string
 }
 
@@ -51,10 +49,7 @@ type LaunchConfig struct {
 	Adapters launchflags.Set
 }
 
-// ArtifactSubdir is reviewmesh's component name under the shared `.aimesh/` state directory, so the two
-// aimesh apps never interleave their state. It is the DOMAIN word rather than the binary name: the
-// directory holds what the app owns (its config and its run output), and that outlives whatever the
-// binary happens to be called — which, after the CLI unification, is `aimesh`.
+// ArtifactSubdir is review's component directory under the shared `.aimesh/` state directory.
 const ArtifactSubdir = "review"
 
 // Options configures wiring.
@@ -69,13 +64,12 @@ type Options struct {
 	Launch *LaunchConfig
 }
 
-// New loads config and wires the components. With no explicit ConfigPath it
-// auto-discovers a project config under <repo-root>/.aimesh/review (YAML preferred, then JSON).
+// New loads config and wires the components. Without ConfigPath it discovers a project config under
+// <repo-root>/.aimesh/review.
 //
-// THE RUN DIRECTORY IS NEVER CWD-RELATIVE. A cwd-relative default would create a tree INSIDE whatever
-// repository a review ran from, and run artifacts embed verbatim copies of every file the reviewers
-// were shown. It resolves through localstate.RunDir, the same rule exploremesh uses:
-// `<project .aimesh>/review/runs` when the state directory exists, else the OS temp directory.
+// The run directory resolves through localstate.RunDir: `<project .aimesh>/review/runs` when the
+// state directory exists, else the OS temp directory. It is never relative to cwd, because run
+// artifacts contain copies of every reviewed file.
 func New(opts Options) (*App, error) {
 	override := cmp.Or(opts.ArtifactDir, os.Getenv("REVIEWMESH_ARTIFACT_DIR"))
 	artifactDir := localstate.RunDir(ArtifactSubdir, override)
@@ -102,49 +96,35 @@ func New(opts Options) (*App, error) {
 	return a, nil
 }
 
-// loadConfig (re)composes the config layers and rebuilds the adapter registry from disk. It is
-// the shared body of New and ReloadConfig so a config write can be reflected without a restart.
+// loadConfig composes the config layers and rebuilds the adapter registry. New and ReloadConfig
+// share it.
 func (a *App) loadConfig() error {
 	if a.launch != nil {
 		a.loadLaunch()
 		return nil
 	}
-	// Compose config layers: shipped defaults ← user/global (~/.aimesh/review) ← project
-	// (<repo-root>/.aimesh/review) ← explicit (--config). Project config is never required.
 	cwd, _ := os.Getwd()
 	cfg, layers, err := config.LoadLayered(cwd, a.configPath)
 	if err != nil {
 		return err
 	}
-	// Supply the local Ollama model tag (if any) so the fully-local-ollama profile
-	// resolves. No tag → the profile fails resolution with clear guidance.
+	// Without a tag, the fully-local-ollama profile fails resolution with guidance.
 	cfg = config.WithOllamaModel(cfg, os.Getenv("REVIEWMESH_OLLAMA_MODEL"))
 
-	// Build the adapter registry: a shell adapter per documented recipe (plus, gated
-	// below, the internal test-only `fake`). Real adapters are registered so a profile MAY select
-	// them and doctor can report their binary status — but they are never chosen
-	// automatically (no default AdapterPreference names them) and no model is called
-	// unless a profile explicitly selects the adapter.
+	// Every shell recipe is registered so a profile may select it and doctor can report it; none
+	// is chosen automatically.
 	paths := make(map[string]string, len(cfg.Adapters))
 	for name, ad := range cfg.Adapters {
 		paths[name] = ad.Path
 	}
 	adapters := shell.Registry(paths, 0)
-	// Merge the generic ACP-client adapters. Unlike shell recipes these are USER-DEFINED instances
-	// (config-driven, no fixed catalog): each `acpAdapters.<name>` entry from the shared adapters.yaml
-	// becomes one adapter driven by the single generic acpagent.Adapter. A shell recipe never shares a
-	// name with an ACP instance.
+	// User-defined ACP instances from the shared adapters.yaml, each driven by acpagent.Adapter.
 	maps.Copy(adapters, acpagent.Registry(acpInstances(layers), 0))
-	// The deterministic `fake` adapter is a HIDDEN internal test harness: it enters the runnable
-	// registry only when the internal gate (fake.Enabled — set by tests, the golden run, and the
-	// ACP-validation safe-mode parent; never by users) is on. Without it, `fake` is simply not a
-	// registered adapter, so nothing user-configurable can resolve to it.
 	if fake.Enabled() {
 		adapters["fake"] = fake.New(a.scenario)
 	}
 
-	// Swap the whole snapshot atomically under the write lock. loadConfig only *replaces* these
-	// fields (never mutates the maps in place), so a reader holding an earlier snapshot is safe.
+	// Readers holding an earlier snapshot stay safe because the maps are replaced, never mutated.
 	a.mu.Lock()
 	a.Cfg, a.Layers, a.Adapters = cfg, layers, adapters
 	a.mu.Unlock()
@@ -180,15 +160,15 @@ func (a *App) loadLaunch() {
 	a.mu.Unlock()
 }
 
-// artifactDirFor places a run's record for a launch-configured app: beside the workspace it reviewed
-// when that workspace has a state directory, else in the temp run directory; an explicit override
-// wins over both.
+// artifactDirFor returns the run-directory base for a launch-configured app: the reviewed
+// workspace's state directory when it has one, else the temp run directory. An explicit override
+// wins.
 func (a *App) artifactDirFor(workspace string) string {
 	return localstate.RunDirIn(workspace, ArtifactSubdir, a.artifactOverride)
 }
 
-// acpInstances converts the config layer's user-defined ACP instances into the runnable-adapter
-// instance set for acpagent.Registry (Detect falls back to the binary basename for PATH lookup).
+// acpInstances converts the user-defined ACP instances into acpagent.Registry instances. Detect is
+// the binary's base name when a path is set, else the instance name.
 func acpInstances(ly config.Layers) map[string]acpagent.Instance {
 	out := make(map[string]acpagent.Instance, len(ly.ACPInstances))
 	for name, in := range ly.ACPInstances {
@@ -200,11 +180,6 @@ func acpInstances(ly config.Layers) map[string]acpagent.Instance {
 	}
 	return out
 }
-
-// ReloadConfig re-reads the config from disk and rebuilds the adapter registry so that reads
-// issued after a config write (e.g. a web-UI profile copy or adapter change) reflect the new
-// state. The web-UI Client calls this after a successful mutation.
-func (a *App) ReloadConfig() error { return a.loadConfig() }
 
 // Manager returns a wired ReviewManager over a consistent config snapshot.
 func (a *App) Manager() *run.Manager {
@@ -222,26 +197,22 @@ func (a *App) managerLocked(cfg config.Config) *run.Manager {
 	return m
 }
 
-// Doctor runs the static readiness checks. profile (optional) additionally checks
-// that profile's adapter availability; probe runs a safe no-model binary probe of
-// the selected profile's adapters.
+// Doctor runs the static readiness checks. A non-empty profile is also checked, and probe runs a
+// no-model binary probe of its adapters.
 func (a *App) Doctor(workspace, profile string, probe bool) doctor.Report {
 	return a.DoctorWith(workspace, profile, DoctorOptions{Probe: probe})
 }
 
-// DoctorOptions selects which OPT-IN probe ladders `doctor` runs on top of the static checks.
-//
-// Probe and ProbeDeep are separate fields, not two settings of one, because they cost differently:
-// Probe is `<binary> --version` and is free; ProbeDeep is one REAL model invocation per required
-// adapter and SPENDS. A caller must not be able to reach a spend by turning an existing boolean up.
+// DoctorOptions selects the opt-in probes doctor runs. Probe runs a free binary check; ProbeDeep
+// makes one real model call per required adapter and spends tokens.
 type DoctorOptions struct {
 	Probe     bool
 	ProbeDeep bool
-	// Ctx bounds the probe pass; nil → context.Background().
+	// Ctx bounds the probes; nil means context.Background().
 	Ctx context.Context
 }
 
-// DoctorWith is Doctor with the opt-in probe ladders selected explicitly.
+// DoctorWith is Doctor with the probes selected explicitly.
 func (a *App) DoctorWith(workspace, profile string, o DoctorOptions) doctor.Report {
 	a.mu.RLock()
 	in := doctor.Input{
@@ -252,9 +223,8 @@ func (a *App) DoctorWith(workspace, profile string, o DoctorOptions) doctor.Repo
 	return doctor.Run(in)
 }
 
-// SetupManager returns a wired SetupManager writing progress to out. It also carries the
-// resolved config + layers + artifact dir so its read-projection methods (config/profiles/
-// adapters/privacy DTOs) can serve surfaces without exposing ResourceAccess.
+// SetupManager returns a setup manager that writes progress to out and carries the current config
+// snapshot for its read projections.
 func (a *App) SetupManager(out io.Writer) *setup.Manager {
 	a.mu.RLock()
 	defer a.mu.RUnlock()

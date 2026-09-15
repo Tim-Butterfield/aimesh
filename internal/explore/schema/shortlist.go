@@ -1,29 +1,19 @@
 package schema
 
-// This file holds the SHORTLIST mode's app-owned round artifacts: the
-// FIXED round-1 "enumerate the candidate options" prompt + schema, and the FIXED round-2 BALLOT prompt +
-// schema over the CONFIRMED canonical IDs.
+// This file holds the shortlist mode's round prompts and schemas: round 1 enumerates candidate options,
+// and round 2 is a ballot over the confirmed canonical IDs.
 //
-// The ballot is the mode's whole point and its whole risk. Three things keep it honest, and two of them live
-// here:
+// A ballot is cast over canonical IDs, so each entry resolves to one recorded candidate and a voter cannot
+// add a new one. A ballot response has no field for a winner, score or tally; the host computes the
+// ranking (govern.Tally) from decision inputs frozen and hashed before voting.
 //
-//   - A ballot is cast over CANONICAL IDs, never over free text. The option set handed to a voter is the
-//     confirmed partition in its persisted randomized presentation order, so a ballot entry resolves to
-//     exactly one recorded entity and a voter cannot introduce a candidate the panel never nominated.
-//   - A ballot RESPONSE CANNOT CARRY A RESULT. Its schema has a ranking, an approval set and a rationale —
-//     there is no field for "the winner", a score, or a tally. The ranking is computed by the HOST from the
-//     ballots (govern.Tally); a ranking asserted by a model is not a ranking the artifacts support.
-//   - (in internal/govern) the decision inputs are FROZEN + HASHED before the ballot is solicited.
-//
-// The terminal ShortlistOutput lives in internal/mode, because each ranked entry embeds the host-computed
-// govern.Claim and govern sits ABOVE schema in the import graph.
+// The terminal ShortlistOutput lives in package mode, because it embeds govern.Claim and govern imports
+// schema.
 
 import "strings"
 
-// shortlistExplorerFields is the Shortlist mode's FIXED round-1 explorer schema: the distinct candidate
-// OPTIONS the explorer would consider, plus optional notes. It is deliberately the same SHAPE as Catalog's
-// (enumerate broadly) — the difference between the two modes is not the round-1 schema but what happens
-// afterwards: Catalog organizes and stops, Shortlist confirms the universe and puts it to a ballot.
+// shortlistExplorerFields is the shortlist round-1 explorer schema: candidate options and optional notes.
+// It has the same shape as catalog's; the modes differ in what follows round 1.
 var shortlistExplorerFields = []Field{
 	{Name: "candidates", Type: TypeString, Required: true, Repeated: true},
 	{Name: "notes", Type: TypeString, Required: false, Repeated: false},
@@ -36,10 +26,8 @@ func ShortlistExplorerSchema() Schema {
 	return Schema{Fields: fields}
 }
 
-// ShortlistExplorerPrompt is the deterministic, app-owned round-1 prompt: enumerate the candidate options
-// BROADLY and blindly. It says explicitly that this round is not the choice — an explorer that pre-filters
-// to its own favourite here would narrow the universe the whole panel later votes over, which is precisely
-// the agenda-setting power the confirmed-universe-then-ballot split exists to remove.
+// ShortlistExplorerPrompt builds the round-1 prompt, which asks for candidate options broadly and tells
+// the explorer this round is not the choice, so no explorer narrows the set the panel votes on.
 func ShortlistExplorerPrompt(raw RawTask) string {
 	var b strings.Builder
 	b.WriteString("Enumerate the CANDIDATE OPTIONS for the following decision — as many DISTINCT, plausible ")
@@ -67,13 +55,10 @@ func ShortlistExplorerPrompt(raw RawTask) string {
 	return b.String()
 }
 
-// --- Round 2: the explicit BALLOT over the confirmed canonical IDs ---
+// --- round 2: the ballot ---
 
-// ballotFields is the FIXED ballot-response schema. `ranking` is required and ordered (best first);
-// `approved` is an optional, separate question ("which of these would you accept at all?") tallied on its own
-// rather than folded into the score; `rationale` is model prose, quarantined into the collatorNarrative
-// namespace by the host and never merged into a machine governance field. There is deliberately no
-// field for a winner, a score, or a tally.
+// ballotFields is the ballot-response schema. `ranking` is required, best first; `approved` is a separate
+// optional question tallied on its own; `rationale` is prose kept out of every governance field.
 var ballotFields = []Field{
 	{Name: "ranking", Type: TypeString, Required: true, Repeated: true},
 	{Name: "approved", Type: TypeString, Required: false, Repeated: true},
@@ -87,15 +72,10 @@ func BallotSchema() Schema {
 	return Schema{Fields: fields}
 }
 
-// BallotPrompt builds the ballot instruction. untrustedDataBlock is the host's ALREADY-FRAMED digest of the
-// CONFIRMED canonical universe in its persisted randomized presentation order — embedded verbatim, never
-// re-framed. frozenHeader is the host-rendered FROZEN DECISION record (criteria, method, quorum, tie rule,
-// shortlist size and their hash), prepended by the pipeline rather than by this contract; it is passed in so
-// the instruction can point at it explicitly.
-//
-// The prompt states the honest status of what it is soliciting: an INFORMED PREFERENCE UNDER SHARED FRAMING.
-// A voter is told the position order means nothing, that the host does the counting, and that inventing a
-// candidate is not available to it.
+// BallotPrompt builds the ballot instruction. untrustedDataBlock is the host-framed list of confirmed
+// candidates in their recorded random order, embedded verbatim. The pipeline prepends the frozen decision
+// record the prompt refers to. The prompt tells the voter that position means nothing, that the host
+// counts the ballots, and that it cannot add a candidate.
 func BallotPrompt(raw RawTask, untrustedDataBlock string) string {
 	var b strings.Builder
 	b.WriteString("This is the BALLOT round. The block below is the CONFIRMED candidate universe: the whole ")
@@ -128,17 +108,16 @@ func BallotPrompt(raw RawTask, untrustedDataBlock string) string {
 	return b.String()
 }
 
-// BallotResponse is one explorer's ballot lifted out of a validated round-2 response — still raw strings at
-// this point, because whether each entry names a candidate in the confirmed universe is the HOST's check
-// (govern.Ballot.Validate), not this parser's guess.
+// BallotResponse is one explorer's ballot as raw strings. govern.Ballot.Validate checks that each entry
+// names a confirmed candidate.
 type BallotResponse struct {
 	Ranking   []string
 	Approved  []string
 	Rationale string
 }
 
-// ParseBallotResponse lifts the ballot out of ONE validated response, trimming blanks and de-duplicating the
-// ranking (a repeated entry is a single preference stated twice, not two preferences) while preserving order.
+// ParseBallotResponse reads the ballot from a validated response, trimming blanks and removing repeated
+// entries while preserving order.
 func ParseBallotResponse(response map[string]any) BallotResponse {
 	return BallotResponse{
 		Ranking:   dedupeStrings(stringList(response, "ranking")),
@@ -147,8 +126,8 @@ func ParseBallotResponse(response map[string]any) BallotResponse {
 	}
 }
 
-// stringList reads a repeated string field out of a decoded response, skipping blanks and rendering a
-// non-string element mechanically (the same rule stringField follows).
+// stringList reads a repeated field from a decoded response, skipping blanks and formatting non-string
+// elements as stringField does.
 func stringList(response map[string]any, name string) []string {
 	raw, _ := response[name].([]any)
 	out := make([]string, 0, len(raw))

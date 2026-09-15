@@ -272,33 +272,36 @@ func TestFullCycleApply_WorkspaceIdentityIsVerifiedBeforeTheWrite(t *testing.T) 
 	}
 }
 
-// --- the structural guarantee: there is ONE write path, and it cannot silently re-diverge ---
-
-// TestOneGovernedWritePath is the test that makes this convergence durable rather than momentary.
-//
-// The defect this whole change exists to fix was not a wrong line of code; it was a SECOND write
-// path that drifted from the first. So the invariant is asserted structurally, over the package's
-// own source: exactly one function commits to a live workspace, and every caller that writes goes
-// through it. A future edit that adds a `ws.Commit` beside a surface — a second commit call site outside
-// the governed path — fails here, in this package, rather than silently on one surface.
+// TestOneGovernedWritePath asserts over the package source that exactly one function commits to a
+// live workspace and every writing caller goes through it, so a second commit site fails here.
 func TestOneGovernedWritePath(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	names, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("parse package: %v", err)
+		t.Fatalf("list package files: %v", err)
 	}
-	pkg, ok := pkgs["run"]
-	if !ok {
+	files := map[string]*ast.File{}
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if f.Name.Name == "run" {
+			files[name] = f
+		}
+	}
+	if len(files) == 0 {
 		t.Fatal("package run not found")
 	}
 
-	// commitSites maps "file:function" → the commit selector it calls.
+	// commitSites maps "file:function" to the commit selector it calls.
 	commitSites := map[string]string{}
-	// calls maps a function name → the set of functions it calls.
+	// calls maps a function name to the set of functions it calls.
 	calls := map[string]map[string]bool{}
-	for name, f := range pkg.Files {
+	for name, f := range files {
 		file := filepath.Base(name)
 		ast.Inspect(f, func(n ast.Node) bool {
 			fn, isFn := n.(*ast.FuncDecl)

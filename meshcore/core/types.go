@@ -1,8 +1,6 @@
-// Package core holds meshcore's domain-agnostic primitive types, shared across the
-// substrate packages (adapter, identity, containment, fault, …): model-identity
-// evidence tiers + verification-status vocabulary, halt classification, adapter
-// capabilities, the appliable Edit, and the model-argument / artifact-delivery vocab.
-// It carries NO app-domain concepts — no roles, lanes, findings, or review phases.
+// Package core holds meshcore's shared primitive types: model-identity evidence tiers and
+// verification statuses, halt classes, adapter and surface capabilities, the model argument, artifact
+// delivery modes, and the appliable Edit. It carries no application concepts.
 package core
 
 // ModelArg is the opaque, adapter-specific argument string for a catalog model.
@@ -11,6 +9,7 @@ type ModelArg string
 // IdentityMethod is how an adapter's actual model identity is extracted.
 type IdentityMethod string
 
+// Identity extraction methods.
 const (
 	IdentityEnvelope   IdentityMethod = "envelope"
 	IdentityTrace      IdentityMethod = "trace"
@@ -23,6 +22,7 @@ const (
 // signal is never silently presented as a strong (envelope/trace) one.
 type IdentityEvidence string
 
+// Identity evidence tiers, strongest first.
 const (
 	EvidenceEnvelope      IdentityEvidence = "envelope"       // strongest: structured CLI/provider usage envelope
 	EvidenceTrace         IdentityEvidence = "trace"          // strong: deterministic CLI trace/event/stderr line
@@ -32,12 +32,10 @@ const (
 	EvidenceNone          IdentityEvidence = "none"           // no usable identity evidence
 )
 
-// Verification-status values (the per-call verification status). Every one of them is a LABEL
-// recorded on the call: none of them decides whether the call's output is used. self_reported is a
-// distinct, weaker disposition than verified — it is NOT silently verified. unknown is no usable/clear
-// identity; mismatch is a proven strong-evidence wrong model, carried as a prominent caveat rather
-// than a halt; unverified is set directly by non-identity halts (containment, cancellation,
-// invocation failure), which DO stop a call — for reasons that have nothing to do with identity.
+// Verification statuses recorded per call. None of them decides whether a call's output is used.
+// self_reported is weaker than verified; unknown means no clear identity; mismatch is a wrong model
+// proven by strong evidence, carried as a caveat; unverified is set by non-identity halts
+// (containment, cancellation, invocation failure), which do stop a call.
 const (
 	VerifVerified     = "verified"
 	VerifSelfReported = "self_reported"
@@ -52,6 +50,7 @@ type HaltClass string
 // ArtifactDelivery is how a call's artifact reaches the model.
 type ArtifactDelivery string
 
+// Artifact delivery modes.
 const (
 	ArtifactReadsFromDir ArtifactDelivery = "reads_from_dir"
 	ArtifactInline       ArtifactDelivery = "inline_content"

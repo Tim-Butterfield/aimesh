@@ -8,10 +8,8 @@ import (
 	"syscall"
 )
 
-// noFollowFlag makes an open refuse a symlink in the FINAL path component. Combined with
-// os.Root (which refuses a symlink escaping the root in any intermediate component) it
-// closes the check-then-open window: the object validated by f.Stat() is the object the
-// descriptor refers to.
+// noFollowFlag makes an open refuse a symlink in the final path component; os.Root already refuses
+// an escaping symlink in any intermediate component.
 const noFollowFlag = syscall.O_NOFOLLOW
 
 // linkCount returns the number of directory entries pointing at fi's inode, and whether that

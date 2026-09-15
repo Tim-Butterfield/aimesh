@@ -5,25 +5,17 @@ import (
 	"fmt"
 )
 
-// The `agents_md` MCP tool is defined HERE, once, rather than in each server. Both servers must
-// return the same document under the same tool name with the same schema — that is the whole claim
-// ("an agent arriving by shell and one arriving over MCP get identical guidance"), and two
-// registrations maintained side by side would let it quietly stop being true.
-//
-// The servers own the registration call itself, because the Tool/Result types belong to their
-// protocol layer and meshcore's MCP package must not learn app vocabulary. This package supplies the
-// name, the descriptions, the schema and the payload; a server pairs them with its own
-// `proto.Tool` + `proto.Result`.
+// The agents_md MCP tool is defined once here so every server returns the same document under the
+// same name and schema. Each server makes the registration call itself, pairing these values with its
+// protocol layer's Tool and Result types.
 const (
-	// ToolName is the tool as it appears on the wire, on BOTH servers.
+	// ToolName is the tool's wire name.
 	ToolName = "agents_md"
 
 	// ToolTitle is the short human label.
 	ToolTitle = "Read the aimesh agent guide"
 
-	// ToolDescription tells a model why to call this BEFORE anything else. It is deliberately
-	// explicit that the guide carries rules whose violation is expensive, because a model that reads
-	// "documentation" as optional will skip it and then get containment or apply semantics wrong.
+	// ToolDescription asks a model to read the guide before anything else, and says why.
 	ToolDescription = "Returns the complete aimesh agent guide: what the tool does, the rules that " +
 		"are expensive to get wrong (identity is recorded but never acted on, the containment copy, " +
 		"the write denylist, apply semantics), every command with a one-line contract, and the safety " +
@@ -35,15 +27,12 @@ const (
 	ToolAnnotationTitle = "Read the agent guide"
 )
 
-// InputSchema is the empty object: the tool takes no arguments. Declared here rather than reusing
-// each server's `emptyInputSchema` so the two cannot drift apart.
+// InputSchema is the empty object schema: the tool takes no arguments.
 const InputSchema = `{"type":"object","additionalProperties":false,"properties":{}}`
 
-// OutputSchema describes the structured result. `source` is REQUIRED and closed to two values, so a
-// caller can always tell whether it received the guide that matches this binary or an operator's
-// substitute — the fact that makes an override a disclosure rather than a silent swap.
-//
-// (No backticks inside: this is a Go raw string literal, and one would terminate it.)
+// OutputSchema describes the structured result. The required source field tells a caller whether it
+// received the embedded guide or an operator's override. It is a raw string literal, so it cannot
+// contain a backtick.
 const OutputSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -56,9 +45,8 @@ const OutputSchema = `{
   }
 }`
 
-// Payload is the structured result. The guide is carried in BOTH the text block and here on purpose:
-// a model reads the text, while a programmatic client reads structuredContent and should not have to
-// scrape a content block to get the same document.
+// Payload is the structured result. It repeats the guide from the text block so a programmatic
+// client can read it from structuredContent.
 type Payload struct {
 	Guide  string `json:"guide"`
 	Source Source `json:"source"`
@@ -66,9 +54,8 @@ type Payload struct {
 	Bytes  int    `json:"bytes"`
 }
 
-// ToolPayload loads the guide and returns the text block and the structured payload a server pairs
-// into its result. The error is the unreadable-override case, which callers must surface as a tool
-// error rather than falling back to the embedded text.
+// ToolPayload loads the guide and returns the text block and structured payload for a tool result.
+// An error means the override could not be read; callers report it as a tool error.
 func ToolPayload() (text string, payload Payload, err error) {
 	guide, source, path, err := Load()
 	if err != nil {
@@ -77,9 +64,8 @@ func ToolPayload() (text string, payload Payload, err error) {
 	return guide, Payload{Guide: guide, Source: source, Path: path, Bytes: len(guide)}, nil
 }
 
-// payloadJSON is a compile-time guard that Payload actually marshals to what OutputSchema declares.
-// A schema and a struct that disagree produce a result no strict client will accept, and nothing
-// else in the build would notice.
+// Payload must marshal; this check fails at package initialization if it cannot. The test
+// TestToolPayload_MatchesTheDeclaredSchema checks it against OutputSchema.
 var _ = func() struct{} {
 	if _, err := json.Marshal(Payload{Source: SourceEmbedded}); err != nil {
 		panic(fmt.Sprintf("agentguide.Payload does not marshal: %v", err))

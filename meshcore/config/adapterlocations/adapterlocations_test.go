@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-func strptr(s string) *string { return &s }
-
 func TestLoad_MissingIsEmpty(t *testing.T) {
 	loc, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {
@@ -21,8 +19,8 @@ func TestLoad_MissingIsEmpty(t *testing.T) {
 func TestWriteLoad_RoundTrip(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "adapters.yaml")
 	in := Locations{Adapters: map[string]Entry{
-		"claude-code": {Path: strptr("/opt/claude")},
-		"codex-cli":   {Path: strptr("")}, // explicit clear
+		"claude-code": {Path: new("/opt/claude")},
+		"codex-cli":   {Path: new("")}, // explicit clear
 	}}
 	if err := Write(p, in); err != nil {
 		t.Fatalf("write: %v", err)
@@ -54,7 +52,7 @@ func TestLoad_RejectsBadSchemaVersion(t *testing.T) {
 func TestUpdate_TransactionalPreserves(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "adapters.yaml")
 	// Update on a missing file starts from empty and creates it.
-	if err := Update(p, func(l *Locations) { l.Adapters["a"] = Entry{Path: strptr("/a")} }); err != nil {
+	if err := Update(p, func(l *Locations) { l.Adapters["a"] = Entry{Path: new("/a")} }); err != nil {
 		t.Fatalf("update 1: %v", err)
 	}
 	// A second, unrelated update must preserve the first (real read-modify-write, not clobber).
@@ -104,13 +102,13 @@ func TestACPInstances_RoundTripAndMerge(t *testing.T) {
 
 func TestPaths_InheritanceAndClear(t *testing.T) {
 	user := Locations{Adapters: map[string]Entry{
-		"claude-code": {Path: strptr("/user/claude")},
-		"codex-cli":   {Path: strptr("/user/codex")},
+		"claude-code": {Path: new("/user/claude")},
+		"codex-cli":   {Path: new("/user/codex")},
 		"ollama":      {}, // nil path — no override
 	}}
 	project := Locations{Adapters: map[string]Entry{
-		"claude-code": {Path: strptr("/proj/claude")}, // overrides user
-		"codex-cli":   {Path: strptr("")},             // explicit clear — removes the override
+		"claude-code": {Path: new("/proj/claude")}, // overrides user
+		"codex-cli":   {Path: new("")},             // explicit clear — removes the override
 	}}
 	got := Paths(user, project) // user first (lower precedence), project second
 	if got["claude-code"] != "/proj/claude" {

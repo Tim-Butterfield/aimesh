@@ -1,7 +1,6 @@
-// Package adjudication is the AdjudicationEngine: it judges reviewer findings —
-// dedup by fingerprint, validity rubric, severity baseline — into decisions.
-// Batch 1 adjudicates deterministically/locally (the host model-call adjudication
-// path arrives with the real host lane); the host remains the sole authority.
+// Package adjudication is the deterministic adjudication engine: it deduplicates reviewer findings
+// by fingerprint and turns them into provisional decisions. A configured host lane adjudicates with
+// a model call instead; either way the host is the sole authority.
 package adjudication
 
 import (
@@ -67,8 +66,8 @@ func Judge(findings []review.Finding, addressed map[string]review.DecisionState)
 	return res
 }
 
-// nonApplyStates are decision states that must never produce an edit, even when a
-// (model) host marked the finding valid — they are explicit non-apply dispositions.
+// nonApplyStates are decision states that never produce an edit, even for a finding the host marked
+// valid.
 var nonApplyStates = map[review.DecisionState]bool{
 	review.StateSkipped:          true,
 	review.StateAlreadyAddr:      true,
@@ -79,9 +78,8 @@ var nonApplyStates = map[review.DecisionState]bool{
 	review.StateWithheldClassE:   true,
 }
 
-// Actionable reports whether a decision should produce an edit: it must be valid and
-// not in any non-apply terminal state. (Deterministic provisional decisions carry an
-// empty state, which is actionable when valid.)
+// Actionable reports whether a decision should produce an edit: it is valid and not in a non-apply
+// state. A provisional decision's empty state is actionable when valid.
 func Actionable(d review.Decision) bool {
 	return d.Valid && !nonApplyStates[d.State]
 }

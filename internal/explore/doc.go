@@ -1,12 +1,7 @@
-// Package exploremesh is the N-explorer research/exploration tool built on meshcore. Unlike
-// reviewmesh (fixed review lanes/roles), exploremesh fans one IDENTICAL task out to 2+ unique
-// explorers — each a distinct (adapter, model, effort) triple — blind and in parallel, then a
-// single collator bookends the run: it first FORMULATES the task + expands the response schema,
-// and finally SYNTHESIZES the attributed, model-identity-verified responses into a fixed
-// collator-output schema (synthesis summary, findings, disagreement register, weak-response
-// appendix).
+// Package explore is the root of the exploration domain. An exploration fans one identical task out to
+// two or more explorers, each a distinct (adapter, model, effort) identity, blind and in parallel. A
+// collator then turns the attributed, identity-verified responses into the mode's terminal output.
 //
-// It imports meshcore ONLY — never the reviewmesh app, never web/shared (enforced by the
-// import-boundary CI check). The domain schema, roster, fan-out→collate pipeline, and CLI live
-// in the packages under internal/explore/; this root package is the module's doc anchor.
+// The domain imports meshcore and never the review domain; the boundary check enforces this. Its
+// schema, roster, pipeline and surfaces live in the packages under internal/explore.
 package explore

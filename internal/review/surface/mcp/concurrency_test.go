@@ -11,12 +11,11 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// "Never apply the same accepted set twice" is a property of a LOCK, not of a check that happened
-// to run earlier. This file races the write primitive against itself.
+// Applying an accepted set at most once depends on a lock, not an earlier check; these tests race the
+// write primitive against itself.
 
-// delayedReviewer is a fakeReviewer whose remediation takes long enough that a second caller is
-// certainly still inside the window where a check-then-act guard has already looked and not yet
-// reserved. The delay is what makes the race deterministic rather than lucky.
+// delayedReviewer is a fakeReviewer whose remediation is slow enough that a second caller is inside
+// the check-then-reserve window, making the race deterministic.
 type delayedReviewer struct {
 	fakeReviewer
 	delay time.Duration
@@ -27,13 +26,12 @@ func (s *delayedReviewer) Remediate(ctx context.Context, r run.RemediateRequest)
 	return s.fakeReviewer.Remediate(ctx, r)
 }
 
-// raceToolCalls issues n tools/call requests back to back WITHOUT waiting for any of them, then
-// collects all n responses. The server dispatches tools/call concurrently, so the handlers really
-// do overlap.
+// raceToolCalls sends n tools/call requests without waiting, then collects all n responses. The
+// server dispatches calls concurrently, so the handlers overlap.
 func raceToolCalls(t *testing.T, c *client, n int, name string, args func(i int) map[string]any) []toolResult {
 	t.Helper()
 	ids := make([]int, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		c.id++
 		ids = append(ids, c.id)
 		c.send("tools/call", c.id, map[string]any{"name": name, "arguments": args(i)})
@@ -69,21 +67,15 @@ func raceToolCalls(t *testing.T, c *client, n int, name string, args func(i int)
 	return out
 }
 
-// TestRemediate_ConcurrentSameSourceRunAppliesOnce is the race the source-run guard exists to lose
-// gracefully. Eight calls name the same accepted set at the same instant, each with its OWN
-// idempotency key so the key guard cannot be what saves them. Exactly one write window may open;
-// the other seven must attach to it.
-//
-// A second application is not a duplicated convenience. It is a write nobody asked for, against a
-// tree whose base hashes no longer describe what the first write left behind.
+// Eight calls name the same accepted set at once, each with its own idempotency key. Exactly one write
+// may happen; the others attach to it. A second application would write against a tree whose base
+// hashes no longer match.
 func TestRemediate_ConcurrentSameSourceRunAppliesOnce(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &delayedReviewer{delay: 250 * time.Millisecond}
 	s := newServer(t, rv, func(s *mcp.Server) {
 		s.Ceiling, s.AllowWrites = []string{ws}, true
-		// Nothing here bounds admission — there is no server-wide governor — so all eight calls reach
-		// the source-run guard. That is exactly what this test needs: a cap would have hidden part of
-		// a broken guard behind "run refused" instead of exposing it as a second write.
+		// No admission limit exists, so all eight calls reach the source-run guard.
 	})
 	c := serve(t, s)
 	runID := reportRun(t, c, ws)
@@ -101,8 +93,7 @@ func TestRemediate_ConcurrentSameSourceRunAppliesOnce(t *testing.T) {
 	if _, rem := rv.counts(); rem != 1 {
 		t.Fatalf("%d remediations ran for one accepted set — the decision set was applied more than once", rem)
 	}
-	// Every caller is answered, and every answer describes the SAME run: a loser attaches to the
-	// winner rather than being told "refused" or handed a receipt of its own.
+	// Every caller is answered with the same run.
 	seen := map[string]int{}
 	for _, r := range results {
 		if r.rpc != nil {
@@ -128,9 +119,7 @@ func TestRemediate_ConcurrentSameSourceRunAppliesOnce(t *testing.T) {
 	}
 }
 
-// TestRemediate_WorkspaceIdentityRidesTheDecisionSet pins the surface half of the identity binding:
-// the reviewed root's identity is captured by the REPORT run and carried to the write path. Without
-// it the write path has only a path string, which is not a repository.
+// The report run captures the reviewed root's identity and carries it to the write path.
 func TestRemediate_WorkspaceIdentityRidesTheDecisionSet(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{}

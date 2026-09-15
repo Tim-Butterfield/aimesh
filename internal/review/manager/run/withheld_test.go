@@ -13,17 +13,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/workspace"
 )
 
-// A7 — A WITHHELD FILE IS NEVER A SILENT OMISSION.
+// TestRun_WithheldHardlinkIsSurfacedEverywhere checks that a withheld file is never a silent omission.
 //
-// meshcore withholds a hardlinked regular file from the containment copy instead of halting:
-// its innocuous in-tree name may be a second name for protected material, but an in-tree
-// `cp -al` tree or dedup store is ordinary, and halting on one would hand any writer inside a
-// trusted tree an availability switch. What makes that trade SAFE is that the omission is
-// stated — otherwise "this file was not reviewed" is indistinguishable from "there was no such
-// file", and a reviewer's silence about a file it was never shown reads as approval.
-//
-// This is the end-to-end pin: a hardlinked file in the workspace yields a COMPLETED run whose
-// outcome, run record and machine projection all name the withheld path and the rule.
+// meshcore withholds a hardlinked regular file from the containment copy instead of halting, because
+// its in-tree name may be a second name for protected material. That is safe only if the omission is
+// stated; otherwise a reviewer's silence about a file it was never shown reads as approval. A hardlinked
+// file must yield a completed run whose outcome, run record and projection all name the path and rule.
 func TestRun_WithheldHardlinkIsSurfacedEverywhere(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("link count is not knowable from a Win32FileAttributeData")
@@ -83,7 +78,7 @@ func TestRun_WithheldHardlinkIsSurfacedEverywhere(t *testing.T) {
 		}
 	}
 
-	// 2. The machine PROJECTION names it, alongside identityCaveats, with a host-computed
+	// 2. The machine projection names it, alongside identityCaveats, with a host-computed
 	//    count a consumer never has to derive.
 	view := runview.Build(runview.Input{Outcome: outcome})
 	if view.Counts.Withheld != len(outcome.Withheld) {
@@ -107,13 +102,13 @@ func TestRun_WithheldHardlinkIsSurfacedEverywhere(t *testing.T) {
 		t.Errorf("projection JSON does not carry withheld[]: %s", b)
 	}
 
-	// 3. The RUN RECORD names it, so the audit trail stands on its own.
+	// 3. The run record names it, so the audit trail stands on its own.
 	state := read(t, filepath.Join(outcome.RunDir, "run-state.json"))
 	if !strings.Contains(state, `"withheld"`) || !strings.Contains(state, "linked.go") ||
 		!strings.Contains(state, string(workspace.ReasonHardlink)) {
 		t.Errorf("run-state.json does not record the withheld file:\n%s", state)
 	}
-	// 4. ...and the EVENT LOG says it at the moment it happened.
+	// 4. The event log records it when it happened.
 	events := read(t, filepath.Join(outcome.RunDir, "logs", "events.jsonl"))
 	if !strings.Contains(events, "workspace_file_withheld") {
 		t.Error("no workspace_file_withheld event was logged")

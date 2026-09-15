@@ -95,7 +95,7 @@ func TestCompile_RefusesASelfReference(t *testing.T) {
 
 func TestCompile_RefusesExcessiveNesting(t *testing.T) {
 	doc := `{"type":"object"}`
-	for i := 0; i < MaxDepth+5; i++ {
+	for range MaxDepth + 5 {
 		doc = `{"properties":{"a":` + doc + `}}`
 	}
 	if _, err := Compile([]byte(doc)); !errors.Is(err, ErrMaxDepth) {
@@ -106,7 +106,7 @@ func TestCompile_RefusesExcessiveNesting(t *testing.T) {
 func TestCompile_RefusesTooManySubschemas(t *testing.T) {
 	// Wide rather than deep: many siblings, so this trips the node budget and not the depth bound.
 	props := make([]string, 0, MaxSubschemas+16)
-	for i := 0; i < MaxSubschemas+16; i++ {
+	for i := range MaxSubschemas + 16 {
 		props = append(props, fmt.Sprintf(`"p%d":{"type":"string"}`, i))
 	}
 	doc := `{"properties":{` + strings.Join(props, ",") + `}}`
@@ -119,7 +119,7 @@ func TestCompile_RefusesTooManySubschemas(t *testing.T) {
 // the same symptom.
 func TestCompile_AcceptsASchemaJustInsideTheBounds(t *testing.T) {
 	doc := `{"type":"object"}`
-	for i := 0; i < MaxDepth-2; i++ {
+	for range MaxDepth - 2 {
 		doc = `{"properties":{"a":` + doc + `}}`
 	}
 	if _, err := Compile([]byte(doc)); err != nil {
@@ -151,9 +151,8 @@ func TestUnsupportedKeywords_NamesKnownButUnimplementedKeywords(t *testing.T) {
 }
 
 func TestUnsupportedKeywords_AcceptsTheDeclaredVocabulary(t *testing.T) {
-	implemented, ignored := Vocabulary()
-	// A schema declaring every keyword we claim to handle must report nothing. This is the half that
-	// catches a keyword dropped from the implementation but left in the doc comment.
+	implemented, ignored := sortedKeys(implementedKeywords), sortedKeys(inertKeywords)
+	// A schema declaring every keyword the validator claims to handle must report nothing.
 	m := map[string]any{}
 	for _, k := range append(append([]string{}, implemented...), ignored...) {
 		switch k {
@@ -179,9 +178,8 @@ func TestUnsupportedKeywords_AcceptsTheDeclaredVocabulary(t *testing.T) {
 	}
 }
 
-// The package doc and Vocabulary() must agree. A doc comment nobody checks is how a validator comes
-// to claim support it does not have — which is the exact failure this package exists to remove, so it
-// does not get to make it about itself.
+// The package doc must list exactly the keywords the validator implements or ignores, so it cannot
+// claim support the code lacks.
 func TestPackageDoc_ListsExactlyTheDeclaredVocabulary(t *testing.T) {
 	src, err := os.ReadFile("jsonschema.go")
 	if err != nil {
@@ -191,7 +189,7 @@ func TestPackageDoc_ListsExactlyTheDeclaredVocabulary(t *testing.T) {
 	if !ok {
 		t.Fatal("could not isolate the package doc")
 	}
-	implemented, ignored := Vocabulary()
+	implemented, ignored := sortedKeys(implementedKeywords), sortedKeys(inertKeywords)
 	for _, k := range append(append([]string{}, implemented...), ignored...) {
 		if !strings.Contains(head, k) {
 			t.Errorf("the package doc does not list %q — the declaration and the code have drifted", k)
@@ -223,7 +221,7 @@ func TestPublishedSchemasAreWellInsideTheBounds(t *testing.T) {
 		if rerr != nil {
 			t.Fatalf("read %s: %v", e.Name(), rerr)
 		}
-		d, n, merr := Measure(b)
+		d, n, merr := measure(b)
 		if merr != nil {
 			t.Fatalf("%s: %v", e.Name(), merr)
 		}

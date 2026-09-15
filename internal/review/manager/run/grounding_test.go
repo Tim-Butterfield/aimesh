@@ -236,9 +236,8 @@ func TestGrounding_RunsOnARealReview(t *testing.T) {
 			t.Fatalf("decision %d carries no grounding label", i)
 		}
 	}
-	// The fixture's finding points at a file this workspace really has, so it grounds. Asserting the
-	// POSITIVE outcome (rather than merely "a label exists") is what stops the pass from passing this
-	// test while reporting file_missing for everything.
+	// The fixture's finding names a file the workspace has, so it grounds. Asserting the positive
+	// status stops a pass that reports file_missing for everything from passing.
 	if got := out.Decisions[0].Grounding.Status; got != GroundedOK {
 		t.Errorf("status = %q (%s), want %q — the fixture cites a file the workspace has",
 			got, out.Decisions[0].Grounding.Detail, GroundedOK)

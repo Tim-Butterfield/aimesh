@@ -1,6 +1,5 @@
-// Package version holds build metadata, injected via -ldflags at release time
-// and falling back to safe development values otherwise. It mirrors reviewmesh's
-// version package exactly — both binaries answer `--version` the same way.
+// Package version holds the explore domain's build metadata, set with -ldflags at release time and
+// otherwise read from the Go toolchain's build information.
 package version
 
 import (
@@ -34,10 +33,9 @@ type Info struct {
 	Arch      string `json:"arch"`
 }
 
-// Get returns the current build info. The -ldflags-stamped values win when a release set them;
-// otherwise the facts the Go toolchain embedded on its own are used, so a plain
-// `go install ./cmd/aimesh` from a tagged checkout reports that tag (and a pseudo-version after
-// it) instead of "dev". "dev" remains the answer only when neither source knows better.
+// Get returns the build info. Values stamped with -ldflags take precedence; otherwise the toolchain's
+// embedded build information is used, so `go install` from a tagged checkout reports that tag. The
+// version is "dev" only when neither source has one.
 func Get() Info {
 	i := Info{
 		Version:   Version,
@@ -62,10 +60,8 @@ func Get() Info {
 	return i
 }
 
-// String renders the single user-facing version line: "exploremesh <version>" (e.g.
-// "exploremesh dev" for an unstamped local build, "exploremesh 1.2.0" for a release).
-// The full build metadata (commit/date/dirty/go/os/arch) is retained in Info for the
-// `--version --json` form and release stamping/audit use, but is NOT shown by default.
+// String returns the one-line version, such as "exploremesh 1.2.0". The rest of Info appears only in the
+// JSON form.
 func (i Info) String() string {
 	return "exploremesh " + i.Version
 }

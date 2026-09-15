@@ -1,56 +1,48 @@
 package schema
 
-// This file holds the DEGRADED terminal artifact — what exploremesh emits when the
-// collator becomes unavailable AFTER the fan-out, or when an identity halt fires: the blind round-1
-// artifacts are equally valid in both cases, so the run still produces a terminal artifact rather than
-// nothing. It is deliberately PER MODE-CLASS (the REV 3 re-check finding: a synthesized "disagreement
-// register" over free-form claims would itself be a covert entity-resolution step performed by the host
-// with no ledger, no attribution, and no contestability):
+// This file holds the degraded terminal artifact, emitted when the collator becomes unavailable after the
+// fan-out or an identity halt fires. The blind round-1 responses are still valid, so the run still ends
+// with a result. Its shape depends on the mode's space class:
 //
-//   - EMERGENT-space modes (Map, Synthesize, Catalog — the candidate/claim space is authored by the
-//     explorers) → the RAW, ATTRIBUTED round-1 envelopes plus a MECHANICAL typed-claim index (one entry
-//     per response field value per envelope; NO grouping, NO clustering, NO similarity), labeled
-//     `uncollated — no entity resolution performed`.
-//   - FIXED-space modes (Compare/Forecast; the option/criterion universe is GIVEN) → a REAL host
-//     register keyed on the mode's declared key field: grouping by an exact value in a DECLARED universe
-//     is arithmetic, not judgment, so the comparison is genuine.
+//   - Emergent-space modes (map, synthesize, catalog), where explorers author the candidates, get the
+//     raw attributed envelopes plus a mechanical claim index with no grouping, labeled uncollated.
+//     Grouping free-form claims would be unrecorded entity resolution.
+//   - Fixed-space modes (compare, forecast), where the options are declared, get a register grouped by
+//     the exact value of the declared key field, which involves no judgment.
 
 import (
 	"fmt"
 	"sort"
 )
 
-// ModeClass is a mode's SPACE class — it decides which degraded terminal artifact is
-// honest for the mode, and nothing else. It is app-owned mode grammar carried on the ModeSpec.
+// ModeClass is a mode's space class, which selects its degraded terminal artifact. It is set on the
+// ModeSpec.
 type ModeClass string
 
 const (
-	// EmergentSpace: the candidate/claim space is AUTHORED by the explorers, so any grouping across
-	// explorers is entity resolution and may only happen through the recorded canonicalization
-	// ledger — never inside a degraded fallback.
+	// EmergentSpace means explorers author the candidates, so grouping across explorers is entity
+	// resolution and happens only through the recorded canonicalization ledger.
 	EmergentSpace ModeClass = "emergent_space"
-	// FixedSpace: the option/criterion universe is GIVEN to the explorers, so grouping by an exact value
-	// in that declared universe is mechanical and a real host register is honest.
+	// FixedSpace means the options are declared up front, so grouping by an exact declared value is
+	// mechanical.
 	FixedSpace ModeClass = "fixed_space"
 )
 
-// UncollatedLabel is the exact, non-negotiable label carried by an EMERGENT-space degraded artifact.
-// It states plainly that no entity resolution happened, so no reader (or downstream
-// exploration) can mistake the raw envelope set for a collated result.
+// UncollatedLabel is the label on an emergent-space degraded artifact, stating that no entity resolution
+// was performed.
 const UncollatedLabel = "uncollated — no entity resolution performed"
 
-// DegradedReason records WHY the degraded path fired — collator unavailability after the fan-out, or an
-// identity halt (both leave the blind round-1 artifacts fully valid).
+// DegradedReason records why the degraded path ran.
 type DegradedReason string
 
+// The reasons a run ends with a degraded artifact.
 const (
 	DegradedCollatorUnavailable DegradedReason = "collator_unavailable_after_fanout"
 	DegradedIdentityHalt        DegradedReason = "identity_halt"
 )
 
-// TypedClaim is one MECHANICAL entry of the emergent-space claim index: a single field value exactly as
-// one explorer wrote it, attributed to that explorer's envelope. Entries are NEVER merged, deduplicated,
-// ranked or clustered — the index is a transposition of the envelopes, not an interpretation of them.
+// TypedClaim is one entry of the emergent-space claim index: a single field value exactly as one explorer
+// wrote it, attributed to its envelope. Entries are never merged, deduplicated, ranked or clustered.
 type TypedClaim struct {
 	EnvelopeRef string           `json:"envelopeRef"`
 	Explorer    ExplorerIdentity `json:"explorer"`
@@ -59,9 +51,8 @@ type TypedClaim struct {
 	Index       int              `json:"index"` // position within a repeated field (0 for a scalar)
 }
 
-// RegisterEntry is one row of a FIXED-space degraded register: an exact value of the mode's declared key
-// field plus every explorer that reported it, with that explorer's full response for the row. Genuine
-// because the key universe was GIVEN to the explorers.
+// RegisterEntry is one row of a fixed-space degraded register: an exact value of the mode's declared key
+// field and every explorer that reported it, with that explorer's full response.
 type RegisterEntry struct {
 	Key       string             `json:"key"`
 	Positions []RegisterPosition `json:"positions"`
@@ -74,23 +65,22 @@ type RegisterPosition struct {
 	Response    map[string]any   `json:"response"`
 }
 
-// DegradedOutput is the terminal artifact for a run that lost its collator after the fan-out.
-// It satisfies the mode-package ModeOutput contract via Summary(), so the surfaces render it exactly like
-// any other terminal output — a degraded run is a RESULT, not a hole. Exactly one of ClaimIndex (emergent)
-// or Register (fixed) is populated, per Class.
+// DegradedOutput is the terminal artifact of a degraded run. It satisfies the mode package's ModeOutput
+// contract, so surfaces render it like any other result. ClaimIndex is set for emergent-space modes and
+// Register for fixed-space modes.
 type DegradedOutput struct {
 	Class      ModeClass       `json:"class"`
 	Mode       string          `json:"mode"`
 	Reason     DegradedReason  `json:"reason"`
 	Detail     string          `json:"detail"`
 	Label      string          `json:"label"`
-	Envelopes  []Envelope      `json:"envelopes"`            // the RAW, attributed blind round-1 envelopes
-	ClaimIndex []TypedClaim    `json:"claimIndex,omitempty"` // EMERGENT-space only (mechanical, ungrouped)
-	Register   []RegisterEntry `json:"register,omitempty"`   // FIXED-space only (declared key universe)
+	Envelopes  []Envelope      `json:"envelopes"`            // the raw, attributed round-1 envelopes
+	ClaimIndex []TypedClaim    `json:"claimIndex,omitempty"` // emergent-space only
+	Register   []RegisterEntry `json:"register,omitempty"`   // fixed-space only
 }
 
-// Summary renders the one-line human summary — always stating the class + label so a degraded artifact
-// can never be mistaken for a collation in a log line or manifest echo.
+// Summary returns a one-line summary that names the degraded state, so it cannot be mistaken for a
+// collation.
 func (o DegradedOutput) Summary() string {
 	switch o.Class {
 	case FixedSpace:
@@ -102,9 +92,9 @@ func (o DegradedOutput) Summary() string {
 	}
 }
 
-// Degrade builds the degraded terminal artifact for a mode class. keyField is the FIXED-space
-// mode's declared key field and is ignored for the emergent path; an emergent-space artifact ALWAYS
-// carries UncollatedLabel. envelopes must be the blind round-1 envelopes (raw + attributed).
+// Degrade builds the degraded terminal artifact for a mode class from the round-1 envelopes. keyField is
+// the fixed-space mode's declared key field and is ignored for emergent-space modes, whose artifact
+// always carries UncollatedLabel.
 func Degrade(class ModeClass, modeName string, reason DegradedReason, detail string, envelopes []Envelope, keyField string) DegradedOutput {
 	out := DegradedOutput{
 		Class: class, Mode: modeName, Reason: reason, Detail: detail,
@@ -119,10 +109,9 @@ func Degrade(class ModeClass, modeName string, reason DegradedReason, detail str
 	return out
 }
 
-// claimIndex transposes the envelopes into the mechanical typed-claim index: every string-valued response
-// field (scalar or repeated) becomes one attributed entry. Field names are visited in SORTED order and
-// repeated values in their authored order, so the index is deterministic. Non-string values are rendered
-// with %v — a mechanical stringification, never an interpretation. NOTHING is grouped or deduplicated.
+// claimIndex lists every response field value of every envelope as one attributed entry. Fields are
+// visited in sorted order and repeated values in their written order, so the index is deterministic;
+// non-string values are formatted with %v.
 func claimIndex(envelopes []Envelope) []TypedClaim {
 	var out []TypedClaim
 	for _, env := range envelopes {
@@ -151,10 +140,9 @@ func claimIndex(envelopes []Envelope) []TypedClaim {
 	return out
 }
 
-// hostRegister groups the envelopes by the EXACT value of the mode's declared key field — legitimate for a
-// FIXED-space mode because that value space was handed to the explorers. A repeated key field yields
-// one register row per value. Keys are emitted in sorted order for determinism; an envelope missing the key
-// field is recorded under the empty key so nothing is silently dropped.
+// hostRegister groups the envelopes by the exact value of keyField, one row per value of a repeated field,
+// with keys in sorted order. An envelope without the field is recorded under the empty key, so none is
+// dropped.
 func hostRegister(envelopes []Envelope, keyField string) []RegisterEntry {
 	byKey := map[string][]RegisterPosition{}
 	add := func(key string, env Envelope) {

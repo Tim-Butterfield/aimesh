@@ -1,9 +1,7 @@
 package pipeline
 
-// This file holds the per-run state carrier + the two stages every round shares: the identity PRE-FLIGHT
-// that runs before the fan-out, and the fan-out itself (used by the blind round 1 and by every later round,
-// so a later round cannot accidentally acquire different drop/halt/identity semantics). It also builds the
-// PER MODE-CLASS degraded terminal artifact.
+// This file holds the per-run state, the pre-flight identity probe, the explorer fan-out shared by every
+// round, and the degraded-output builder.
 
 import (
 	"context"
@@ -19,10 +17,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// runner carries one run's immutable inputs plus its mutable Result and identity ledger through the governed
-// stages (pre-flight → blind round 1 → canonicalize+confirm → mediate → later rounds → collate). It exists
-// because those stages all need the same inputs; threading nine parameters through each of them made every
-// helper signature a paragraph and invited them to drift apart.
+// runner holds one run's inputs, its Result and its identity ledger across the pipeline stages.
 type runner struct {
 	ctx         context.Context
 	reg         Registry
@@ -34,13 +29,11 @@ type runner struct {
 	ids         *identityLedger
 	collAdapter model.Adapter
 	res         *Result
-	// canonicalizers are the resolved canonicalizer identities for this run (one, or two on the dual path),
-	// fixed at pre-flight so the same identities are used for the proposal calls.
+	// canonicalizers are the canonicalizer identities resolved at pre-flight.
 	canonicalizers []canonicalizerIdentity
 }
 
-// panelIdentities returns the plan's explorer identities in stable attribution order — the membership the
-// panel is FROZEN on.
+// panelIdentities returns the plan's explorer identities in attribution order.
 func panelIdentities(p roster.Plan) []schema.ExplorerIdentity {
 	out := make([]schema.ExplorerIdentity, 0, len(p.Explorers))
 	for _, e := range p.Explorers {
@@ -49,10 +42,8 @@ func panelIdentities(p roster.Plan) []schema.ExplorerIdentity {
 	return out
 }
 
-// preflightRoles probes every GOVERNED role BEFORE the explorer fan-out: the collator, and each
-// canonicalizer a canonicalizing mode will use. A role that cannot be invoked fails here, costing one cheap
-// call per role instead of a whole panel. It also PINS each role's resolved model in the identity ledger, so
-// the same-identity invariant has a baseline to compare later calls against.
+// preflightRoles probes the collator and any canonicalizers before the fan-out, so an unusable role fails
+// before the panel is paid for. It pins each role's resolved model in the identity ledger.
 func (r *runner) preflightRoles() error {
 	roles := []struct {
 		role    string
@@ -67,13 +58,9 @@ func (r *runner) preflightRoles() error {
 		}
 		cids := choice.ids
 		r.canonicalizers = cids
-		// Record HOW the canonicalizers were chosen before any of them is called. It is a governance fact:
-		// "explicit" says a human named these identities, "derived" says the host picked them from the panel.
 		r.res.CanonicalizerProvenance = choice.provenance
-		// And WHAT THE CHOICE BOUGHT. A dual pair on one model is allowed — a panel is configured
-		// deliberately, and refusing it would override a choice on an assumption about what was meant — but
-		// it makes every merge-agreement on this run weaker evidence, so it is warned once and recorded
-		// where a reader of the count will find it.
+		// A dual pair sharing one model is allowed, but its agreement is weaker evidence, so it is warned
+		// about and recorded.
 		r.res.CanonicalizerIndependence = choice.independence
 		if choice.independence == IndependenceSharedModel {
 			emit(r.onEvent, "warn", "canonicalizer_shared_model", fmt.Sprintf(
@@ -112,22 +99,16 @@ func (r *runner) preflightRoles() error {
 	return nil
 }
 
-// fanout dispatches ONE explorer round: every explorer receives the byte-identical payload, concurrency is
-// bounded, and each outcome becomes an envelope, a drop, or a halt. It is shared by the blind round 1 and by
-// every later round so their semantics cannot diverge; roundIndex only affects the drop reason prefix and the
-// same-identity role label (an explorer is pinned across the rounds it participates in). `phase` is the
-// adapter-facing phase label — PhaseExplore for a research round, PhaseBallot for a ballot round:
-// soliciting a preference is a governance act, and a recording must be able to tell it from a research call.
+// fanout sends payload to every explorer with bounded concurrency and sorts each outcome into an envelope, a
+// drop or a halt. Every round uses it. phase labels the call for the adapter (for example PhaseExplore or
+// PhaseBallot), and roundIndex prefixes drop reasons after round 1.
 //
-// A returned halt means the run must stop: a proven explorer identity mismatch or a mid-exploration
-// model swap. Envelopes/drops gathered before the halt are still returned, so the audit record is
-// complete.
+// A non-nil error means the run must stop because of an identity mismatch or model change. Envelopes and
+// drops gathered so far are still returned.
 func (r *runner) fanout(roundIndex int, phase string, payload schema.ExplorerTaskPayload, payloadHash string) ([]schema.Envelope, []Dropped, error) {
 	outs := make([]explorerOutcome, len(r.plan.Explorers))
 	var wg sync.WaitGroup
-	// Bound concurrency to what the CALLER asked for: each explorer is a heavy model-CLI subprocess
-	// under a long per-call timeout, and only the caller knows what their machine can host at once.
-	// Unset runs the whole panel in parallel.
+	// Concurrency follows Options.MaxParallel; unset runs the whole panel at once.
 	sem := make(chan struct{}, explorerFanout(len(r.plan.Explorers), r.opts.MaxParallel))
 	for i, ex := range r.plan.Explorers {
 		wg.Add(1)
@@ -157,7 +138,7 @@ func (r *runner) fanout(roundIndex int, phase string, payload schema.ExplorerTas
 	var drops []Dropped
 	var halt error
 	for i, o := range outs {
-		// SAME-IDENTITY invariant per explorer, across the rounds it participates in.
+		// Each explorer must resolve to the same model in every round.
 		if ierr := r.ids.observe("explorer["+identityString(r.plan.Explorers[i].Identity())+"]", o.resolvedModel); ierr != nil && halt == nil {
 			halt = ierr
 		}
@@ -179,15 +160,13 @@ func (r *runner) fanout(roundIndex int, phase string, payload schema.ExplorerTas
 	return envs, drops, halt
 }
 
-// degrade builds the PER MODE-CLASS degraded terminal artifact from the BLIND round-1 envelopes.
-// For an EMERGENT-space mode that is the raw attributed envelopes + a mechanical typed-claim index labeled
-// `uncollated — no entity resolution performed`; for a FIXED-space mode it is a real host register keyed on
-// the mode's declared key field. It returns nil when there are no envelopes to carry (nothing was paid for
-// yet, so there is nothing to salvage).
+// degrade builds the degraded output for the mode's class from the blind round-1 envelopes: raw envelopes
+// with an uncollated claim index for emergent-space modes, or a register keyed on FixedSpaceKeyField for
+// fixed-space modes. It returns nil when there are no envelopes.
 func (r *runner) degrade(reason schema.DegradedReason, detail string) *schema.DegradedOutput {
 	envs := r.res.Envelopes
 	if len(r.res.Rounds) > 0 {
-		envs = r.res.Rounds[0].Envelopes() // the immutable blind round-1 view, whenever it exists
+		envs = r.res.Rounds[0].Envelopes()
 	}
 	if len(envs) == 0 {
 		return nil

@@ -27,6 +27,6 @@ func hasReparseAttr(info os.FileInfo) bool {
 	return d.FileAttributes&fileAttributeReparsePoint != 0
 }
 
-// linkCount is not knowable from a Win32FileAttributeData, so the hardlink rule does not
-// fire on Windows — it reports "unknown" rather than a wrong number.
+// linkCount reports that the link count is unknown: Win32FileAttributeData does not carry it, so the
+// hardlink rule does not apply on Windows.
 func linkCount(fs.FileInfo) (uint64, bool) { return 0, false }

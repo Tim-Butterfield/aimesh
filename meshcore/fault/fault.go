@@ -1,14 +1,14 @@
-// Package fault carries an error together with the process exit code it maps to.
-// This table is the source of the public CLI exit codes documented in docs/architecture.md,
-// and BOTH binaries map through it — a script branching on exploremesh's exit codes branches
-// on reviewmesh's the same way. Changing a value here is a breaking change to that contract.
+// Package fault carries an error together with the process exit code it maps to. The codes are the
+// public CLI exit codes documented in docs/architecture.md and are shared by both applications, so
+// changing a value is a breaking change.
 package fault
 
 import "errors"
 
-// Code is a reviewmesh CLI process exit code.
+// Code is a CLI process exit code.
 type Code int
 
+// Exit codes.
 const (
 	OK          Code = 0 // success
 	Findings    Code = 1 // completed with blocking findings (gating on)
@@ -26,11 +26,9 @@ type Fault struct {
 	Code Code
 	Msg  string
 	Halt string // optional halt-taxonomy class (A-G, M1-M6)
-	// Rsn is the stable MACHINE reason code for this fault (lower_snake, e.g.
-	// "adapter_exited_nonzero"). It is what a machine consumer branches on and what an
-	// audit record persists; Msg stays the human sentence. Empty means "not explicitly
-	// classified" — Reason() then derives a stable code from the exit Code, so a machine
-	// reader NEVER receives a sentence where it expects a code.
+	// Rsn is the stable machine reason code (lower_snake, such as "adapter_exited_nonzero") for
+	// machine consumers and audit records; Msg is the human sentence. When empty, Reason derives a
+	// code from Code, so a machine reader never receives a sentence.
 	Rsn string
 	// Signal is an optional classified actionability hint for the underlying tool
 	// invocation (see meshcore/clihint: folder_trust / login_required / model_invalid /
@@ -68,10 +66,8 @@ func (f *Fault) WithReason(code string) *Fault { f.Rsn = code; return f }
 // WithSignal sets the classified actionability hint and returns the fault.
 func (f *Fault) WithSignal(sig string) *Fault { f.Signal = sig; return f }
 
-// codeReasons are the STABLE fallback reason codes, one per exit code. They exist so
-// that an unclassified fault still yields a code-shaped reason (never a sentence): a
-// machine consumer can always branch, and the specific classification can be tightened
-// later without changing the shape of the contract.
+// codeReasons are the fallback reason codes, one per exit code, so an unclassified fault still yields a
+// code-shaped reason.
 var codeReasons = map[Code]string{
 	OK:          "ok",
 	Findings:    "gating_threshold_met",

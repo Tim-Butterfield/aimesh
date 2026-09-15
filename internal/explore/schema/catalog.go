@@ -1,30 +1,21 @@
 package schema
 
-// This file holds the Catalog mode's app-owned artifacts: the FIXED explorer schema +
-// deterministic "enumerate broadly" explorer prompt, and the terminal CatalogOutput the host assembles
-// as a VIEW over the canonicalization result. Catalog is FORMULATION-FREE like Map/Synthesize
-// — the collator authors NO round-1 schema: both the explorer prompt and the explorer schema are
-// app-owned. Its terminal collation runs through the canonicalization component (canon), not a plain
-// collate call, so the assembly of this type lives in the mode's CanonicalizingContract, not here.
+// This file holds the catalog mode's explorer schema and prompt, and the terminal CatalogOutput the host
+// assembles from the canonicalization result. The mode's canonicalizing contract builds the output.
 
 import (
 	"fmt"
 	"strings"
 )
 
-// CatalogOutput is the FIXED, exploremesh-owned terminal output of the Catalog mode: the
-// canonical CLUSTERS (each raw nomination de-duplicated onto a canonical entity, minority carry-through
-// preserved), the PROPOSED distinguishing dimensions, and coverage notes. Catalog is OBSERVE posture —
-// it enumerates + organizes, it does NOT rank — so ProposedDimensions are labeled PROPOSED axes for the
-// human, NEVER promoted to decision criteria. It satisfies the mode-package ModeOutput contract via
-// Summary().
+// CatalogOutput is the terminal output of the catalog mode: canonical clusters of the raw nominations,
+// proposed distinguishing dimensions, and coverage notes. Catalog organizes without ranking, so the
+// dimensions are suggestions, not decision criteria. It satisfies the mode package's ModeOutput contract.
 type CatalogOutput struct {
-	// Clusters are the canonical entities the canonicalizer proposed over the raw nominations. Every raw
-	// nomination appears in exactly one cluster (the surjectivity gate); a singleton survives tagged
-	// single-source (minority carry-through). At least one cluster is required (Validate).
+	// Clusters are the canonical entities. Every raw nomination appears in exactly one cluster, and a
+	// nomination from a single explorer is kept and marked single-source.
 	Clusters []CatalogCluster `json:"clusters"`
-	// ProposedDimensions are the distinguishing axes the canonicalizer extracted — PROPOSED for the human
-	// to consider, NOT decision criteria (Catalog does not rank).
+	// ProposedDimensions are the distinguishing axes the canonicalizer extracted.
 	ProposedDimensions []string `json:"proposedDimensions"`
 	// CoverageNotes are the canonicalizer's notes on coverage/gaps across the nominations.
 	CoverageNotes string `json:"coverageNotes"`
@@ -36,10 +27,8 @@ type CatalogCluster struct {
 	Members []CanonicalMember `json:"members"`
 }
 
-// CanonicalMember is one raw nomination within a canonical cluster, attributed to its source explorer:
-// the canonical ID it was mapped to, the raw text as the explorer nominated it, the source
-// explorer identity, and whether its canonical entity is backed by a single distinct source (a carried
-// minority — salience, not corroboration).
+// CanonicalMember is one raw nomination within a cluster: its canonical ID, the text as nominated, the
+// nominating explorer, and whether only one explorer backs the entity.
 type CanonicalMember struct {
 	CanonicalID    string           `json:"canonicalId"`
 	RawNomination  string           `json:"rawNomination"`
@@ -47,8 +36,7 @@ type CanonicalMember struct {
 	SingleSource   bool             `json:"singleSource"`
 }
 
-// Summary returns the one-line human summary of a Catalog result — the cluster/member/single-source
-// tally + the count of proposed dimensions. Implements the mode-package ModeOutput contract.
+// Summary returns a one-line summary of the cluster, member, single-source and dimension counts.
 func (o CatalogOutput) Summary() string {
 	members, single := 0, 0
 	for _, c := range o.Clusters {
@@ -63,9 +51,7 @@ func (o CatalogOutput) Summary() string {
 		members, len(o.Clusters), single, len(o.ProposedDimensions))
 }
 
-// Validate checks the catalog is usable: at least one cluster (a canonicalization that produced no
-// canonical entity has nothing to organize). Proposed dimensions + coverage notes may legitimately be
-// empty, so they are not required.
+// Validate checks that the catalog has at least one cluster. Dimensions and notes may be empty.
 func (o CatalogOutput) Validate() error {
 	if len(o.Clusters) == 0 {
 		return fmt.Errorf("catalog output has no clusters")
@@ -73,27 +59,21 @@ func (o CatalogOutput) Validate() error {
 	return nil
 }
 
-// catalogExplorerFields is the Catalog mode's FIXED explorer-response schema: a list of
-// distinct candidate nominations (required) + optional notes. It is app-owned (never collator-authored)
-// and is NOT the Map minimum schema — a formulation-free mode's explorer schema is its own contract.
+// catalogExplorerFields is the catalog explorer schema: candidate nominations and optional notes.
 var catalogExplorerFields = []Field{
 	{Name: "candidates", Type: TypeString, Required: true, Repeated: true},
 	{Name: "notes", Type: TypeString, Required: false, Repeated: false},
 }
 
-// CatalogExplorerSchema returns a fresh copy of the Catalog explorer schema (mirroring MinimumSchema's
-// copy-per-call contract so a caller can never mutate the shared baseline).
+// CatalogExplorerSchema returns a copy of the catalog explorer schema.
 func CatalogExplorerSchema() Schema {
 	fields := make([]Field, len(catalogExplorerFields))
 	copy(fields, catalogExplorerFields)
 	return Schema{Fields: fields}
 }
 
-// CatalogExplorerPrompt derives the deterministic, app-owned explorer prompt for the Catalog mode from
-// raw_task, preserving every purpose + criterion verbatim (add nothing, drop nothing). It asks the
-// explorer to ENUMERATE BROADLY — coverage + novelty over polish — and renders the exact
-// fixed schema field names (RenderSchema) — the hard-won Map lesson: a prompt that merely says "match the
-// schema" gives the model nothing to match, so it improvises names and fails validation.
+// CatalogExplorerPrompt builds the catalog explorer prompt from raw, quoting the purpose and criteria
+// verbatim, asking for broad enumeration, and rendering the schema's field names.
 func CatalogExplorerPrompt(raw RawTask) string {
 	var b strings.Builder
 	b.WriteString("Enumerate as many DISTINCT candidates/possibilities for the following task as you can — ")

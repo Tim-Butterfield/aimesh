@@ -1,25 +1,15 @@
-// Package mcp is exploremesh's MCP (Model Context Protocol) surface: exploremesh runs as a local stdio
-// server so an MCP-speaking agent can drive a governed, blind, multi-model exploration and get back the
-// HOST-COMPUTED result. The protocol itself is meshcore/mcp; this package owns the tools, the schemas,
-// the job registry and the admission governor — everything that is exploremesh grammar.
+// Package mcp serves explorations over MCP (Model Context Protocol) as a local stdio server. The protocol
+// lives in meshcore/mcp; this package owns the tools, their schemas and the run registry.
 //
-// Four decisions shape this surface:
-//
-//  1. JOB-SHAPED CALLS. Client request timeouts are commonly ~60 s and a real panel run is minutes. A
-//     synchronous call would be killed MID-SPEND with no way to reach the subprocesses it started. So a
-//     run-starting tool waits `waitSeconds` (default 25) for the result inline and otherwise returns
-//     `{runId, state:"running"}`; `explore_run_status`/`explore_run_result` finish the conversation.
-//  2. DOMAIN HALTS RIDE `isError`. Identity mismatch, adapter failure, an admission refusal — all of them
-//     come back as a successful JSON-RPC response carrying `CallToolResult{isError: true}` with the
-//     `{exitCode, haltClass, reasonCode, failure}` taxonomy. JSON-RPC `error.data` is routinely flattened
-//     or dropped by clients, which would lose the taxonomy exactly when the model needs it to react.
-//     Protocol errors stay reserved for malformed requests, unknown tools and pre-initialization calls.
-//  3. GOVERNANCE IS NOT OPTIONAL. Every terminal result carries the governance block, the identity
-//     caveats and the requested-vs-executed panel echo, and the declared outputSchema marks all three
-//     `required`. There is no `summary` vs `full` detail parameter to drop them through.
-//  4. COMPOSE, NEVER CONFIGURE. Every call composes its panel from the adapters this server was launched
-//     with. It can never introduce an adapter, a binary path or a launch argument, and
-//     `explore_list`/`explore_doctor` report logical identifiers only — no paths, no launch args, no environment.
+//   - A run-starting call waits up to `waitSeconds` for its result and otherwise returns
+//     `{runId, state: "running"}`; explore_run_status and explore_run_result finish the exchange. Client
+//     timeouts are shorter than a panel run.
+//   - Domain halts are returned as `isError` tool results carrying `{exitCode, haltClass, reasonCode,
+//     failure}`, because clients often drop JSON-RPC error data. Protocol errors are reserved for
+//     malformed requests.
+//   - Every terminal result includes the governance block, identity caveats and panel echo.
+//   - Each call composes its panel from the adapters the server was launched with; no call can add an
+//     adapter, path or launch argument, and no tool reports paths or environment.
 package mcp
 
 import (
@@ -31,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -56,20 +47,18 @@ const (
 	ServerVersion = "dev"
 )
 
-// maxArgumentBytes bounds one tool call's arguments before anything is decoded — the request-shape half
-// of the admission governor (an oversized artifact must be refused before it reaches a prompt builder).
+// maxArgumentBytes bounds one tool call's arguments before they are decoded.
 const maxArgumentBytes = 1 << 20 // 1 MiB
 
 // defaultTurnTimeout is the wall-clock budget for one run when none is configured.
 const defaultTurnTimeout = 10 * time.Minute
 
-// Explorer is the capability this surface routes an exploration to — the same seam the ACP surface uses,
-// so both surfaces run the identical pipeline and a test can substitute a fake.
+// Explorer runs an exploration. The ACP surface uses the same interface, and tests substitute a fake.
 type Explorer interface {
 	Run(ctx context.Context, plan roster.Plan, raw schema.RawTask, opts pipeline.Options, onEvent func(audit.EventLine)) (pipeline.Result, error)
 }
 
-// Server is the exploremesh MCP server.
+// Server is the explore MCP server.
 type Server struct {
 	// Explorer routes a run to the pipeline.
 	Explorer Explorer
@@ -79,55 +68,45 @@ type Server struct {
 	// Config supplies the sanitized projections behind `explore_list` and `explore_doctor`.
 	Config Config
 
-	// WaitSeconds overrides the inline wait budget's default. This server has NO admission bounds —
-	// neither a lifetime run cap nor an in-flight one; see the note in runs.go for why, and for where
-	// the concurrency decision lives now (`maxParallel`, stated per call).
+	// WaitSeconds overrides the default inline wait.
 	WaitSeconds int
-	// TurnTimeout bounds ONE run's wall clock (0 → 10 minutes).
+	// TurnTimeout bounds one run's wall clock; 0 means 10 minutes.
 	TurnTimeout time.Duration
-	// DisableCapture turns off the on-disk run record. Capture is ON by default: an MCP run that left no
-	// disk record would be the one surface whose governance claims are not checkable after the fact.
+	// DisableCapture turns off the on-disk run record, which is on by default.
 	DisableCapture bool
-	// StrictSchema turns on the OPT-IN send-time check that every `structuredContent` satisfies the
-	// outputSchema its own tool declared. Off by default; see proto.Server.StrictSchema for the cost.
+	// StrictSchema checks every structuredContent against its tool's outputSchema before sending. See
+	// proto.Server.StrictSchema.
 	StrictSchema bool
 
 	Framing string
-	// Protocol is the era posture this process was launched with (`--protocol dual|legacy`; ""
-	// means dual). It is reported by `explore_doctor` and not only announced on stderr, because a host
-	// launches its servers from a config file and MAY discard stderr entirely.
+	// Protocol is the launch era posture (`--protocol dual|legacy`; "" means dual). explore_doctor
+	// reports it because a host may discard stderr.
 	//
 	// SUNSET-PATH (MCP26-SUNSET): removed with the legacy era.
 	Protocol proto.ProtocolMode
-	// Diagnostics is the server's own log sink. It must never be the protocol stream.
+	// Diagnostics is the server's log sink. It must never be the protocol stream.
 	Diagnostics io.Writer
 
 	runs *registry
 	core *proto.Server
 
-	// attached is set when this server registers into an EXTERNAL core (the combined `aimesh mcp`).
-	// It suppresses the SHARED tools the composer registers once for the whole server — registering
-	// agents_md twice would panic, and two copies of one document is the thing internal/agentguide
-	// exists to prevent.
+	// attached is set when the server registers into a shared core (the combined `aimesh mcp`), which
+	// registers the shared tools such as agents_md itself.
 	attached bool
 
-	// artifacts publishes a captured run's files as MCP resources. Without it the run record is
-	// reachable only from the machine that owns it, and this surface deliberately reports no host
-	// path — so a client that wanted the raw explorer envelopes behind a synthesis had no route to
-	// them at all.
+	// artifacts publishes captured run files as MCP resources.
 	artifacts proto.RunStore
 }
 
-// Serve builds the tool set and serves MCP over the given streams until EOF. On return every in-flight
-// run is cancelled: a disconnected client must not leave a panel of model CLIs running with nobody to
-// receive their output.
+// Serve registers the tools and serves MCP over in and out until EOF. On return every in-flight run is
+// cancelled, so a disconnected client leaves no model CLIs running.
 func (s *Server) Serve(in io.Reader, out io.Writer) error {
 	s.build()
 	defer s.runs.cancelAll()
 	return s.core.Serve(in, out)
 }
 
-// Core exposes the underlying protocol server (for tests that drive it over an explicit framer).
+// Core returns the underlying protocol server, building it if needed.
 func (s *Server) Core() *proto.Server {
 	s.build()
 	return s.core
@@ -135,16 +114,14 @@ func (s *Server) Core() *proto.Server {
 
 func (s *Server) build() { s.buildInto(nil) }
 
-// Attach registers this domain's tools into an EXTERNAL protocol core — the seam the combined
-// `aimesh mcp` server uses — and returns the two providers the composer must fold in, because a
-// single proto.Server has one Resources field and one Tasks field and both domains need theirs.
+// Attach registers this domain's tools into a shared protocol core, as the combined `aimesh mcp` server
+// does, and returns the resource and task providers the composer must merge.
 func (s *Server) Attach(core *proto.Server) (proto.ResourceProvider, proto.TaskProvider) {
 	s.buildInto(core)
 	return &s.artifacts, taskProvider{s}
 }
 
-// buildInto wires this server. With core == nil it owns a fresh one (the standalone
-// `aimesh explore mcp` case); with a core supplied it registers into that instead.
+// buildInto wires the server into core, or into a new core of its own when core is nil.
 func (s *Server) buildInto(core *proto.Server) {
 	if s.core != nil {
 		return
@@ -153,8 +130,6 @@ func (s *Server) buildInto(core *proto.Server) {
 	s.runs.onEvict = s.artifacts.Forget
 	if core != nil {
 		s.attached = true
-		// Explore sets no core-level semantics of its own — no roots, no per-request confinement —
-		// so attaching is purely tool registration plus the two providers returned above.
 		s.core = core
 	} else {
 		s.core = &proto.Server{
@@ -165,9 +140,7 @@ func (s *Server) buildInto(core *proto.Server) {
 			Diagnostics:  s.Diagnostics,
 			StrictSchema: s.StrictSchema,
 			Resources:    &s.artifacts,
-			// The `io.modelcontextprotocol/tasks` extension, as a PROJECTION over the run registry —
-			// `taskId == runId` (see tasks.go). Opt-in per client and modern-era only, so a client that
-			// declares nothing sees exactly the job shape it saw before.
+			// The tasks extension is a view over the run registry (taskId == runId; see tasks.go).
 			Tasks: taskProvider{s},
 		}
 	}
@@ -183,29 +156,26 @@ func (s *Server) waitDefault() int {
 
 func (s *Server) modeNames() []string { return mode.Names() }
 
-// spendAnnotations mark a tool that STARTS A RUN: it is not read-only, it reaches an open world of
-// external providers, and it is not idempotent. These tools MUST NOT be annotated read-only — that is
-// the single most dangerous kind of mistake an annotation can make, because a host uses it to decide
-// whether to ask the human first.
+// spendAnnotations returns the annotations for a tool that starts a run: not read-only, not idempotent,
+// open-world. Hosts use the read-only hint to decide whether to ask the user first.
 func spendAnnotations(title string) *proto.ToolAnnotations {
 	return &proto.ToolAnnotations{
 		Title:           title,
 		ReadOnlyHint:    false,
-		DestructiveHint: proto.Bool(false), // it spends money; it destroys nothing
+		DestructiveHint: new(false),
 		IdempotentHint:  false,
-		OpenWorldHint:   proto.Bool(true),
+		OpenWorldHint:   new(true),
 	}
 }
 
-// readOnlyAnnotations mark a tool that only reports. Only `explore_list`, `explore_doctor`, `explore_run_status` and `explore_run_result`
-// qualify — everything else spawns processes and spends.
+// readOnlyAnnotations returns the annotations for a tool that only reports.
 func readOnlyAnnotations(title string) *proto.ToolAnnotations {
 	return &proto.ToolAnnotations{
 		Title:           title,
 		ReadOnlyHint:    true,
-		DestructiveHint: proto.Bool(false),
+		DestructiveHint: new(false),
 		IdempotentHint:  true,
-		OpenWorldHint:   proto.Bool(false),
+		OpenWorldHint:   new(false),
 	}
 }
 
@@ -243,9 +213,7 @@ func (s *Server) registerTools() {
 		return proto.Result(renderDoctor(payload), payload), nil
 	})
 
-	// The agent guide, byte-identical to `aimesh agents-md` and to the review server's tool. Defined
-	// in internal/agentguide so the two servers cannot drift into serving different documents.
-	// Skipped when attached: the composed server registers it once for both domains.
+	// The agent guide tool is shared with the review server; a composed server registers it once.
 	if !s.attached {
 		s.core.Register(proto.Tool{
 			Name:         agentguide.ToolName,
@@ -257,9 +225,7 @@ func (s *Server) registerTools() {
 		}, func(ctx context.Context, c *proto.Call) (*proto.CallToolResult, error) {
 			text, payload, err := agentguide.ToolPayload()
 			if err != nil {
-				// An unreadable AGENTS_MD override is an ERROR, never a quiet fall back to the
-				// embedded guide: falling back would hand the agent a document the operator did not
-				// choose while reporting success.
+				// An unreadable override is an error rather than a silent fallback to the embedded guide.
 				return proto.ErrorResult(err.Error(), nil), nil
 			}
 			return proto.Result(text, payload), nil
@@ -287,31 +253,21 @@ func (s *Server) registerTools() {
 
 // --- arguments ---
 
-// commonArgs are the parameters every run-starting tool takes. They are embedded rather than repeated so
-// the strict decode below (which rejects unknown fields) sees exactly the union each tool declares.
+// commonArgs are the parameters shared by every mode.
 type commonArgs struct {
 	Purpose      string    `json:"purpose"`
 	Criteria     []string  `json:"criteria"`
 	PriorContext string    `json:"priorContext"`
 	Panel        *panelArg `json:"panel"`
-	// Canonicalizers names the two identities that propose the canonicalization — the MCP
-	// analogue of the CLI's repeatable `--canonicalizer` and ACP's `_meta.exploremesh.canonicalizers`. It is
-	// a SIBLING of `panel` rather than a member of it because it applies to every panel shape (default,
-	// profile, ad-hoc) and because canonicalization is a distinct role, not an explorer seat.
+	// Canonicalizers names the two canonicalizer identities, like the CLI's `--canonicalizer`.
+	// Canonicalization is a separate role, so it sits beside `panel` rather than inside it.
 	Canonicalizers []slot `json:"canonicalizers"`
 	WaitSeconds    *int   `json:"waitSeconds"`
-	// MaxParallel bounds how many of this run's explorers invoke their model CLI AT ONCE. Omitted,
-	// the whole panel runs in parallel. It is a PER-CALL parameter and not a launch flag because the
-	// right number is a fact about the machine the CLIs run on — resident memory for a cloud CLI,
-	// loaded weights for a local model — and about the caller's provider rate limits, none of which
-	// this server can see. It bounds parallelism only: every explorer still answers.
+	// MaxParallel bounds how many explorers run at once; omitted, the whole panel runs in parallel.
 	MaxParallel *int `json:"maxParallel"`
-	// DryRun resolves everything and spends nothing, answering with `dryRun: true` and a `shape` block
-	// instead of a result. It is the same pre-spend disclosure the CLI's --dry-run prints, and it stops at
-	// the same place: BEFORE the identity pre-flight, which is an exploration's first model call.
+	// DryRun returns the run's shape instead of running it, stopping before the first model call.
 	DryRun bool `json:"dryRun"`
-	// VerifyReadiness asks every distinct agent the panel names whether it can do real work before the
-	// run dispatches anything. It SPENDS one bounded call per agent; dryRun prices those calls.
+	// VerifyReadiness makes one bounded call per distinct agent before the run starts.
 	VerifyReadiness bool   `json:"verifyReadiness"`
 	IdempotencyKey  string `json:"idempotencyKey"`
 }
@@ -329,10 +285,8 @@ type axisArg struct {
 	Weight    float64 `json:"weight"`
 }
 
-// exploreArgs is the decode target for the single run-starting tool: the union of every mode's
-// parameters. Which of them a given call may actually carry is decided by its `mode` and enforced in
-// applyMode — the union here is a decoding convenience, never a statement that any combination is
-// legal.
+// exploreArgs is the decode target for the explore tool: the union of every mode's parameters. applyMode
+// enforces which ones a given mode accepts.
 type exploreArgs struct {
 	commonArgs
 	Mode              string    `json:"mode"`
@@ -345,13 +299,8 @@ type exploreArgs struct {
 	ConditioningEvent string    `json:"conditioningEvent"`
 }
 
-// decodeArgs strictly decodes one run-starting call. Strict decoding is what makes
-// `additionalProperties: false` a real boundary: a schema is advisory to a client, so a server that
-// trusted it would accept a misspelled field and run something the caller did not ask for.
-//
-// One tool takes every mode, so the decode target is the union of every mode's parameters, and the
-// refusal of a parameter that belongs to a DIFFERENT mode is an explicit per-mode check — applyMode does it, and refuses rather than
-// ignores. Losing it silently is the failure this comment exists to prevent.
+// decodeArgs decodes an explore call's arguments, rejecting unknown fields so a misspelled parameter is an
+// error rather than ignored. Parameters belonging to a different mode are refused later by applyMode.
 func decodeArgs(tool string, args json.RawMessage) (*exploreArgs, error) {
 	if tool != "explore" {
 		return nil, proto.InvalidParams("invalid params: %s does not take exploration arguments", tool)
@@ -371,23 +320,15 @@ func decodeArgs(tool string, args json.RawMessage) (*exploreArgs, error) {
 	return &out, nil
 }
 
-// applyMode is the single run-starting tool's mode dispatch: it validates the mode, enforces the
-// per-mode input contract, and maps the arguments onto the raw task.
-//
-// It enforces BOTH directions, because only one of them is obvious. A missing required input is the
-// expected error. A parameter belonging to a DIFFERENT mode is the dangerous one: accepted-and-
-// ignored, a caller who passes `artifact` to a `map` run gets a successful result and believes their
-// artifact was reviewed. A strict decode cannot catch it, because the decode target is the union of
-// every mode's parameters, so the check is stated here.
-//
-// The rules come from modeInputRules, the same table the schema is generated from.
+// applyMode validates the mode, enforces its input rules and copies the arguments onto the raw task. It
+// refuses both a missing required input and a parameter that belongs to a different mode, which would
+// otherwise be silently ignored. The rules come from modeInputRules, which also generates the schema.
 func applyMode(a *exploreArgs, r *schema.RawTask) error {
 	r.Mode = strings.TrimSpace(a.Mode)
 	if _, ok := mode.Lookup(r.Mode); !ok {
 		return proto.InvalidParams("invalid params: unknown mode %q (known: %s)", a.Mode, strings.Join(allModes, ", "))
 	}
 
-	// Refuse any mode-specific parameter this mode does not take, naming the mode that does.
 	allowed := allowedFor(r.Mode)
 	supplied := map[string]bool{
 		"artifact":          strings.TrimSpace(a.Artifact) != "",
@@ -444,8 +385,7 @@ func applyMode(a *exploreArgs, r *schema.RawTask) error {
 	case mode.Forecast:
 		r.Target, r.Unit, r.Horizon = strings.TrimSpace(a.Target), strings.TrimSpace(a.Unit), strings.TrimSpace(a.Horizon)
 		r.ConditioningEvent = strings.TrimSpace(a.ConditioningEvent)
-		// Ordered, not a map range: a map would report a random one of several missing fields, so two
-		// identical calls could blame different parameters.
+		// A slice keeps the reported missing field deterministic.
 		for _, f := range []struct {
 			name, val string
 		}{{"target", r.Target}, {"unit", r.Unit}, {"horizon", r.Horizon}} {
@@ -457,14 +397,11 @@ func applyMode(a *exploreArgs, r *schema.RawTask) error {
 	return nil
 }
 
-// ownerOf names the mode a mode-specific parameter belongs to, so a refusal can point somewhere
-// rather than only say no.
+// ownerOf returns the mode that uses a mode-specific parameter, or "".
 func ownerOf(prop string) string {
 	for m, rule := range modeInputRules {
-		for _, p := range append(append([]string{}, rule.requires...), rule.permits...) {
-			if p == prop {
-				return m
-			}
+		if slices.Contains(append(append([]string{}, rule.requires...), rule.permits...), prop) {
+			return m
 		}
 	}
 	return ""
@@ -495,8 +432,6 @@ func (s *Server) exploreHandler(tool string, apply func(*exploreArgs, *schema.Ra
 		if err := task.Validate(); err != nil {
 			return nil, proto.InvalidParams("invalid params: %v", err)
 		}
-		// The MODE's own task requirement, checked before the panel is touched so a missing declaration
-		// costs nothing.
 		if err := mode.ValidateTask(task.Mode, task); err != nil {
 			return nil, proto.InvalidParams("invalid params: %v", err)
 		}
@@ -504,8 +439,6 @@ func (s *Server) exploreHandler(tool string, apply func(*exploreArgs, *schema.Ra
 		if perr != nil {
 			return nil, perr
 		}
-		// The CANONICALIZER identities, resolved with the panel and BEFORE admission: same fail-closed
-		// posture, same compose-not-configure rule, and no spend on either side of the refusal.
 		if len(args.Canonicalizers) > 0 {
 			cs, cerr := s.resolveCanonicalizers(args.Canonicalizers)
 			if cerr != nil {
@@ -521,8 +454,7 @@ func (s *Server) exploreHandler(tool string, apply func(*exploreArgs, *schema.Ra
 				return nil, proto.InvalidParams("invalid params: waitSeconds must be between 1 and %d (got %d) — it is the INLINE budget, not the run's own timeout; a longer run is fetched with explore_run_result", MaxWaitSeconds, wait)
 			}
 		}
-		// maxParallel is refused rather than clamped: a caller who asked to run two explorers at a
-		// time because that is what their machine can host must not silently get the whole panel.
+		// An invalid maxParallel is refused rather than clamped.
 		maxParallel := 0
 		if args.MaxParallel != nil {
 			maxParallel = *args.MaxParallel
@@ -534,15 +466,10 @@ func (s *Server) exploreHandler(tool string, apply func(*exploreArgs, *schema.Ra
 	}
 }
 
-// startRun admits, launches and inline-waits for one run. dryRun stops it before the first model call and
-// answers with the shape instead of a result.
+// startRun admits and launches one run, then waits up to wait seconds for it inline.
 func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task schema.RawTask, pick panelPick, wait, maxParallel int, dryRun, verifyReadiness bool, key string) (*proto.CallToolResult, error) {
-	// IDEMPOTENCY first, before any admission accounting: a retry after a dropped connection must return
-	// the ORIGINAL run, not a second panel billed to the same person for the same question.
+	// A retry with the same idempotency key returns the original run instead of starting another.
 	if prior := s.runs.existing(key); prior != nil {
-		// A still-running prior run is handed back as a TASK to a client that declared the tasks
-		// extension, and as the job shape to everyone else — the retry gets whatever the original
-		// call would now get.
 		if taskHandOff(c, prior) {
 			return nil, nil
 		}
@@ -556,18 +483,13 @@ func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task 
 		structured, text := refusalResult("", aerr)
 		return proto.ErrorResult(text, structured), nil
 	}
-	// The panel echo is attached to the RECORD, not just to this response, so a later explore_run_status /
-	// explore_run_result can answer "which panel is this?" while the run is still in flight.
+	// The panel echo lives on the record so status polls can report it while the run is in flight.
 	rec.attachPick(pick)
 
-	// The caller's trace context, taken ONCE here, from the request that started the run. It is not
-	// read later from the live Call: a run that outlives its inline budget still belongs to the trace
-	// of the request that paid for it, and re-reading would attach whichever request happened to be in
-	// scope when the goroutine got there.
+	// The trace context comes from the request that started the run, even if the run outlives it.
 	trace := traceOf(c)
 
-	// The progress sink is live only for the INLINE wait: a progress notification is correlated to the
-	// request that supplied the token, and this call is the only request that did.
+	// Progress is reported only during the inline wait, since it is tied to this request's token.
 	var sink atomic.Pointer[proto.Call]
 	sink.Store(c)
 	onEvent := func(ev audit.EventLine) {
@@ -576,8 +498,7 @@ func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task 
 				live.Progress(f, 1, ev.Message)
 			}
 		}
-		// Logging is session-level and BEST-EFFORT BY CONTRACT: it is dropped below the client's level
-		// and nothing here is the only carrier of a governance fact — the run record and the result are.
+		// Logging is best-effort; the run record and result carry every governance fact.
 		c.Log(logLevelFor(ev.Level), "exploremesh", map[string]any{
 			"runId": runID, "eventType": ev.EventType, "message": ev.Message,
 		})
@@ -592,10 +513,7 @@ func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task 
 		tctx, tcancel := context.WithTimeout(runCtx, budget)
 		defer tcancel()
 		out, rerr := s.Explorer.Run(tctx, pick.plan, task, pipeline.Options{MaxParallel: maxParallel, DryRun: dryRun, VerifyReadiness: verifyReadiness}, onEvent)
-		// A dry run is NOT captured. A run directory records an exploration — envelopes, raw model outputs,
-		// prompts, a manifest — and a dry run produced none of them; writing one would put a record of an
-		// exploration nobody performed next to the records of ones that happened. The CLI refuses
-		// `--dry-run --dump-run` for the same reason.
+		// A dry run performs no exploration, so it writes no run record.
 		capturedID := ""
 		if !dryRun {
 			capturedID = s.dump(auditRun, pick.plan, task, out, rerr, trace)
@@ -626,26 +544,17 @@ func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task 
 		}
 		return s.payloadFor(rec), nil
 	case <-timer.C:
-		// JOB SHAPE: hand back the run id rather than holding a request open past the client's timeout,
-		// where it would be killed mid-spend with the panel still running.
+		// Return the run id rather than hold the request open past the client's timeout. A client that
+		// declared the tasks extension receives a CreateTaskResult for the same run instead.
 		sink.Store(nil)
-		// THE ONE PLACE THE TASKS EXTENSION CHANGES A `tools/call` ANSWER: a client that declared
-		// `io.modelcontextprotocol/tasks` receives a `CreateTaskResult` for the SAME run id; a
-		// client that did not receives the identical bytes it always did.
 		if taskHandOff(c, rec) {
 			return nil, nil
 		}
 		structured, text := runningResult(rec, pick, wait)
 		return proto.Result(text, structured), nil
 	case <-ctx.Done():
-		// The CLIENT cancelled (or the session went away). Kill the run: a cancelled call must not keep
-		// spending, and it must not commit anything afterwards. The receipt is the run record on disk —
-		// the response a cancelled call never gets is not the only place the outcome exists.
-		//
-		// The payload is the CANCELLED shape, not the running shape with a different `state`: it carries
-		// the taxonomy (`haltClass`/`reasonCode`) a client branches on, and it satisfies the `cancelled`
-		// branch of the declared outputSchema. Overwriting `state` on the running shape produced a
-		// payload that matched no branch at all.
+		// The client cancelled: stop the run. The payload carries haltClass and reasonCode so it matches
+		// the cancelled branch of the output schema.
 		sink.Store(nil)
 		cancel()
 		structured, text := runningResult(rec, pick, wait)
@@ -655,9 +564,8 @@ func (s *Server) startRun(ctx context.Context, c *proto.Call, tool string, task 
 	}
 }
 
-// newRun mints the run id. When capture is on, the id IS the audit run directory's name, so the wire id
-// and the on-disk record are the same identifier — a run id that did not name its own audit record would
-// make the record unfindable from the only handle the caller has.
+// newRun creates a run id. With capture on, the id is the audit run directory's name, so the caller's
+// handle also names the on-disk record.
 func (s *Server) newRun() (string, *audit.Run) {
 	if !s.DisableCapture {
 		if run, err := audit.NewRun(capture.ArtifactDir(), "", time.Now()); err == nil {
@@ -673,14 +581,9 @@ func (s *Server) newRun() (string, *audit.Run) {
 	return "run-" + hex.EncodeToString(b[:]), nil
 }
 
-// traceOf lifts the caller's W3C trace context off a request's protocol context into the run record's
-// own shape. It returns nil when the caller sent none, which is every legacy-era request: the three
-// keys are a `2026-07-28` `_meta` convention and the legacy env never fills them.
-//
-// The values are carried VERBATIM and never validated. `basic/index` §`_meta` says of every reserved
-// key that "implementations MUST NOT make assumptions about values at these keys"; the W3C-format MUST
-// on the same page binds the sender, so refusing a malformed `traceparent` here would be this server
-// asserting a meaning for a field it does not own.
+// traceOf returns the caller's W3C trace context for the run record, or nil if the request carried none
+// (as legacy-era requests never do). The values are copied as sent: the MCP specification says servers
+// must not make assumptions about reserved `_meta` values.
 func traceOf(c *proto.Call) *capture.TraceContext {
 	if c == nil {
 		return nil
@@ -689,8 +592,8 @@ func traceOf(c *proto.Call) *capture.TraceContext {
 	return capture.NewTraceContext(t.TraceParent, t.TraceState, t.Baggage)
 }
 
-// dump writes the run record (on BOTH the success and the halt path — a halted run is the fixture most
-// worth keeping) and returns the captured run id, or "" when nothing was written.
+// dump writes the run record for a completed or halted run and returns its id, or "" if nothing was
+// written.
 func (s *Server) dump(run *audit.Run, plan roster.Plan, task schema.RawTask, out pipeline.Result, rerr error, trace *capture.TraceContext) string {
 	if run == nil {
 		return ""
@@ -709,15 +612,9 @@ func (s *Server) dump(run *audit.Run, plan roster.Plan, task schema.RawTask, out
 	return run.ID
 }
 
-// publishRunArtifacts exposes a captured run's files as MCP resources.
-//
-// The set is taken from the run's OWN MANIFEST rather than by walking the directory: the manifest is the
-// index the capture layer wrote, with each artifact's run-relative path, size and digest, so what is
-// published is exactly what was recorded — and the recorded digest is re-verified on every fetch. Walking
-// instead would publish whatever happened to be in the directory, which is a different (and looser) claim.
-//
-// Nothing here reaches the wire but the manifest's own logical names. The run directory is held privately
-// by the store; a resource URI is `aimesh://run/<runId>/<name>`.
+// publishRunArtifacts publishes a captured run's files as MCP resources named
+// `aimesh://run/<runId>/<name>`. The file set and digests come from the run's manifest rather than a
+// directory walk, and each digest is re-verified on fetch. No path reaches the wire.
 func (s *Server) publishRunArtifacts(run *audit.Run) {
 	b, err := workspace.ReadUnder(run.Dir, manifestFile, 0)
 	if err != nil {
@@ -755,10 +652,8 @@ func (s *Server) publishRunArtifacts(run *audit.Run) {
 // manifestFile is the capture layer's index file, run-relative.
 const manifestFile = "manifest.json"
 
-// artifactResourceName turns a run-relative artifact PATH into the single path-free token a resource URI
-// addresses: `calls/explorer-1.json` → `calls.explorer-1`. A URI segment is an identifier, so the layout
-// is folded away rather than published; the mapping is deterministic, which is what lets a caller read a
-// name in `resources/list` and use it unchanged.
+// artifactResourceName maps a run-relative artifact path to a resource name, for example
+// `calls/explorer-1.json` to `calls.explorer-1`. It returns "" for an empty or unsafe path.
 func artifactResourceName(rel string) string {
 	rel = strings.TrimSpace(strings.ReplaceAll(rel, `\`, "/"))
 	rel = strings.TrimSuffix(rel, filepath.Ext(rel))
@@ -787,9 +682,7 @@ func (s *Server) payloadFor(rec *record) *proto.CallToolResult {
 	state, structured, text, isErr := rec.snapshot()
 	if state == StateRunning {
 		out := map[string]any{"runId": rec.ID, "state": StateRunning, "tool": rec.Tool, "mode": rec.Mode}
-		// The panel echo is REQUIRED on the running branch, and it is knowable from admission — the
-		// requested half always, the executed half from the frozen plan. Omitting it here made
-		// `explore_run_result` on a still-running exploration emit a payload its own declared schema rejected.
+		// The output schema requires the panel echo on the running branch too.
 		out["panel"] = rec.pickSnapshot().echo(nil)
 		return proto.Result(fmt.Sprintf("Run %s is still running. Poll explore_run_status, then fetch explore_run_result.", rec.ID), out)
 	}
@@ -821,9 +714,8 @@ func decodeRunID(args json.RawMessage) (string, error) {
 	return strings.TrimSpace(a.RunID), nil
 }
 
-// unknownRun is the refusal for a run id this server cannot resolve. It rides `isError` rather than a
-// protocol error because it is something the CALLING MODEL has to react to (re-run, or stop asking), and
-// because an expired run is a legitimate outcome of the retention bound rather than a malformed request.
+// unknownRun returns the isError result for a run id this server cannot resolve. An expired run is a
+// normal outcome of retention, not a malformed request.
 func unknownRun(id string) *proto.CallToolResult {
 	err := fault.New(fault.Usage, fmt.Sprintf(
 		"unknown or expired runId %q — finished runs are retained for a bounded time and count. If you still need the answer, start a new run.", id)).
@@ -888,10 +780,8 @@ func elapsed(rec *record) float64 {
 
 // --- progress + logging mapping ---
 
-// phaseFraction maps a pipeline event to the FRACTION OF PHASES complete. It is deliberately a fixed
-// ladder over named phases rather than a per-item counter: a counter that resets when a phase is retried
-// goes backwards, and a client that sees progress go backwards cannot tell a retry from a bug. Events
-// that are not phase boundaries (a citation tally, a drop) move nothing — they are logged, not counted.
+// phaseFraction maps phase-boundary pipeline events to a progress fraction. Fixed values keep progress
+// monotonic; other events are logged but do not move progress.
 var phaseFraction = map[string]float64{
 	"panel_frozen":        0.10,
 	"formulate_start":     0.15,

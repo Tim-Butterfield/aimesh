@@ -92,29 +92,6 @@ func TestDescriptionDisplay(t *testing.T) {
 	}
 }
 
-func TestEditProfileLane_BlocksHigherLayerShadowedProfile(t *testing.T) {
-	m := mutMgr(t)
-	// A project-layer config defines the profile; a user-layer lane write would be shadowed by it.
-	m.Cfg.Profiles["projprof"] = config.Profile{Lanes: map[string]config.Lane{
-		"reviewer": {Execution: "adapter", Adapter: "codex-cli", Model: "codex-cli-default"},
-	}}
-	projPath := filepath.Join(t.TempDir(), "project.yaml")
-	projRaw, _ := json.Marshal(map[string]any{"schemaVersion": 1, "profiles": map[string]any{
-		"projprof": map[string]any{"lanes": map[string]any{"reviewer": map[string]any{"execution": "adapter", "adapter": "codex-cli", "model": "codex-cli-default"}}},
-	}})
-	if err := os.WriteFile(projPath, projRaw, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m.Layers.ProjectPath, m.Layers.ProjectLoaded = projPath, true
-	_, err := m.EditProfileLane("projprof", "reviewer", "codex-cli", LaneChoiceInput{Source: "adapter_default"}, nil)
-	if err == nil {
-		t.Fatal("editing a profile defined in a higher (project) layer must be blocked, not silently shadowed")
-	}
-	if !strings.Contains(err.Error(), "shadowed") {
-		t.Errorf("block reason should explain shadowing: %v", err)
-	}
-}
-
 func TestModelKeyCleanup_RenamesUserLayerGeneratedKey(t *testing.T) {
 	m := mutMgr(t)
 	const oldKey = "codex-cli-gpt-5.5-high"

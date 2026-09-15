@@ -318,7 +318,7 @@ func (d deadCollator) Invoke(ctx context.Context, c model.Call) (model.Result, e
 // splitNonEmptyLines splits s on newlines and drops empty trailing lines.
 func splitNonEmptyLines(s string) []string {
 	var out []string
-	for _, ln := range strings.Split(s, "\n") {
+	for ln := range strings.SplitSeq(s, "\n") {
 		if strings.TrimSpace(ln) != "" {
 			out = append(out, ln)
 		}

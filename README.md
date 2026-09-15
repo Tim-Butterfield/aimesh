@@ -191,7 +191,7 @@ and how to read agreement, identity and scope honestly.
 The workspace spans several Go modules, so build/test go through workspace-aware `make` targets rather than a single root `go build ./...`:
 
 ```bash
-make gate         # fmt + vet + build-all + test-all + race-all + boundary-check + both golden runs
+make gate         # fmt + vet + staticcheck + build-all + test-all + race-all + boundary-check + both golden runs
 ```
 
 Individual targets: `make build-all`, `make test-all`, `make boundary-check` (enforces the meshcore import boundary), `make golden-run` / `make golden-run-exploremesh` (assert each domain's behavior is unchanged against a golden fixture), `make windows-build` (cross-compile for `GOOS=windows`; not part of the gate). See **[CONTRIBUTING.md](CONTRIBUTING.md)**.

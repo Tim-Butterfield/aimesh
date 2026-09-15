@@ -32,8 +32,8 @@ type Candidate struct {
 }
 
 // DetectACPArgs runs `<bin> --help` and scans its output for the flag that starts the CLI's ACP server
-// over stdio. Best-effort ORDERING HINT only — returns nil when it can't tell; ValidateCandidate always
-// verifies with a real handshake and falls back to the candidate set.
+// over stdio. It is only an ordering hint and returns nil when it cannot tell; ValidateCandidate always
+// verifies with a real handshake.
 func DetectACPArgs(ctx context.Context, bin string) []string {
 	l := strings.ToLower(runHelp(ctx, bin))
 	switch {
@@ -50,14 +50,9 @@ func DetectACPArgs(ctx context.Context, bin string) []string {
 // helpTimeout bounds a `--help` probe when the caller supplied no deadline of its own.
 const helpTimeout = 5 * time.Second
 
-// runHelp captures `<bin> --help` (stdout+stderr, hardened env, bounded). Exit code is ignored —
-// many CLIs print help to stderr and/or exit non-zero.
-//
-// A caller-supplied deadline is respected as-is; helpTimeout applies only when there is none.
-// Clamping to 5s unconditionally would leave a caller no way to allow more time — and on a loaded
-// machine a trivial `--help` that blew the 5s budget returns EMPTY output, which the heuristic reads as
-// "this CLI exposes no ACP flag" rather than "the probe did not finish". A detection failure that
-// masquerades as a negative result is worse than a slow probe.
+// runHelp captures `<bin> --help` (stdout and stderr, hardened environment, bounded), ignoring the exit
+// code, since many CLIs print help to stderr or exit non-zero. A caller's deadline is respected;
+// helpTimeout applies only without one, because output cut off by a timeout would read as "no ACP flag".
 func runHelp(ctx context.Context, bin string) string {
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
@@ -141,18 +136,15 @@ func (a *Adapter) probeModel(ctx context.Context) (string, error) {
 	return stripParams(s.sn.Models.CurrentModelID), nil
 }
 
-// DiscoveryMechanism implements model.Lister: an ACP adapter discovers its models from the list the
-// session advertises in its `session/new` result (availableModels). Kind "acp" so the UI labels it
-// honestly (a live handshake, not a bundled/offline catalog).
+// DiscoveryMechanism implements model.Lister: models come from the `availableModels` a session advertises
+// in its `session/new` result. Kind "acp" marks a live handshake rather than an offline catalog.
 func (a *Adapter) DiscoveryMechanism() (command, kind string) {
 	return "ACP session/new availableModels", "acp"
 }
 
-// ListModels implements model.Lister for a configured ACP adapter: it opens a session
-// (initialize → session/new) against a throwaway workspace, reads the models the session advertises,
-// and shuts the child down. This is METADATA ONLY — no prompt is sent, no model is invoked, no tokens
-// are spent (the same session-open probeModel uses). A session that advertises no selectable models
-// returns an error so the editor guides the user to manual entry rather than showing an empty list.
+// ListModels implements model.Lister by opening a session against a throwaway workspace and reading the
+// models it advertises; no prompt is sent. An empty list is an error, so the user is guided to enter a
+// model manually.
 func (a *Adapter) ListModels(ctx context.Context) ([]model.DiscoveredModel, error) {
 	models, err := a.probeModels(ctx)
 	if err != nil {

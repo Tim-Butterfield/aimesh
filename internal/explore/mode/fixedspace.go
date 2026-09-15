@@ -1,24 +1,15 @@
 package mode
 
-// This file holds the FIXED-SPACE terminal contract (compare and forecast) — the
-// third and last terminal seam, alongside the plain CollatorContract and the CanonicalizingContract.
+// This file defines the fixed-space terminal contract used by compare and forecast. The user declares the
+// space before the fan-out, so the host computes the whole result from the blind round and the collator
+// only adds prose:
 //
-// It exists because the fixed-space modes invert the usual order of operations. In every other mode the
-// panel's answers are shaped by a model step (a collate, or a canonicalize+confirm) before the host can
-// count anything. Here the space was declared by the USER before the fan-out, so the moment the blind round
-// returns, the host can compute the entire result — matrix, agreement, Pareto, pooled estimate, dispersion,
-// outliers — with no model in the loop at all.
+//	Aggregate      the host computes every number and claim from the blind envelopes
+//	CollatorPrompt the collator is shown the finished values and asked for prose
+//	ParseNarrative the collator's output goes only into collatorNarrative
+//	Collate        the output is assembled from the host view and that prose
 //
-// So the contract is deliberately shaped to make the collator's remaining job small and unmistakable:
-//
-//	Aggregate      the HOST computes every number and every claim, from the recorded blind envelopes
-//	CollatorPrompt the collator is shown those numbers AS FINISHED VALUES and asked for prose only
-//	ParseNarrative the collator's output is read ONLY into the quarantined collatorNarrative namespace
-//	Collate        the terminal output is assembled from the host view + that prose
-//
-// There is no method here through which a model could return a number that reaches the result. That is the
-// point: a machine governance field carries host-produced values only, and in a fixed-space
-// mode that rule can be enforced by the shape of the contract rather than by a review of the prompt.
+// No method returns a model-produced number into the result.
 
 import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/govern"
@@ -26,57 +17,41 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// FixedSpaceInput is the record a fixed-space aggregation may read: the RAW TASK (which is where the
-// declared space lives — the option set, the criteria, the estimation target), the immutable blind round-1
-// baseline, the recorded rounds, the frozen panel, and the formulation hash every claim pins itself to.
-// Every field is a host artifact or a user declaration; there is nothing here a model authored except the
-// envelope contents, which is exactly the material being measured.
+// FixedSpaceInput is what a fixed-space aggregation reads: the raw task holding the declared space, the
+// blind baseline, the rounds, the panel and the formulation hash.
 type FixedSpaceInput struct {
 	Raw      schema.RawTask
 	Baseline govern.BlindBaseline
-	// Primary is the verified, non-abstaining panel the aggregation reads (the same primary panel a plain
-	// collate receives).
+	// Primary is the verified, non-abstaining panel.
 	Primary []schema.Envelope
 	Rounds  []round.Round
 	Panel   govern.Panel
-	// FormulationHash is the hash of the byte-identical payload every explorer received — pinned on each
-	// emitted claim, so a count is always tied to the exact question that produced it.
+	// FormulationHash is the hash of the payload every explorer received, pinned on each claim.
 	FormulationHash string
 }
 
-// FixedSpaceView is a mode's HOST-COMPUTED aggregate plus the claims the host must record for it. Value is
-// the mode's own concrete structure (Compare → govern.CompareMatrix, Forecast → the pooled estimate), kept
-// opaque to the pipeline: the pipeline's job is to record the claims and carry the value to the terminal
-// collation, not to understand either.
+// FixedSpaceView is a mode's host-computed aggregate and the claims to record for it. Value is
+// mode-specific and opaque to the pipeline.
 type FixedSpaceView struct {
 	Value  any
 	Claims []govern.Claim
 }
 
-// FixedSpaceContract is a mode's app-owned FIXED-SPACE terminal behavior.
-// The pipeline resolves it from ModeSpec.FixedSpace and drives the four steps in the order documented at
-// the top of this file. It is mutually exclusive with Collator and Canonicalizing — a mode sets exactly one.
+// FixedSpaceContract is a fixed-space mode's terminal behavior, set in ModeSpec.FixedSpace. A mode sets
+// exactly one of Collator, Canonicalizing and FixedSpace.
 type FixedSpaceContract interface {
-	// Aggregate performs the HOST arithmetic over the recorded blind round-1 envelopes and returns the mode's
-	// view plus the governance claims to record. It runs BEFORE the collator is prompted, so every number in
-	// the result predates the only model call left in the run.
+	// Aggregate computes the mode's view and claims from the blind round-1 envelopes, before the collator
+	// runs.
 	Aggregate(in FixedSpaceInput) (FixedSpaceView, error)
-	// CollatorPrompt renders the terminal collation instruction over the ALREADY-COMPUTED view. A contract
-	// implements it by showing the host's numbers and asking for narrative — never for a recomputation, a
-	// re-ranking or a "corrected" aggregate.
+	// CollatorPrompt builds the collator prompt over the computed view, asking for narrative only.
 	CollatorPrompt(in FixedSpaceInput, view FixedSpaceView) (string, error)
-	// ParseNarrative lifts the collator's raw output into the quarantined collatorNarrative namespace,
-	// attributed to the collator identity. It returns ONLY prose: there is no path from these bytes
-	// into a governance value.
+	// ParseNarrative converts the collator's output into narrative attributed to by.
 	ParseNarrative(raw []byte, by schema.ExplorerIdentity) ([]govern.Narrative, error)
-	// Collate assembles the terminal ModeOutput from the host view + the parsed narrative. It is a pure view
-	// assembly — it computes nothing the Aggregate step did not already compute.
+	// Collate assembles the ModeOutput from the view and narrative without computing anything new.
 	Collate(in FixedSpaceInput, view FixedSpaceView, narrative []govern.Narrative) (ModeOutput, error)
 }
 
-// fixedSpaceCollatorPreamble is the shared, host-authored opening of every fixed-space collator prompt. It
-// is a constant rather than per-mode prose for the same reason the untrusted-data preamble is: the
-// instruction that the numbers are final must be identical in every mode, and a test can assert on it.
+// fixedSpaceCollatorPreamble opens every fixed-space collator prompt.
 const fixedSpaceCollatorPreamble = "You are the COLLATOR. Everything below was computed by the HOST from " +
 	"the panel's recorded blind responses under published, versioned rules. It is FINAL. Do NOT recompute, " +
 	"re-aggregate, re-rank, average, round, correct or override any number, ordering or label in it — any " +

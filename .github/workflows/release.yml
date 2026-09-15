@@ -1,11 +1,10 @@
-# A release is cut by pushing a `v*` tag. The workflow re-runs the full gate on the tagged
-# commit, builds the archives with the same script `make dist` uses locally, smokes the
-# host archive, attests provenance for every artifact, and publishes the GitHub Release.
+# A release is cut by pushing a `v*` tag. The workflow re-runs the gate on the tagged commit,
+# builds the archives with the script `make dist` uses, smokes the host archive, attests
+# provenance for every artifact, and publishes the GitHub Release.
 #
-# What a consumer can verify from this: `gh attestation verify <archive> --owner Tim-Butterfield`
-# proves the archive was built by THIS workflow from THAT commit, on GitHub's runners. Builds
-# are `-trimpath` with CGO disabled and a pinned Go toolchain, so rebuilding the tag locally
-# reproduces the same bytes.
+# `gh attestation verify <archive> --owner Tim-Butterfield` proves an archive was built by this
+# workflow from the tagged commit. Builds use -trimpath, CGO disabled and a pinned Go toolchain,
+# so rebuilding the tag locally reproduces the same bytes.
 name: Release
 
 on:

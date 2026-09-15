@@ -14,21 +14,17 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the LIVE legacy `roots/list` round trip, end to end over the wire: a client that declares
-// the capability, answers the request, and changes its mind.
+// These tests run the legacy roots/list round trip over the wire. A declared path must lie inside the
+// operator's --root ceiling and inside the client's roots:
 //
-// A path a call declares must lie inside the operator's --root ceiling AND inside the roots the client
-// declared:
-//
-//   - a client that NARROWS is honored;
-//   - a client that offers a WIDER root does NOT widen anything;
-//   - a DISJOINT client leaves no path admissible;
+//   - a client that narrows is honored;
+//   - a client offering a wider root widens nothing;
+//   - a disjoint client leaves no path admissible;
 //   - a client that declares nothing changes nothing;
-//   - a client that never answers changes nothing, and does not wedge the server.
+//   - a client that never answers changes nothing and does not block the server.
 
-// rootedClient is the reviewmesh driving client that also ANSWERS server→client requests. It reads
-// continuously in its own goroutine, because the answer to the server's request travels back through the
-// same stream its own responses do.
+// rootedClient drives the server and also answers server-to-client requests. It reads continuously on
+// its own goroutine, since answers share the stream with responses.
 type rootedClient struct {
 	f proto.Framer
 
@@ -89,7 +85,7 @@ func (c *rootedClient) call(t *testing.T, method string, params any) *response {
 	}
 }
 
-// tool is the same convenience the other tests use, over this client.
+// tool calls a tool on this client, like the helper the other tests use.
 func (c *rootedClient) tool(t *testing.T, name string, args map[string]any) toolResult {
 	t.Helper()
 	resp := c.call(t, "tools/call", map[string]any{"name": name, "arguments": withPanel(name, args)})
@@ -140,11 +136,10 @@ func (c *rootedClient) readLoop(answer bool) {
 				rows = append(rows, map[string]any{"uri": pathURI(p), "name": filepath.Base(p)})
 			}
 			out := map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(probe.ID), "result": map[string]any{"roots": rows}}
-			// Off the read loop: over a synchronous pipe an inline answer would stop this client
-			// reading while the server is itself mid-write.
+			// Answer off the read loop: over a synchronous pipe an inline write could deadlock with the server.
 			go c.write(out)
 		case len(probe.ID) == 0:
-			// a notification
+			// A notification.
 		default:
 			var got int
 			var resp response
@@ -170,8 +165,8 @@ func pathURI(p string) string {
 	return "file://" + p
 }
 
-// serveRooted starts the server and completes the handshake with a client that declares the `roots`
-// capability (unless declare is false) and answers with `roots` (unless answer is false).
+// serveRooted starts the server and completes the handshake with a client that declares the roots
+// capability (unless declare is false) and answers with roots (unless answer is false).
 func serveRooted(t *testing.T, s *mcp.Server, declare, answer bool, roots []string) *rootedClient {
 	t.Helper()
 	sr, cw := io.Pipe()
@@ -201,8 +196,7 @@ func serveRooted(t *testing.T, s *mcp.Server, declare, answer bool, roots []stri
 	return c
 }
 
-// eventually polls a condition. The roots round trip is asynchronous by construction — the answer arrives
-// through the read loop — so asserting the moment after `notifications/initialized` would assert a race.
+// eventually polls cond; the roots answer arrives asynchronously.
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -214,17 +208,12 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// settleRoots waits for the server to have asked at least `n` times and for the answer to have been
-// installed.
-//
-// It deliberately does NOT poll by calling a tool. A `review_report` on an in-root path STARTS A RUN,
-// and spending a panel per poll to observe a roots handshake is a cost this test has no reason to
-// pay — nor should a roots assertion depend on how a run happens to complete.
+// settleRoots waits until the server has asked at least n times and installed the answer. It does not
+// poll with a tool call, which would start a run.
 func settleRoots(t *testing.T, c *rootedClient, n int) {
 	t.Helper()
 	eventually(t, "the server to have issued roots/list", func() bool { return c.asks() >= n })
-	// The answer is written off the client's read loop and applied by the server's own goroutine; both
-	// are in-process, so this is a settle, not a race window being papered over.
+	// Both sides are in-process, so a short settle suffices.
 	time.Sleep(250 * time.Millisecond)
 }
 
@@ -237,8 +226,7 @@ func mkdirs(t *testing.T, dirs ...string) {
 	}
 }
 
-// A client that declares a SUBDIRECTORY of the server's root narrows the server to it. This is the half
-// the intersection rule exists to permit — and until the transport could ask, it never happened.
+// A client declaring a subdirectory of the server's root narrows the server to it.
 func TestLiveRoots_AClientThatOffersASubsetNarrowsTheServer(t *testing.T) {
 	parent := t.TempDir()
 	sub, other := filepath.Join(parent, "sub"), filepath.Join(parent, "other")
@@ -256,9 +244,8 @@ func TestLiveRoots_AClientThatOffersASubsetNarrowsTheServer(t *testing.T) {
 	}
 }
 
-// The half that matters more. A client offering a WIDER root — the parent of the server's own, or an
-// unrelated tree alongside it — must not gain anything. Nothing in a request, and nothing in a
-// capability, widens what an operator authorized at launch.
+// A client offering a wider root, or an unrelated tree, gains nothing beyond the operator's launch
+// scope.
 func TestLiveRoots_AClientThatOffersAWiderRootWidensNothing(t *testing.T) {
 	parent := t.TempDir()
 	serverRoot, sibling := filepath.Join(parent, "project"), filepath.Join(parent, "sibling")
@@ -266,7 +253,7 @@ func TestLiveRoots_AClientThatOffersAWiderRootWidensNothing(t *testing.T) {
 	mkdirs(t, serverRoot, sibling)
 
 	rv := &fakeReviewer{}
-	// The client declares the PARENT of the server's root, plus a wholly unrelated tree.
+	// The client declares the parent of the server's root and an unrelated tree.
 	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{serverRoot} }),
 		true, true, []string{parent, elsewhere})
 
@@ -284,8 +271,7 @@ func TestLiveRoots_AClientThatOffersAWiderRootWidensNothing(t *testing.T) {
 	}
 }
 
-// Disjoint sets intersect to nothing, and nothing is fail-closed: every path is refused. This is the
-// case a union would have turned into "both", which is exactly the widening the rule forbids.
+// Disjoint sets intersect to nothing, so every path is refused.
 func TestLiveRoots_ADisjointClientLeavesNoEffectiveRootAndRefusesEverything(t *testing.T) {
 	serverRoot, clientRoot := t.TempDir(), t.TempDir()
 	rv := &fakeReviewer{}
@@ -300,8 +286,7 @@ func TestLiveRoots_ADisjointClientLeavesNoEffectiveRootAndRefusesEverything(t *t
 	}
 }
 
-// `notifications/roots/list_changed` carries no roots. The server must RE-ASK, or it keeps enforcing a
-// set the client has already changed.
+// notifications/roots/list_changed carries no roots, so the server must ask again.
 func TestLiveRoots_ListChangedRefetchesAndRenarrows(t *testing.T) {
 	parent := t.TempDir()
 	a, b := filepath.Join(parent, "a"), filepath.Join(parent, "b")
@@ -314,7 +299,7 @@ func TestLiveRoots_ListChangedRefetchesAndRenarrows(t *testing.T) {
 		t.Fatal("the client's first root set must have narrowed the server")
 	}
 
-	// The client moves its workspace. Nothing on the wire carries the new set except the re-fetch.
+	// The client moves its workspace; only the re-fetch carries the new set.
 	c.setRoots([]string{b})
 	c.notify("notifications/roots/list_changed", nil)
 	settleRoots(t, c, 2)
@@ -329,17 +314,14 @@ func TestLiveRoots_ListChangedRefetchesAndRenarrows(t *testing.T) {
 	}
 }
 
-// A client that declares no `roots` capability is never asked, and the server keeps exactly the roots its
-// operator launched it with. "Declares nothing ⇒ changes nothing" is the rule the whole round trip hangs
-// off: if it did not hold, adding the round trip would itself be a policy change.
+// A client without the roots capability is never asked, and the server keeps its launch roots.
 func TestLiveRoots_AClientDeclaringNoCapabilityChangesNothing(t *testing.T) {
 	parent := t.TempDir()
 	sub := filepath.Join(parent, "sub")
 	mkdirs(t, sub)
 
 	rv := &fakeReviewer{}
-	// The client would have declared a narrower root — but it never declares the capability, so it is
-	// never asked and its opinion never arrives.
+	// The client would declare a narrower root, but never declares the capability.
 	c := serveRooted(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling = []string{parent} }), false, true, []string{sub})
 	c.call(t, "tools/list", map[string]any{})
 	time.Sleep(150 * time.Millisecond)
@@ -352,8 +334,8 @@ func TestLiveRoots_AClientDeclaringNoCapabilityChangesNothing(t *testing.T) {
 	}
 }
 
-// A client that declares the capability and then never answers must cost the server a deadline, not its
-// root set and not its session.
+// A client that declares the capability but never answers costs a deadline, not the root set or
+// session.
 func TestLiveRoots_AClientThatNeverAnswersLeavesTheServerUnchangedAndServing(t *testing.T) {
 	root := t.TempDir()
 	rv := &fakeReviewer{}
@@ -362,9 +344,8 @@ func TestLiveRoots_AClientThatNeverAnswersLeavesTheServerUnchangedAndServing(t *
 	c := serveRooted(t, s, true, false, nil)
 
 	eventually(t, "the server to have asked", func() bool { return c.asks() > 0 })
-	// While the request is outstanding, and after it expires, the session keeps working and the roots
-	// are exactly what the operator set. (No settle here on purpose: the point is that nothing ever
-	// arrives to be settled.)
+	// The session keeps working with the operator's roots while the request is outstanding and after it
+	// expires.
 	if res := c.tool(t, "review_report", map[string]any{"workspace": root}); res.isError {
 		t.Fatalf("an unanswered roots/list must not disturb the server's own roots: %+v", res.structured)
 	}
@@ -374,8 +355,7 @@ func TestLiveRoots_AClientThatNeverAnswersLeavesTheServerUnchangedAndServing(t *
 	}
 }
 
-// A root URI that is not a local `file://` path is ignored rather than guessed at — and ignoring it must
-// not be mistaken for "the client declared nothing".
+// A non-file root URI is ignored, which is not the same as declaring nothing.
 func TestLiveRoots_ANonFileRootURIIsIgnoredAndTheIntersectionStaysClosed(t *testing.T) {
 	root := t.TempDir()
 	rv := &fakeReviewer{}
@@ -387,7 +367,7 @@ func TestLiveRoots_ANonFileRootURIIsIgnoredAndTheIntersectionStaysClosed(t *test
 	t.Cleanup(func() { _ = cw.Close(); <-done; _ = sw.Close() })
 
 	c := &rootedClient{f: proto.NewFramer(proto.FramingNewline, cr, cw)}
-	// A remote root: real in the protocol, but not a directory on this machine.
+	// A remote root: valid in the protocol, but not a local directory.
 	c.setRoots(nil)
 	go func() {
 		for {
@@ -438,7 +418,7 @@ func TestLiveRoots_ANonFileRootURIIsIgnoredAndTheIntersectionStaysClosed(t *test
 	}
 	c.notify("notifications/initialized", nil)
 	settleRoots(t, c, 1)
-	// No usable client root arrived, so nothing narrowed and — crucially — nothing widened.
+	// No usable client root arrived, so nothing narrowed and nothing widened.
 	if res := c.tool(t, "review_report", map[string]any{"workspace": root}); res.isError {
 		t.Fatalf("an unusable root URI must leave the operator's own roots in force: %+v", res.structured)
 	}

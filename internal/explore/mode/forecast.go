@@ -1,32 +1,14 @@
 package mode
 
-// This file is the FORECAST mode — the other FIXED-SPACE mode, and the one
-// the design calls "genuinely deterministic":
+// This file implements the Forecast mode, a fixed-space mode:
 //
-//	declare          the USER fixes the target, the unit and the horizon (and any conditioning event)
-//	round 1 (BLIND)  each explorer returns a NUMERIC estimate + interval + reasoning
-//	HOST             internal/pool computes the aggregate, the interval, the dispersion and the outliers
-//	collate          the collator writes NARRATIVE about numbers it cannot change
+//	declare          the user fixes the target, unit, horizon and any conditioning event
+//	round 1 (blind)  each explorer returns a numeric estimate, interval and reasoning
+//	host             package pool computes the aggregate, interval, dispersion and outliers
+//	collate          the collator adds narrative
 //
-// ONE round, no canonicalizer, no confirmation round — for the same reason as Compare: every explorer was
-// asked the same question in the same unit, so their answers are directly comparable quantities and there
-// is no entity resolution anywhere in the pipeline.
-//
-// Two refusals define the mode:
-//
-//   - A NON-NUMERIC ESTIMATE IS REJECTED, not interpreted. The explorer schema types `estimate`, `low` and
-//     `high` as numbers, so a narrative answer fails validation at the envelope boundary and is recorded as
-//     a dropped response with a reason. schema.ParseForecast refuses it a second time. A host that read a
-//     number out of "somewhere in the low hundreds" would be inventing the precision the mode exists to
-//     provide.
-//   - THE COLLATOR NEVER COMPUTES THE AGGREGATE. Pooling happens in internal/pool under a declared,
-//     versioned rule before the collator is prompted. The failure mode this prevents is specific and
-//     familiar: a model asked to "combine these forecasts" splits the difference in prose, and the number
-//     that comes out is neither anybody's estimate nor any stated rule's output.
-//
-// And one thing it is careful to KEEP: an outlier is identified, never deleted, and its own reasoning
-// travels with it. A forecaster far from the panel is either wrong or the only one who noticed something,
-// and the aggregate alone cannot tell you which — so the record carries both.
+// There is one round and no canonicalization. Non-numeric estimates are rejected and recorded, not
+// interpreted. Outliers are flagged but stay in the aggregate, with their reasoning.
 
 import (
 	"encoding/json"
@@ -38,72 +20,62 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// ForecastRule is the DECLARED aggregation rule this mode contract pins. It is a mode-contract constant
-// rather than a runtime option precisely so it cannot be chosen after the estimates are in (the freeze
-// discipline, applied to the one number this mode produces).
+// ForecastRule is the aggregation rule Forecast uses. It is fixed so it cannot be chosen after the estimates
+// are in.
 const ForecastRule = pool.RuleMedian
 
-// --- the terminal output ---
-
-// ForecastOutput is the FIXED, exploremesh-owned terminal output of the Forecast mode: the declared target,
-// the HOST-pooled aggregate + interval + dispersion, every attributed individual estimate, the identified
-// outliers WITH their rationale, the assumptions the panel stated, and the pinned governance claim.
+// ForecastOutput is the Forecast mode's output: the declared target, the pooled aggregate, interval and
+// dispersion, each attributed estimate, outliers, assumptions and the governance claim.
 type ForecastOutput struct {
 	Target            string `json:"target"`
 	Unit              string `json:"unit"`
 	Horizon           string `json:"horizon"`
 	ConditioningEvent string `json:"conditioningEvent,omitempty"`
-	// Space + SpaceNote are the honest rendering of what this result IS: a fixed-space pooled estimate with
-	// no entity resolution behind it.
+	// Space and SpaceNote state that this is a fixed-space pooled estimate with no entity resolution.
 	Space     string `json:"space"`
 	SpaceNote string `json:"spaceNote"`
-	// PartitionRevisionHash carries govern.FixedSpaceNoPartition (see CompareOutput's field of the same name).
+	// PartitionRevisionHash holds govern.FixedSpaceNoPartition.
 	PartitionRevisionHash string `json:"partitionRevisionHash"`
-	// Aggregate + Interval are the HOST-pooled values under Method below. The collator never touched them.
+	// Aggregate and Interval are pooled by the host under Method.
 	Aggregate float64          `json:"aggregate"`
 	Interval  ForecastInterval `json:"interval"`
-	// Dispersion is the full spread picture (min/max/quartiles/IQR/stddev/MAD) — reported alongside the
-	// aggregate rather than behind it, because a tight and a wildly split panel must never look alike.
+	// Dispersion describes the spread of the estimates.
 	Dispersion pool.Dispersion `json:"dispersion"`
 	Method     ForecastMethod  `json:"method"`
-	// IndividualEstimates are every pooled estimate, attributed. The aggregate is a view over them.
+	// IndividualEstimates are the attributed estimates that were pooled.
 	IndividualEstimates []pool.Estimate `json:"individualEstimates"`
-	// Outliers are the estimates the declared outlier rule flagged, each carrying its own forecaster's
-	// reasoning (see the file comment). They are NOT removed from the aggregate.
+	// Outliers are flagged estimates with their reasoning. They remain in the aggregate.
 	Outliers []pool.Outlier `json:"outliers,omitempty"`
-	// Assumptions are the panel's stated assumptions, attributed — MODEL PROSE, kept because a pooled
-	// number whose assumptions are invisible is a number nobody can audit.
+	// Assumptions are the attributed assumptions the explorers stated.
 	Assumptions []AttributedAssumption `json:"assumptions,omitempty"`
-	// Rejected records responses that could not contribute an estimate, with the host's reason. A rejected
-	// estimate is recorded, never silently absent (the minority carry-through rule applied to a pool).
+	// Rejected lists responses that yielded no usable estimate, with the reason.
 	Rejected []RejectedEstimate `json:"rejected,omitempty"`
-	// Claim is the pinned governance claim: how many DISTINCT blind round-1 forecasters this aggregate is
-	// built on, with BOTH denominators, the frozen policy, and the exact contributing envelope refs.
+	// Claim records how many distinct blind round-1 forecasters the aggregate rests on, with both
+	// denominators and the contributing envelope refs.
 	Claim govern.Claim `json:"claim"`
-	// PanelSize / Respondents / Abstentions are the participation facts behind the denominators.
+	// PanelSize, Respondents and Abstentions describe participation.
 	PanelSize   int `json:"panelSize"`
 	Respondents int `json:"respondents"`
 	Abstentions int `json:"abstentions"`
-	// CollatorNarrative is the quarantined MODEL PROSE namespace.
+	// CollatorNarrative holds the collator's prose.
 	CollatorNarrative []govern.Narrative `json:"collatorNarrative,omitempty"`
 }
 
-// ForecastInterval is the pooled interval + the number of forecasters that actually stated one.
+// ForecastInterval is the pooled interval and the number of forecasters that gave one.
 type ForecastInterval struct {
 	Low     float64 `json:"low"`
 	High    float64 `json:"high"`
 	Sources int     `json:"sources"`
 }
 
-// ForecastMethod names the versioned HOST rules the pooled values were computed under.
+// ForecastMethod records the rule versions the pooled values were computed under.
 type ForecastMethod struct {
 	Rule            string `json:"rule"`
 	RulesVersion    string `json:"rulesVersion"`
 	OutlierRule     string `json:"outlierRule"`
 	IntervalRule    string `json:"intervalRule"`
 	GovernanceRules string `json:"governanceRulesVersion"`
-	// ComputedBy states plainly WHO produced the aggregate. It is a persisted field rather than a comment
-	// because that is the single most important fact about this number.
+	// ComputedBy states who produced the aggregate.
 	ComputedBy string `json:"computedBy"`
 }
 
@@ -114,15 +86,14 @@ type AttributedAssumption struct {
 	Assumption  string                  `json:"assumption"`
 }
 
-// RejectedEstimate is one response that could not enter the pool, with the HOST's reason.
+// RejectedEstimate is a response that could not be pooled, with the reason.
 type RejectedEstimate struct {
 	Explorer    schema.ExplorerIdentity `json:"explorer"`
 	EnvelopeRef string                  `json:"envelopeRef"`
 	Reason      string                  `json:"reason"`
 }
 
-// Summary returns the one-line human summary: the pooled value with its rule, the dispersion, the
-// denominators and the outlier count. It never calls the aggregate a prediction or a consensus.
+// Summary returns a one-line summary of the pooled value, rule, dispersion and outlier count.
 func (o ForecastOutput) Summary() string {
 	return fmt.Sprintf("forecast: %s = %g %s over %s — HOST-pooled by %s over %d estimate(s) (%s / %s); interval %g..%g, spread %g (min %g, max %g, IQR %g); %d outlier(s) identified and CARRIED with their reasoning [%s; fixed space: no partition]",
 		o.Target, o.Aggregate, o.Unit, o.Horizon, o.Method.Rule, len(o.IndividualEstimates),
@@ -131,9 +102,7 @@ func (o ForecastOutput) Summary() string {
 		len(o.Outliers), o.Method.RulesVersion)
 }
 
-// Validate checks the forecast is usable: at least one pooled estimate, a declared target, and the honest
-// space rendering. A forecast with no estimates is not a forecast — the aggregation refuses earlier, and
-// this is the guard that keeps a zero from ever reaching a reader as a number.
+// Validate requires at least one pooled estimate, a target and unit, and the fixed-space note.
 func (o ForecastOutput) Validate() error {
 	if len(o.IndividualEstimates) == 0 {
 		return fmt.Errorf("forecast output pooled no estimates — an aggregate over an empty panel is not a forecast")
@@ -147,10 +116,7 @@ func (o ForecastOutput) Validate() error {
 	return nil
 }
 
-// --- the fixed-space contract ---
-
-// forecastPooled is the mode's host view: the pooled result plus the attributed extras the pool itself has
-// no business carrying (the panel's assumptions, and the responses that could not contribute).
+// forecastPooled is Forecast's host view: the pooled result plus assumptions, rejections and the claim.
 type forecastPooled struct {
 	Pooled      pool.Pooled
 	Assumptions []AttributedAssumption
@@ -161,10 +127,8 @@ type forecastPooled struct {
 // forecastCollator is the Forecast mode's FixedSpaceContract.
 type forecastCollator struct{}
 
-// Aggregate is the HOST step: lift each blind round-1 response into a typed estimate, REFUSE the ones that
-// are not numeric (recording them rather than dropping them), pool the rest under the declared rule, and
-// pin the whole thing to a governance claim. The collator has not been called at this point and every
-// number in the result already exists.
+// Aggregate parses each blind round-1 estimate, records the unusable ones, pools the rest under
+// ForecastRule and builds the governance claim.
 func (forecastCollator) Aggregate(in FixedSpaceInput) (FixedSpaceView, error) {
 	var estimates []pool.Estimate
 	var assumptions []AttributedAssumption
@@ -175,7 +139,6 @@ func (forecastCollator) Aggregate(in FixedSpaceInput) (FixedSpaceView, error) {
 		ref := schema.EnvelopeRef(1, env.Order)
 		est, err := schema.ParseForecast(env.Response)
 		if err != nil {
-			// Recorded, not silently absent: a response that could not be pooled is evidence about the run.
 			rejected = append(rejected, RejectedEstimate{Explorer: env.Identity, EnvelopeRef: ref, Reason: err.Error()})
 			continue
 		}
@@ -208,8 +171,7 @@ func (forecastCollator) Aggregate(in FixedSpaceInput) (FixedSpaceView, error) {
 	}, nil
 }
 
-// forecastNarrativeWire is the SHAPE the collator is asked for: prose only. As with Compare there is no
-// numeric field, so there is nowhere for a "corrected" aggregate to go.
+// forecastNarrativeWire is the collator's response shape. It has no numeric fields.
 type forecastNarrativeWire struct {
 	Reading      string   `json:"reading"`
 	OutlierNotes []string `json:"outlierNotes"`
@@ -217,9 +179,7 @@ type forecastNarrativeWire struct {
 	Cautions     []string `json:"cautions"`
 }
 
-// CollatorPrompt shows the collator the finished pooled result and asks for narrative. The instruction is
-// blunt about the two failure modes this mode exists to prevent: recomputing the aggregate, and dismissing
-// the outlier.
+// CollatorPrompt shows the collator the pooled result as JSON and asks for narrative, including on outliers.
 func (forecastCollator) CollatorPrompt(in FixedSpaceInput, view FixedSpaceView) (string, error) {
 	fp, ok := view.Value.(forecastPooled)
 	if !ok {
@@ -259,8 +219,7 @@ func (forecastCollator) CollatorPrompt(in FixedSpaceInput, view FixedSpaceView) 
 	return s.String(), nil
 }
 
-// ParseNarrative reads the collator's output into the quarantined narrative namespace (see Compare's
-// ParseNarrative: an unusable narrative degrades the prose, never the host-computed result).
+// ParseNarrative converts the collator's output into narrative, as compareCollator.ParseNarrative does.
 func (forecastCollator) ParseNarrative(raw []byte, by schema.ExplorerIdentity) ([]govern.Narrative, error) {
 	return fixedSpaceNarrative(raw, by, func(obj []byte) ([]string, error) {
 		var w forecastNarrativeWire
@@ -290,7 +249,7 @@ func (forecastCollator) ParseNarrative(raw []byte, by schema.ExplorerIdentity) (
 	})
 }
 
-// Collate assembles the ForecastOutput as a deterministic VIEW over the pooled result. It computes nothing.
+// Collate builds the ForecastOutput from the pooled result and narrative.
 func (forecastCollator) Collate(in FixedSpaceInput, view FixedSpaceView, narrative []govern.Narrative) (ModeOutput, error) {
 	fp, ok := view.Value.(forecastPooled)
 	if !ok {
@@ -330,10 +289,6 @@ func (forecastCollator) Collate(in FixedSpaceInput, view FixedSpaceView, narrati
 }
 
 func init() {
-	// Forecast. Formulation-free, ONE round, no canonicalization policy at all
-	// (see the file comment). FIXED-space class with the ESTIMATE as the degraded register's key field: the
-	// estimate is a value in a declared unit, so a register of "who estimated what" is a genuine comparison
-	// rather than covert entity resolution.
 	register(ModeSpec{
 		Name:               Forecast,
 		FormulationFree:    true,

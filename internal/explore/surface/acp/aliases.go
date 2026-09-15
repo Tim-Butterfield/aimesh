@@ -1,9 +1,7 @@
 package acp
 
-// The domain-free ACP transport (JSON-RPC framing + the cross-restart session store) lives in
-// meshcore/acp. These re-exports keep the exploremesh ACP handler (acp.go) and its in-repo callers
-// (cli, testhost) referencing `acp.Framer` / `acp.NewFramer` / `acp.SessionStore` / etc. — this package
-// retains only the exploremesh-specific handler. meshcore stays domain-free (no exploremesh vocabulary).
+// The ACP transport (JSON-RPC framing and the session store) lives in meshcore/acp. These aliases let this
+// package's handler and its callers refer to it as acp.Framer, acp.SessionStore and so on.
 
 import macp "github.com/Tim-Butterfield/aimesh/meshcore/acp"
 

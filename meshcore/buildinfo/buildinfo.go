@@ -19,14 +19,11 @@ import (
 
 // Facts is what the toolchain recorded about the build, in the shape a version package reports.
 type Facts struct {
-	// Version is the human form: the nearest tag at or before the commit ("v0.1.0"), and "dev"
-	// when no tag precedes it. Deliberately nothing else — no commit, no dirty marker — so the
-	// line reads as a plain version number; Commit and Dirty carry those facts for the
-	// machine-readable form. A build after a tag therefore shows the tag it descends from.
+	// Version is the human form: the nearest tag at or before the commit ("v0.1.0"), or "dev" when no
+	// tag precedes it. Commit and Dirty carry the other facts.
 	Version string
-	// ModuleVersion is the toolchain's own string, untouched: the tag, or a pseudo-version such as
-	// "v0.1.1-0.20260908022103-3d6b10e9b8fa" — which names the NEXT patch and encodes the commit
-	// time, and is what `go version -m` prints.
+	// ModuleVersion is the toolchain's own string: the tag, or a pseudo-version such as
+	// "v0.1.1-0.20260908022103-3d6b10e9b8fa", which names the next patch, as `go version -m` prints.
 	ModuleVersion string
 	Commit        string // full VCS revision, or "" when not recorded
 	Date          string // VCS commit time (RFC 3339), or "" when not recorded
@@ -63,8 +60,8 @@ func displayVersion(module string) string {
 	}
 }
 
-// decrementPatch maps the "vX.Y.Z" a pseudo-version points AT back to the "vX.Y.(Z-1)" tag it
-// came FROM. Anything that does not parse is returned unchanged rather than guessed at.
+// decrementPatch maps the "vX.Y.Z" a pseudo-version names back to the "vX.Y.(Z-1)" tag it descends
+// from. Anything that does not parse is returned unchanged.
 func decrementPatch(v string) string {
 	i := strings.LastIndex(v, ".")
 	if i < 0 {
@@ -80,7 +77,7 @@ func decrementPatch(v string) string {
 // Read returns the embedded facts and ok=true when the toolchain stamped a usable version.
 // ok is false for a binary with no build info at all, for one whose main-module version is the
 // "(devel)" placeholder (a `go test` binary, or a build outside any VCS checkout), and for an
-// empty version — in each of those the caller's own default is the honest answer.
+// empty version; the caller's own default applies then.
 func Read() (Facts, bool) {
 	return fromBuildInfo(debug.ReadBuildInfo())
 }

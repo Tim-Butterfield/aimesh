@@ -13,9 +13,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// --- a minimal JSON-RPC driver (the transport is the unit under test, so the test client is hand-rolled
-// here; the SPEC-CONFORMANCE proof against the official SDK client lives in the exploremesh MCP surface,
-// which is the package that actually ships a server). ---
+// --- a minimal JSON-RPC driver. The transport is the unit under test, so the client is hand-rolled;
+// conformance against the official SDK client is tested in the applications that ship a server. ---
 
 type client struct {
 	f  mcp.Framer

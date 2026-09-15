@@ -90,9 +90,6 @@ func TestUsage_CoversTheShippedSurface(t *testing.T) {
 	usage(&out)
 	s := out.String()
 
-	// `ui` and its `--open` are deliberately absent: the web UI was retired, and this list is what
-	// stops help from advertising surface the binary does not have. It was doing the opposite until
-	// the usage line went — pinning a removed command in place.
 	for _, cmd := range []string{"explore", "export", "list", "doctor", "acp", "mcp", "init", "repo init", "folder init", "--version"} {
 		if !strings.Contains(s, cmd) {
 			t.Errorf("usage does not mention the %q command", cmd)

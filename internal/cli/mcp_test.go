@@ -20,8 +20,7 @@ func TestMCP_IsAShippedRootCommand(t *testing.T) {
 	}
 }
 
-// --only names a domain or it is refused. A typo that silently served BOTH would hand a caller the
-// tools they explicitly asked not to have — the tool list is the enforcement.
+// An --only value that names no domain is refused rather than defaulted to both.
 func TestMCP_OnlyIsValidatedNotDefaulted(t *testing.T) {
 	for _, bad := range []string{"sideways", "reviews", "Review ", "both"} {
 		code, _, errb := run(t, "mcp", "--only", bad)
@@ -34,16 +33,11 @@ func TestMCP_OnlyIsValidatedNotDefaulted(t *testing.T) {
 	}
 }
 
-// A domain-specific flag whose domain is NOT served is refused, never ignored.
-//
-// This is the case that matters most: --allow-writes is a capability grant. Accepting it quietly
-// under `--only explore` would leave an operator believing they had enabled a write on a server that
-// does not even carry the tool.
+// A domain-specific flag whose domain is not served is refused rather than ignored.
 func TestMCP_AFlagWhoseDomainIsNotServedIsRefused(t *testing.T) {
 	cases := []struct{ only, flag string }{
 		{"explore", "--allow-writes"},
-		// Bools, so they need no value — the table drives flags positionally and a value-taking flag
-		// would fail on the argument rather than on the domain rule this test is about.
+		// Boolean flags, so a missing value cannot fail the parse before the domain rule applies.
 		{"explore", "--verify-baseline"},
 		{"review", "--no-capture"},
 	}
@@ -61,20 +55,17 @@ func TestMCP_AFlagWhoseDomainIsNotServedIsRefused(t *testing.T) {
 	}
 }
 
-// The mirror of the above: a flag IS accepted when its domain is served. Without this, a refusal
-// rule that simply rejected every domain flag would pass the test above and break every real launch.
+// A flag is accepted when its domain is served.
 func TestMCP_AFlagIsAcceptedWhenItsDomainIsServed(t *testing.T) {
-	// --only review with a review flag must get PAST flag validation. It then fails or serves on its
-	// own merits, which this test does not drive; what it must not be is a usage error about the flag.
+	// Only the flag-domain refusal is checked; the launch itself is not driven.
 	_, _, errb := run(t, "mcp", "--only", "review", "--allow-writes", "--help")
 	if strings.Contains(errb, "would do nothing") {
 		t.Errorf("--allow-writes is review's own flag and --only review serves review: %q", errb)
 	}
 }
 
-// Every domain-specific flag this package refuses must actually exist on the composed command, or
-// the refusal table is guarding names nothing declares — which would silently stop refusing if a
-// flag were renamed.
+// Every flag in the refusal table must exist on the composed command, so a renamed flag cannot
+// silently escape the rule.
 func TestMCP_TheRefusalTableNamesRealFlags(t *testing.T) {
 	_, out, _ := run(t, "mcp", "--help")
 	help := out

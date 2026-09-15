@@ -1,18 +1,14 @@
 package pipeline
 
-// This file holds the ROBUSTNESS INVARIANTS. All three exist because the expensive part of
-// an exploration is the explorer fan-out, and every one of them is about not discovering a governance
-// problem after paying for it:
+// This file holds the checks that keep an exploration from discovering a governance problem only after
+// the explorer fan-out has been paid for:
 //
-//   - IDENTITY PRE-FLIGHT BEFORE THE FAN-OUT. The collator and every canonicalizer are probed with a cheap
-//     call first. A provider that silently fell back to a different model is then caught before a single
-//     explorer token is spent, instead of at the collate call with a full panel already paid for.
-//   - THE SAME-IDENTITY INVARIANT. A role's resolved model is pinned at its first call and every later call
-//     of that role must match it. A mid-exploration fallback to a DIFFERENT model HALTS: half the run
-//     governed by one model and half by another is not a run with a caveat, it is two partial runs whose
-//     artifacts cannot be honestly combined.
-//   - THE FROZEN PANEL. Membership and the counting policy are fixed + hashed before any judgment is
-//     solicited (internal/govern owns the arithmetic; the pipeline owns the freezing moment).
+//   - Identity pre-flight: the collator and every canonicalizer are probed with a cheap call before any
+//     explorer runs.
+//   - Same identity: a role's resolved model is pinned at its first call, and a later call that resolves
+//     to a different model halts the run, because artifacts from two models cannot be combined.
+//   - Frozen panel: membership and the counting policy are fixed and hashed before any judgment is
+//     solicited (package govern owns the arithmetic; the pipeline owns the freezing moment).
 
 import (
 	"context"
@@ -30,15 +26,11 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// preflightPrompt is the cheap REACHABILITY probe body. It asks for a trivial fixed JSON object: the
-// CONTENT is irrelevant (nothing parses it) — the probe exists so a role that cannot be invoked at all
-// (missing binary, expired auth, an unusable model slug) fails before a panel is paid for. Whatever
-// identity evidence the call happens to expose is classified and recorded on the way past.
+// preflightPrompt is the reachability probe body. Its reply is never parsed; the call only has to succeed.
 const preflightPrompt = "Pre-flight check. Reply with ONLY this JSON object and nothing else: {\"ok\":true}"
 
-// PreflightRecord is one role's pre-flight verdict, persisted so "the role was reachable
-// before the fan-out" is a recorded fact rather than a claim about the code. Status/Caveat DESCRIBE the
-// identity evidence; neither can fail the pre-flight.
+// PreflightRecord is one role's pre-flight verdict, persisted with the run. Status and Caveat describe
+// the identity evidence; neither can fail the pre-flight.
 type PreflightRecord struct {
 	Role          string                  `json:"role"`
 	Requested     schema.ExplorerIdentity `json:"requested"`
@@ -47,9 +39,9 @@ type PreflightRecord struct {
 	Caveat        string                  `json:"caveat,omitempty"`
 }
 
-// preflight probes ONE role's adapter. It fails ONLY when the adapter cannot be invoked — a role whose
-// identity is weak, unknown, or a proven mismatch still passes, because identity never decides whether a
-// response is used. It returns the record plus a halt error; on halt the caller returns before the fan-out.
+// preflight probes one role's adapter. It returns an error only when the adapter cannot be invoked; weak,
+// unknown or mismatched identity evidence is recorded, never fatal, because identity does not decide
+// whether a response is used.
 func preflight(ctx context.Context, a model.Adapter, role string, id schema.ExplorerIdentity) (PreflightRecord, error) {
 	rec := PreflightRecord{Role: role, Requested: id}
 	work, cleanup, werr := isolatedWorkDir()
@@ -71,21 +63,19 @@ func preflight(ctx context.Context, a model.Adapter, role string, id schema.Expl
 	return rec, nil
 }
 
-// identityLedger pins each ROLE's resolved model across all of that role's calls in ONE exploration (the
-// same-identity invariant). It is written from the pipeline's own goroutines (explorer calls run
-// concurrently), so it carries a mutex.
+// identityLedger pins each role's resolved model across that role's calls in one exploration. Explorer
+// calls run concurrently, so it is guarded by a mutex.
 type identityLedger struct {
 	mu    sync.Mutex
 	first map[string]string
 }
 
-// newIdentityLedger builds an empty ledger.
+// newIdentityLedger returns an empty ledger.
 func newIdentityLedger() *identityLedger { return &identityLedger{first: map[string]string{}} }
 
-// observe records the model a role's call RESOLVED to. The first observation pins the role; a later
-// observation of a DIFFERENT non-empty model is a mid-exploration fallback and returns a HALT error. An empty
-// resolved model (an adapter that reports nothing) is not evidence of a change, so it never pins and never
-// halts — that case is already governed by the identity classification (unknown → halt at the policy).
+// observe records the model a role's call resolved to. The first observation pins the role; a later,
+// different non-empty model returns a halt error. An empty resolved model is not evidence of a change, so
+// it neither pins nor halts.
 func (l *identityLedger) observe(role, resolved string) error {
 	if resolved == "" {
 		return nil
@@ -105,66 +95,36 @@ func (l *identityLedger) observe(role, resolved string) error {
 	return nil
 }
 
-// pinned returns the model pinned for a role ("" if the role has not been observed).
-func (l *identityLedger) pinned(role string) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.first[role]
-}
-
-// canonicalizerIdentity names one canonicalizer's role label + identity. Role labels are distinct per
-// canonicalizer (`canonicalizer-a` / `canonicalizer-b`) so the same-identity invariant is enforced PER
-// canonicalizer rather than across the pair — two independent canonicalizers are supposed to differ.
+// canonicalizerIdentity names one canonicalizer's role label and identity. Labels are distinct per
+// canonicalizer (`canonicalizer-a`, `canonicalizer-b`) so the same-identity check applies to each one
+// separately; the pair is expected to differ.
 type canonicalizerIdentity struct {
 	role     string
 	explorer roster.Explorer
 }
 
-// Canonicalizer PROVENANCE: how the identities that produced this partition were chosen. It is
-// a governance fact, not a diagnostic — it is recorded on the Result and in the run manifest because it is
-// precisely what makes a bad canonicalizer choice visible FROM A RUN RECORD instead of requiring a code
-// read.
+// Canonicalizer provenance records who chose the identities that produced a partition. It is recorded on
+// the Result and in the run manifest so a poor choice is visible from the run record.
 const (
-	// ProvenanceExplicit: the identities were NAMED by the request or the profile.
+	// ProvenanceExplicit means the request or the profile named the identities.
 	ProvenanceExplicit = "explicit"
-	// ProvenanceDerived: the host derived them — slot a from the collator's identity, slot b from the panel
-	// in PREFERENCE order.
+	// ProvenanceDerived means the host derived them: slot a from the collator, slot b from the panel in
+	// preference order.
 	ProvenanceDerived = "derived"
 )
 
-// Canonicalizer INDEPENDENCE: what the merge-agreement rule is actually worth on this run.
-//
-// A held merge means "both canonicalizers proposed it". How much that is worth depends entirely on how
-// different the two proposers are, so it is recorded: without it, a run whose two canonicalizers were
-// the same model behind two adapters would produce a record indistinguishable from one with two genuinely
-// different models, while every corroboration count downstream rests on the difference.
-//
-// It is a SEPARATE axis from provenance, not another provenance value: provenance says who CHOSE the
-// identities, this says what the choice bought. Folding them together would make "explicit" and
-// "shared_model" mutually exclusive when they are routinely both true.
+// Canonicalizer independence records how different the two canonicalizers are, which bounds what their
+// agreement is worth. It is separate from provenance: an explicit choice can also share a model.
 const (
-	// IndependenceDistinct: the two canonicalizers run DIFFERENT models. Agreement between them is the
-	// evidence the dual rule was designed around.
+	// IndependenceDistinct means the two canonicalizers run different models.
 	IndependenceDistinct = "distinct_models"
-	// IndependenceSharedModel: the two canonicalizers run the SAME model, reached through different
-	// adapters (or at different efforts). Agreement is weaker here — not because the two proposals are
-	// identical (they are not: sampling makes two calls to one model differ, sometimes materially) but
-	// because they are drawn from the same priors, so the errors they make are correlated in a way two
-	// different models' are not.
-	//
-	// It is RECORDED AND WARNED, never refused. A panel is configured deliberately, and a reader who
-	// wanted two different models would have named two different models; refusing this would override a
-	// choice on the strength of an assumption about what the configurer meant.
+	// IndependenceSharedModel means both run the same model through different adapters or efforts. Their
+	// errors are correlated, so agreement is weaker. It is recorded and warned about, never refused.
 	IndependenceSharedModel = "shared_model"
 )
 
-// explicitCanonicalizers resolves the EXPLICIT canonicalizer spec for a run, from the host override
-// (opts.Canonicalizers) if present, else from the plan the surfaces resolved (profile / CLI flag / ACP
-// `_meta` / MCP argument all land there). Either is "explicit": the user named them.
-//
-// The shape rule is re-checked here even though every surface checks it first. The surfaces produce the
-// good error message; this is the backstop no caller can skip, and it is what keeps a directly-constructed
-// Options honest.
+// explicitCanonicalizers returns the canonicalizers named for a run: opts.Canonicalizers if set, else
+// the plan's. The shape rule is re-checked here so a directly constructed Options cannot bypass it.
 func explicitCanonicalizers(plan roster.Plan, opts Options) ([]roster.Explorer, error) {
 	cs := opts.Canonicalizers
 	if len(cs) == 0 {
@@ -176,38 +136,24 @@ func explicitCanonicalizers(plan roster.Plan, opts Options) ([]roster.Explorer, 
 	return cs, nil
 }
 
-// canonicalizerChoice is the resolved canonicalizer roles for one run plus the two governance facts about
-// the choice itself: who made it, and what it bought. Both are recorded on the Result and disclosed by a
-// dry run, because a corroboration count cannot be read honestly without them.
+// canonicalizerChoice is the resolved canonicalizer roles for one run, with their provenance and
+// independence.
 type canonicalizerChoice struct {
 	ids          []canonicalizerIdentity
 	provenance   string // ProvenanceExplicit | ProvenanceDerived
 	independence string // IndependenceDistinct | IndependenceSharedModel; "" on the single-canonicalizer path
 }
 
-// canonicalizerIdentities resolves the canonicalizer identities for a run (canonicalization is a
-// distinct role whose identity is DECOUPLED from the collator). It returns them with their PROVENANCE
-// (explicit / derived) and, on the dual path, their INDEPENDENCE — which the caller records and warns on.
+// canonicalizerIdentities resolves the canonicalizer identities for a run.
 //
-//   - EXPLICIT identities (named by the request or the profile) are used verbatim. The dual path takes both;
-//     the SINGLE path takes the first — a mode with a single-canonicalizer policy makes one call, and
-//     honoring the user's first named identity is the only reading that neither ignores the spec nor
-//     invents a second call the mode's contract does not have.
-//   - Otherwise the host DERIVES them. The single path issues one canonicalizer call through the collator's
-//     adapter/model — a distinct, separately-verified CALL, never the collate call itself. The dual path
-//     takes slot a from the collator and derives slot b from the panel: the first explorer by the author's
-//     PREFERENCE order whose (adapter, model) differs from the collator's.
+// Explicit identities are used as named: the dual path takes both, the single path takes the first.
+// Otherwise the host derives them. The single path uses the collator's adapter and model in a separate
+// call. The dual path takes slot a from the collator and slot b from the first panel member, in the
+// author's preference order, whose adapter or model differs from the collator's.
 //
-// Slot b is read from plan.Preferred and NOT from plan.Explorers. Both hold the same set, but
-// plan.Explorers is sorted by identity triple for stable attribution — so deriving from it selected
-// whichever explorer sorted first ALPHABETICALLY, an ordering with no relationship to capability, for half
-// of a governance rule. Agreement between a and b decides which merges hold versus contest, which decides
-// every corroboration count; a weak model in slot b systematically fails to agree and quietly undercounts.
-//
-// If NO panel member differs from the collator at all — every seat is the same adapter AND model — the dual
-// path HALTS. That is not the same case as slot b merely sharing the collator's model: there, a second
-// identity exists and the run proceeds with its independence recorded (see IndependenceSharedModel). Here
-// there is no second identity to name, so the alternative to refusing is inventing one.
+// Slot b is read from plan.Preferred, not plan.Explorers: Explorers is sorted for attribution, and
+// choosing from it would pick a canonicalizer alphabetically. If no panel member differs from the
+// collator, the dual path halts rather than invent a second identity.
 func canonicalizerIdentities(plan roster.Plan, dual bool, modeName string, opts Options) (canonicalizerChoice, error) {
 	explicit, err := explicitCanonicalizers(plan, opts)
 	if err != nil {
@@ -223,21 +169,18 @@ func canonicalizerIdentities(plan roster.Plan, dual bool, modeName string, opts 
 		return dualChoice(explicit[0], explicit[1], ProvenanceExplicit), nil
 	}
 
-	primary := canonicalizerIdentity{role: "canonicalizer", explorer: roster.Explorer{
-		Adapter: plan.Collator.Adapter, Model: plan.Collator.Model, Effort: plan.Collator.Effort,
-	}}
+	primary := canonicalizerIdentity{role: "canonicalizer", explorer: roster.Explorer(plan.Collator)}
 	if !dual {
 		return canonicalizerChoice{ids: []canonicalizerIdentity{primary}, provenance: ProvenanceDerived}, nil
 	}
-	// A plan that recorded no preference order cannot be derived from: the only order left is the
-	// attribution order, and using it is the exact defect this function was rewritten to remove. Refuse
-	// rather than silently fall back — every executable plan comes from Roster.SelectTopN, which records both.
+	// A plan without a preference order cannot be derived from; falling back to attribution order would
+	// choose alphabetically. Every executable plan comes from Roster.SelectTopN, which records both.
 	if !plan.SameSet() {
 		return canonicalizerChoice{}, fault.New(fault.Internal, fmt.Sprintf(
 			"canonicalizer derivation needs the panel in PREFERENCE order, but this plan carries %d explorer(s) in attribution order and %d in preference order — a plan not built by roster.SelectTopN cannot be derived from (using the attribution order would select canonicalizer-b alphabetically)",
 			len(plan.Explorers), len(plan.Preferred)))
 	}
-	for _, ex := range plan.Preferred { // PREFERENCE order — the author's ranking, never the attribution sort
+	for _, ex := range plan.Preferred {
 		if ex.Adapter == plan.Collator.Adapter && ex.Model == plan.Collator.Model {
 			continue
 		}
@@ -249,12 +192,8 @@ func canonicalizerIdentities(plan roster.Plan, dual bool, modeName string, opts 
 		strings.Join(singleCanonicalizerModes(), ", ")))
 }
 
-// singleCanonicalizerModes names the modes that canonicalize with ONE identity, sorted.
-//
-// It exists because of the specific confusion this refusal is designed around: the halt is reported
-// against the roster, but the roster is fine — the SAME roster runs these modes unchanged, and the
-// mode is the variable. Reading that off the registry rather than writing a list into a string keeps
-// it true when a mode is added, which is exactly the kind of list that otherwise rots into a lie.
+// singleCanonicalizerModes returns the sorted names of the modes that canonicalize with one identity. It
+// reads the mode registry so the refusal above stays accurate when a mode is added.
 func singleCanonicalizerModes() []string {
 	var out []string
 	for _, name := range mode.Names() {
@@ -268,9 +207,8 @@ func singleCanonicalizerModes() []string {
 	return out
 }
 
-// dualChoice builds the two-slot result and classifies its independence. The test is the MODEL: two
-// adapters reaching one model are two routes to the same priors, and it is the priors — not the process —
-// that decide whether agreement between the pair means anything.
+// dualChoice builds the two-slot choice and classifies its independence by model: two adapters reaching
+// one model share that model's priors.
 func dualChoice(a, b roster.Explorer, provenance string) canonicalizerChoice {
 	independence := IndependenceDistinct
 	if a.Model == b.Model {

@@ -7,17 +7,14 @@ import (
 	"syscall"
 )
 
-// noFollowFlag makes an open refuse a symlink in the FINAL path component. Combined with
-// os.Root (which refuses a symlink escaping the root in any intermediate component) it
-// closes the check-then-open window: the object validated by f.Stat() is the object the
-// descriptor refers to.
+// noFollowFlag makes an open refuse a symlink in the final path component. With os.Root refusing
+// escapes in intermediate components, the object validated by f.Stat() is the object the descriptor
+// refers to.
 const noFollowFlag = syscall.O_NOFOLLOW
 
-// linkCount returns the number of directory entries pointing at fi's inode, and whether
-// that number is knowable on this platform. A regular file with more than one link has
-// more than one NAME: an innocuous one inside the workspace and, potentially, a protected
-// one outside it (`~/.ssh/id_rsa`). Basename-based exclusion cannot see the other name,
-// so the link count is the only in-band signal.
+// linkCount returns the number of directory entries pointing at fi's inode, and whether that number is
+// knowable on this platform. A file with more than one link may also be named by a protected path
+// outside the workspace, which name-based exclusion cannot see.
 func linkCount(fi fs.FileInfo) (uint64, bool) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {

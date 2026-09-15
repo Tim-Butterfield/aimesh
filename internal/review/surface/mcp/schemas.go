@@ -8,46 +8,31 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/engine/authority"
 )
 
-// This file holds the DECLARED contract of the reviewmesh MCP server: the tool input schemas, the
-// output schemas, and the `initialize.instructions` cross-tool contract. Like exploremesh's, they
-// are literal JSON rather than reflection-derived — strict `oneOf`, `additionalProperties: false`
-// and exact `required` sets are the whole point, and none of them survives a round trip through a
-// derived schema.
+// This file holds the declared contract of the reviewmesh MCP server: tool input and output schemas
+// and the initialize instructions. Schemas are literal JSON, not reflection-derived, so strict oneOf,
+// additionalProperties: false and exact required sets survive.
 //
-// The same two rules govern them:
+//   - Inputs are strict, and the server re-enforces every rule a schema states, since schemas are
+//     advisory to clients.
+//   - Outputs require the governance fields: per-seat provenance, identity caveats, the authority
+//     manifest and the requested and executed panel.
 //
-//   - INPUTS are strict, and the SERVER re-enforces every rule the schema states. A schema is
-//     advisory to a client; a server that trusted it would be one malformed call away from running
-//     something the caller did not ask for. On this server that matters more than on exploremesh,
-//     because one of these tools writes.
-//   - OUTPUTS declare what must ALWAYS be there. For a review the governance-bearing fields are the
-//     findings' per-seat provenance, the identity caveats, the authority inclusion manifest and the
-//     requested-vs-executed panel: all four are `required`, so "the governance block was dropped"
-//     is a client-side-checkable schema violation rather than a promise in prose.
-//
-// And the rule that makes the second one real: EVERY payload this server emits is validated against
-// the outputSchema its own tool declares, by a test (schemaconformance_test.go) that walks the
-// result builders and by a wire-level test that re-reads the schema from `tools/list`. A declared
-// schema nothing checks is a promise in prose wearing JSON — which is how three payloads came to
-// match no branch of the `oneOf` they were declared under.
+// schemaconformance_test.go and a wire-level test in mcp_test.go validate every emitted payload
+// against these schemas.
 
-// Wait-budget bounds, matched to exploremesh so the two servers refuse the same magnitudes. The
-// default sits well inside the ~60 s request timeout common in MCP clients.
+// Wait-budget bounds, matching exploremesh. The default is well inside the common 60-second MCP client
+// request timeout.
 const (
 	DefaultWaitSeconds = 25
 	MaxWaitSeconds     = 120
 )
 
-// MaxAuthorityDocs is the authority engine's own cap, DERIVED from it rather than restated beside
-// it. The bound is repeated in the schema so a caller learns it from the declaration instead of
-// from a refusal — which only helps if the two cannot drift, and they did: the schema advertised 16
-// while the engine enforced 8, so every caller who trusted the declaration met a fail-closed
-// refusal it had promised would not come. Taking the constant from the engine makes that
-// impossible; TestAuthoritySchemaBoundMatchesEngineCap holds the wiring in place.
+// MaxAuthorityDocs is the authority engine's document limit, taken from it so the schema's maxItems
+// cannot drift. TestAuthoritySchemaBoundMatchesEngineCap checks the emitted schema.
 const MaxAuthorityDocs = authority.MaxDocs
 
-// seatSchema is one panel seat, named by IDENTIFIER only. There is deliberately no path/args/binary
-// property: those are configuration, and configuration over MCP is a non-goal.
+// seatSchema is one panel seat, named by identifier only. There is no path, args or binary property:
+// configuration is not accepted over MCP.
 const seatSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -59,9 +44,8 @@ const seatSchema = `{
   }
 }`
 
-// panelSchema is the panel every call composes. It MUST name `author_remediator`: it is the
-// host-adjudication seat, and defaulting it silently would mean the caller composed a panel whose
-// adjudicator it never saw — the one seat whose judgment becomes the accepted set.
+// panelSchema is the panel every call composes. It must name author_remediator, the adjudicating seat
+// whose judgment becomes the accepted set.
 var panelSchema = fmt.Sprintf(`{
   "type": "object",
   "additionalProperties": false,
@@ -75,10 +59,8 @@ var panelSchema = fmt.Sprintf(`{
   }
 }`, review.MaxReviewerSeats, seatSchema, seatSchema, seatSchema, seatSchema)
 
-// authoritySchema is the P2 authority manifest as a caller declares it. Exactly one of
-// `path`/`content` per document — the same declaration the CLI's `--authority-manifest` and the ACP
-// surface's `_meta.reviewmesh.authority[]` take, because a governance declaration that meant
-// different things on different surfaces would not be a governance declaration.
+// authoritySchema is the authority manifest as a caller declares it: exactly one of path or content
+// per document, the same declaration as --authority-manifest and ACP's _meta.reviewmesh.authority.
 var authoritySchema = fmt.Sprintf(`{
   "type": "array",
   "maxItems": %d,
@@ -99,9 +81,8 @@ var authoritySchema = fmt.Sprintf(`{
   }
 }`, MaxAuthorityDocs)
 
-// inlineWorkspaceSchema is the host-mediated read path: content supplied over the wire, materialized
-// into a directory THIS PROCESS owns. It needs no trusted root precisely because it never touched
-// this machine's filesystem — and for the same reason it can never be remediated.
+// inlineWorkspaceSchema is content supplied over the wire and materialized into a directory this
+// process owns. It needs no declared root, and an inline run can never be remediated.
 var inlineWorkspaceSchema = fmt.Sprintf(`{
   "type": "object",
   "minProperties": 1,
@@ -111,9 +92,8 @@ var inlineWorkspaceSchema = fmt.Sprintf(`{
   "propertyNames": {"pattern": "^[^/\\\\][^\\u0000]*$"}
 }`, maxInlineEntries, maxInlineEntryBytes)
 
-// rootsArgSchema is the per-call EXTRA roots argument: directories a call reads beside its workspace.
-// It is the tool-parameter form `client/roots` names as its migration ("passing directories or files
-// via tool parameters").
+// rootsArgSchema is the per-call extra roots argument: directories a call reads beside its workspace,
+// the tool-parameter form the MCP roots specification recommends.
 const rootsArgSchema = `{
       "type": "array", "minItems": 1, "maxItems": 32,
       "items": {"type": "string", "minLength": 1},
@@ -132,8 +112,8 @@ var commonReportProps = fmt.Sprintf(`
     "idempotencyKey": {"type": "string", "maxLength": 200, "description": "Optional caller-supplied key. Repeating a call with the same key returns the EXISTING run instead of spending again — use it when retrying after a dropped connection."}`,
 	rootsArgSchema, panelSchema, authoritySchema, MaxWaitSeconds, DefaultWaitSeconds)
 
-// reportInputSchema is `review_report`. The top-level `oneOf` is the workspace XOR inlineWorkspace
-// choice, re-enforced server-side; `panel` is required in both.
+// reportInputSchema is review_report's input. The top-level oneOf chooses workspace or inlineWorkspace,
+// re-enforced by the server; panel is required in both.
 var reportInputSchema = fmt.Sprintf(`{
   "oneOf": [
     {
@@ -155,11 +135,8 @@ var reportInputSchema = fmt.Sprintf(`{
   ]
 }`, commonReportProps, inlineWorkspaceSchema, commonReportProps)
 
-// remediateInputSchema is `review_remediate`. It has one form: `fromRun` plus the workspace that run
-// reviewed. `fromRun` is a value the caller already RECEIVED in a completed response, so a caller whose
-// write call is cancelled still holds the handle to the run it named — basic/index says state spanning
-// requests "MUST be referenced by an explicit identifier the client passes on each request". The
-// `oneOf` makes `allowWrite: true` required exactly when `output` is `apply`.
+// remediateInputSchema is review_remediate's input: fromRun plus the workspace that run reviewed. The
+// oneOf requires allowWrite: true exactly when output is apply.
 var remediateInputSchema = fmt.Sprintf(`{
   "type": "object",
   "additionalProperties": false,
@@ -197,11 +174,9 @@ const emptyInputSchema = `{"type": "object", "additionalProperties": false, "pro
 
 // --- output schemas ---
 
-// findingSchema is one adjudicated finding WITH its per-seat provenance. `supportingSeats`,
-// `agreementCount` and `dissentingSeats` are host arithmetic over the blind panel: no model asserts
-// them and no model is asked to count. `applyable: false` is the quarantine — a finding supported
-// only by weak-identity seats, or traceable only to authority text, is reportable and never
-// writable, whatever a client asks for afterwards.
+// findingSchema is one adjudicated finding with per-seat provenance. supportingSeats, agreementCount
+// and dissentingSeats are computed by the host, not asserted by models. applyable: false marks a
+// quarantined finding (weak-identity support only, or authority text only), which is never written.
 const findingSchema = `{
     "type": "array",
     "description": "The adjudicated findings. 'disposition' is the host's DECISION — never infer \"this was fixed\" from a finding's presence.",
@@ -315,14 +290,9 @@ const withheldSchema = `{
     }}
   }`
 
-// groundingSchema is the RUN-LEVEL tally of the non-executing citation check. It reads files and
-// executes nothing, so it is not a capability grant and is always on.
-//
-// The `note` is required rather than optional, and that is the point of the schema entry. The
-// tempting misreading of this block is "12 of 14 findings verified"; what it actually says is "12 of
-// 14 findings point at a file, line or symbol that exists". A caller that surfaces the ratio without
-// the qualifier has upgraded a floor into a corroboration, so the qualifier travels with the numbers
-// instead of living in prose a caller may never read.
+// groundingSchema is the run-level tally of the non-executing citation check, which is always on. Its
+// note is required: the tally says findings point at files, lines or symbols that exist, not that the
+// findings are verified.
 const groundingSchema = `{
     "type": "object",
     "required": ["checked", "grounded", "unresolved", "note"],
@@ -337,14 +307,9 @@ const groundingSchema = `{
     }
   }`
 
-// verificationSchema is the BOUNDED-EXECUTION record: the project's own build/test commands, run on
-// the containment copy. Present only when the OPERATOR supplied commands at launch; a calling model
-// cannot name a command and cannot cause one to run.
-//
-// `delta` is `required` and `note` is `required`, and both for the same reason: the two obvious
-// misreadings of this block run in opposite directions. Green invites "the change is fine"; red
-// invites "the findings were wrong". Neither follows, and the fields that say so travel with the ones
-// that invite it.
+// verificationSchema is the bounded-execution record, present only when the operator supplied commands
+// at launch. delta and note are required, because neither a pass nor a failure is a verdict on the
+// change or the findings.
 const verificationSchema = `{
     "type": "object",
     "required": ["commands", "delta", "note"],
@@ -373,11 +338,8 @@ const verificationSchema = `{
     }
   }`
 
-// compositionSchema is the run-level record of WHAT THE PANEL WAS. It is always present for a run
-// with a blind panel, and its `note` is required for the same reason the verification note is: the
-// two misreadings run in opposite directions — shared_model invites discarding a real agreement,
-// distinct_models invites treating one as proof — and the sentence that says neither follows has to
-// travel with the numbers that invite them.
+// compositionSchema records what the panel was; it is present for any run with a blind panel. Its note
+// is required: shared models do not void agreement and distinct models do not prove it.
 const compositionSchema = `{
     "type": "object",
     "required": ["seats", "distinctModels", "independence", "note"],
@@ -390,18 +352,11 @@ const compositionSchema = `{
     }
   }`
 
-// reviewShapeSchema is the DRY RUN's disclosure: what the review WOULD do, before anything is spent.
+// reviewShapeSchema is a dry run's disclosure of what the review would do. It is present exactly when
+// status is planned; an empty findings array then means nothing was looked at.
 //
-// It is present exactly when `status` is `planned`, and it is the ONLY thing that makes a dry run
-// worth calling: the run deliberately convenes nobody, so a caller that received `status: planned`
-// and an empty finding set without this would have paid nothing and learned nothing. Read `findings`
-// as "nothing was looked at", never as "the tree is clean" — the empty array is a consequence of the
-// stop, not a result.
-//
-// THE CALL COUNTS ARE A RANGE, unlike exploremesh's single figure. A review iterates until
-// adjudication converges, so the floor is what it cannot avoid and the ceiling is every configured
-// cap multiplied out; a single number would have to understate the iterating run or overstate the
-// ordinary one.
+// Call counts are a range: a review iterates until adjudication converges, so the floor is unavoidable
+// and the ceiling multiplies out every cap.
 const reviewShapeSchema = `{
     "type": "object",
     "required": ["mode", "seats", "lanes", "minModelCalls", "maxModelCalls", "payload"],
@@ -425,12 +380,8 @@ const reviewShapeSchema = `{
     }
   }`
 
-// dissentSchema is the run-level tally of the per-finding consensus labels: how much of this result
-// the panel actually agreed on.
-//
-// Its `note` is required for the same reason the composition note is, and the misreading it guards
-// against is sharper: "3 contested" reads as three doubtful findings to anyone who does not know that
-// a blind seat's silence is not a vote. The sentence that says so has to travel with the number.
+// dissentSchema tallies the per-finding consensus labels. Its note is required: a blind seat's silence
+// is not a vote against a finding.
 const dissentSchema = `{
     "type": "object",
     "required": ["panelled", "unanimous", "majority", "contested", "note"],
@@ -444,12 +395,8 @@ const dissentSchema = `{
     }
   }`
 
-// partialPanelSchema is present ONLY when a capacity failure — a provider out of quota, a wall clock
-// reached — removed a seat and the run continued rather than discarding the seats that had answered.
-//
-// Its PRESENCE is the signal, which is why it is absent rather than zeroed on a full panel: a caller
-// must not have to compare two numbers to notice that the panel it requested is not the panel that
-// answered.
+// partialPanelSchema is present only when a capacity failure, such as exhausted quota or a timeout,
+// removed a seat and the run continued. Its presence is the signal.
 const partialPanelSchema = `{
     "type": "object",
     "required": ["configured", "answered", "lost", "note"],
@@ -462,10 +409,8 @@ const partialPanelSchema = `{
     }
   }`
 
-// scopeSchema is present ONLY when the review was NARROWED to part of the tree. Its presence is the
-// signal, and its `note` is required, because the misreading here is the most damaging one this
-// server can produce: a caller that sees a clean result without knowing four files were shown has
-// been told the tree is clean when nobody looked at most of it.
+// scopeSchema is present only when the review was narrowed to part of the tree. Its note is required,
+// so a clean result is not read as covering the whole tree.
 const scopeSchema = `{
     "type": "object",
     "required": ["selected", "available", "files", "note"],
@@ -495,28 +440,20 @@ const countsSchema = `{
     }
   }`
 
-// haltProps is the taxonomy payload a domain halt carries, on `structuredContent` of a result with
-// `isError: true` — never a JSON-RPC error, whose `data` clients routinely flatten or drop.
+// haltProps is the taxonomy a domain halt carries in structuredContent with isError: true, never as a
+// JSON-RPC error.
 const haltProps = `
       "exitCode": {"type": "integer", "description": "The shared aimesh halt taxonomy exit code (2 usage, 3 config, 4 adapter, 5 model/identity, 6 containment, 7 policy/cap, 8 internal)."},
       "haltClass": {"type": "string"},
       "reasonCode": {"type": "string", "description": "The stable machine reason code. Branch on this, never on the message text."},
       "failure": {"type": "object", "description": "The sanitized, capped identification of the failing lane."}`
 
-// reportResultSchema is the declared outputSchema of `review_report`. It is a FOUR-branch `oneOf`
-// keyed on `state`, which is what lets the governance-bearing fields be REQUIRED on the branch
-// where a result exists instead of being softened to optional so that a "running" reply can
-// validate.
+// reportResultSchema is review_report's outputSchema: a oneOf keyed on state, so governance fields can
+// be required where a result exists.
 //
-// The branches are `running` / `complete` / `halted` / `cancelled`, and each `state` is a `const`
-// rather than an `enum`, so exactly one branch can ever match. `cancelled` is its own branch
-// because a cancelled call is genuinely a fourth shape: it is not a halt (nothing failed) and it
-// has no result, but it does carry the panel echo and the taxonomy. It must NOT be emitted as the
-// RUNNING shape with `state` overwritten — that is a payload matching no branch at all.
-//
-// `panel` is required on `running` and `cancelled` as well as on `complete`. The requested-vs-
-// executed echo is the one governance fact that exists from the moment a run is admitted, so
-// "which panel is this?" is answerable from the first reply rather than only from the last.
+// The branches are running, complete, halted and cancelled, each with a const state so exactly one
+// matches. cancelled has no result but carries the panel echo and taxonomy. panel is required on
+// running, complete and cancelled, since it is known from admission.
 var reportResultSchema = fmt.Sprintf(`{
   "oneOf": [
     {
@@ -589,9 +526,8 @@ var reportResultSchema = fmt.Sprintf(`{
 	panelEchoSchema, identityCaveatsSchema, haltProps,
 	panelEchoSchema, identityCaveatsSchema, haltProps)
 
-// The PARTIAL-REFUSAL contract, declared once and reused on every branch that can carry it. A
-// finding whose target is a protected path is refused rather than halting the
-// run; these three fields are how a caller learns that happened without reading the receipt.
+// The partial-refusal fields, shared by every branch that can carry them. A finding targeting a
+// protected path is refused without halting the run.
 const (
 	applyOutcomeSchema = `{
       "type": "string",
@@ -621,8 +557,7 @@ const (
       }
     }`
 
-	// selectionSchema is the record of a SELECTIVE APPLY. All three lists are always present so
-	// that "no selector was unmatched" is a stated fact rather than an absent key.
+	// selectionSchema records a selective apply. All three lists are always present.
 	selectionSchema = `{
       "type": "object",
       "description": "What the narrowing 'select' argument did. Present only when 'select' was supplied.",
@@ -635,8 +570,8 @@ const (
     }`
 )
 
-// remediateResultSchema is the declared outputSchema of `review_remediate`. The complete branch IS
-// the receipt: what was intended, what was written, and whether anything reached the live tree.
+// remediateResultSchema is review_remediate's outputSchema. The complete branch is the receipt: what
+// was intended, what was written, and whether anything reached the live tree.
 var remediateResultSchema = fmt.Sprintf(`{
   "oneOf": [
     {
@@ -720,15 +655,11 @@ var remediateResultSchema = fmt.Sprintf(`{
 	applyOutcomeSchema, applyCountsSchema, refusalsSchema, selectionSchema, haltProps,
 	panelEchoSchema, identityCaveatsSchema, haltProps)
 
-// runResultSchema is the declared outputSchema of `review_run_result`, and it is deliberately NOT
-// reportResultSchema. `review_run_result` fetches ANY run this server started, and a remediation run's
-// result is a RECEIPT, not a review. Declaring it under the report schema would make every
-// remediation fetched through `review_run_result` a payload its own tool said was impossible.
+// runResultSchema is review_run_result's outputSchema. It is not reportResultSchema, because
+// review_run_result returns any run, and a remediation's result is a receipt.
 //
-// The union is `anyOf`, not `oneOf`, and that is the honest operator: the two schemas overlap on
-// the shapes they share (a pre-spend refusal carries the taxonomy and nothing that identifies which
-// tool it came from), so demanding exactly one match would fail a payload that is correct under
-// both. Each ARM is still an exclusive `oneOf` over `state`, so nothing inside either is loosened.
+// The union is anyOf: the two schemas overlap on shared shapes such as a pre-spend refusal, so oneOf
+// would reject valid payloads. Each arm is still an exclusive oneOf over state.
 var runResultSchema = fmt.Sprintf(`{
   "description": "The full result of a run: a REVIEW result when the run was started by review_report, or a remediation RECEIPT when it was started by review_remediate. Branch on 'tool' to know which, and on 'state' within it.",
   "anyOf": [%s, %s]
@@ -748,10 +679,8 @@ var runStatusSchema = fmt.Sprintf(`{
   }
 }`, applyOutcomeSchema)
 
-// listOutputSchema is the SANITIZED configuration projection. Note what is absent and cannot be
-// added without changing the projection type: binary paths, launch arguments, environment. A tool
-// result is inference input for a third party — shipping the operator's environment into it is a
-// disclosure, not a convenience.
+// listOutputSchema is the sanitized configuration projection, with no binary paths, launch arguments or
+// environment.
 const listOutputSchema = `{
   "type": "object",
   "required": ["adapters", "modes", "limits", "remediation"],
@@ -788,8 +717,8 @@ const listOutputSchema = `{
   }
 }`
 
-// doctorOutputSchema is the readiness projection. Every field is a count, an enum or a boolean — never a
-// path — because a tool result is inference input for a third party.
+// doctorOutputSchema is the readiness projection. Every field is a count, enum or boolean, never a
+// path.
 const doctorOutputSchema = `{
   "type": "object",
   "required": ["ok", "checks", "writes", "diffAvailable", "rootCeiling", "protocolMode", "protocolEra"],
@@ -819,8 +748,7 @@ const doctorOutputSchema = `{
   }
 }`
 
-// raw compacts a schema literal, failing loudly at startup if it is not valid JSON (a malformed
-// schema would otherwise reach a client as an uninterpretable tool declaration).
+// raw compacts a schema literal and panics at startup if it is not valid JSON.
 func raw(s string) json.RawMessage {
 	if err := json.Unmarshal([]byte(s), new(any)); err != nil {
 		panic("mcp: invalid schema literal: " + err.Error())
@@ -828,9 +756,9 @@ func raw(s string) json.RawMessage {
 	return json.RawMessage(s)
 }
 
-// instructions is the cross-tool contract carried in `initialize.instructions`. It is the one place
-// a client model reads BEFORE choosing a tool, so it states the rules no per-tool description can
-// enforce on its own — above all the one that matters here: this server contains a write primitive.
+// instructions is the cross-tool contract sent in initialize.instructions. A client model reads it
+// before choosing a tool, so it states the rules no single tool description can, including that this
+// server can write.
 const instructions = `reviewmesh runs a governed, blind panel of independent models over an artifact and returns a HOST-ADJUDICATED result.
 
 How the tools relate:

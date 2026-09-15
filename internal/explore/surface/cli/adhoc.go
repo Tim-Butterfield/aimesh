@@ -14,12 +14,11 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/roster"
 )
 
-// This file holds the AD-HOC by-identifier run surface: repeatable `--explorer` /
-// `--collator` structured specs on `explore`, which build a one-off roster bypassing --roster/profile.
-// The specs use a STRUCTURED `adapter=<n>,model=<m>[,effort=<e>]` grammar — deliberately NOT the
-// `adapter:model` colon shorthand, which is UNSAFE because model tags contain colons (e.g. llama3:8b).
+// This file holds the ad-hoc run surface: repeatable `--explorer` and `--collator` specs that build a
+// one-off roster. Specs use `adapter=<n>,model=<m>[,effort=<e>]` rather than `adapter:model`, because
+// model tags can contain colons (for example llama3:8b).
 
-// slotSpecs collects the repeatable --explorer specs (order preserved).
+// slotSpecs collects the repeatable --explorer specs in order.
 type slotSpecs []string
 
 func (s *slotSpecs) String() string { return strings.Join(*s, "; ") }
@@ -28,17 +27,12 @@ func (s *slotSpecs) Set(v string) error {
 	return nil
 }
 
-// parseSlot parses one `adapter=<n>,model=<m>[,effort=<e>]` spec. Fields split on commas and each field
-// splits on the FIRST '=' only — so a VALUE may safely contain ':' (a model tag like llama3:8b) or '='
-// without being mangled (the colon form is display-only and is never parsed here). adapter+model are
-// required; effort is optional.
-//
-// Every failure here is a malformed FLAG, so each one carries fault.Usage: the exit code then follows
-// from the error itself at the print boundary rather than from a literal the caller has to remember.
+// parseSlot parses one `adapter=<n>,model=<m>[,effort=<e>]` spec. Each field splits on its first '=', so
+// a value may contain ':' or '='. adapter and model are required. Every error carries fault.Usage.
 func parseSlot(spec string) (roster.Explorer, error) {
 	var out roster.Explorer
 	seen := map[string]bool{}
-	for _, field := range strings.Split(spec, ",") {
+	for field := range strings.SplitSeq(spec, ",") {
 		field = strings.TrimSpace(field)
 		if field == "" {
 			continue
@@ -48,7 +42,7 @@ func parseSlot(spec string) (roster.Explorer, error) {
 			return roster.Explorer{}, fault.New(fault.Usage, fmt.Sprintf("invalid field %q (want key=value)", field))
 		}
 		key := strings.TrimSpace(kv[0])
-		val := strings.TrimSpace(kv[1]) // NOT split on ':' — the value is taken verbatim
+		val := strings.TrimSpace(kv[1])
 		if seen[key] {
 			return roster.Explorer{}, fault.New(fault.Usage, fmt.Sprintf("duplicate key %q", key))
 		}
@@ -70,9 +64,8 @@ func parseSlot(spec string) (roster.Explorer, error) {
 	return out, nil
 }
 
-// buildAdHocRoster assembles a one-off roster from the structured --explorer specs + the single
-// --collator spec. It enforces the surface pre-conditions (>=2 explorers, a collator present); the
-// deeper roster invariants (unique triples, non-empty fields) are enforced by Roster.Plan downstream.
+// buildAdHocRoster assembles a one-off roster from the --explorer specs and the --collator spec. It
+// requires at least two explorers and a collator; Roster.Plan enforces the remaining roster invariants.
 func buildAdHocRoster(explorerSpecs []string, collatorSpec string) (roster.Roster, error) {
 	if len(explorerSpecs) < 2 {
 		return roster.Roster{}, fault.New(fault.Usage, fmt.Sprintf("ad-hoc explore needs at least 2 --explorer specs (got %d)", len(explorerSpecs)))
@@ -92,16 +85,12 @@ func buildAdHocRoster(explorerSpecs []string, collatorSpec string) (roster.Roste
 	if err != nil {
 		return roster.Roster{}, fault.Wrap(fault.Usage, fmt.Sprintf("--collator %q", collatorSpec), err)
 	}
-	r.Collator = roster.Collator{Adapter: c.Adapter, Model: c.Model, Effort: c.Effort}
+	r.Collator = roster.Collator(c)
 	return r, nil
 }
 
-// buildCanonicalizers parses the repeatable `--canonicalizer adapter=<n>,model=<m>[,effort=<e>]` specs into
-// the explicit canonicalizer identities. It uses the SAME structured grammar as --explorer /
-// --collator — deliberately not the colon shorthand, which cannot represent a model tag containing a colon.
-//
-// The 0-or-2 rule (and the two-identical-identities refusal) is roster.ValidateCanonicalizers', so the CLI,
-// the ACP surface, the MCP server and the profile schema all state the same rule with the same words.
+// buildCanonicalizers parses the repeatable `--canonicalizer` specs, using the same grammar as
+// --explorer. roster.ValidateCanonicalizers applies the zero-or-two rule shared by every surface.
 func buildCanonicalizers(specs []string) ([]roster.Explorer, error) {
 	if len(specs) == 0 {
 		return nil, nil
@@ -120,10 +109,8 @@ func buildCanonicalizers(specs []string) ([]roster.Explorer, error) {
 	return out, nil
 }
 
-// configuredAdapterNames is the sorted set of adapter names a roster may reference: every shell recipe
-// and every configured ACP instance (plus, ONLY under the internal test-harness gate, the hidden
-// `fake` key — it must never be advertised to users). It names the choices in the ad-hoc fail-closed
-// error.
+// configuredAdapterNames returns the sorted adapter names a roster may reference: every shell recipe and
+// configured ACP instance, plus `fake` only when the test-harness gate is enabled.
 func configuredAdapterNames(acpInsts map[string]acpagent.Instance) []string {
 	set := map[string]bool{}
 	if corefake.Enabled() {

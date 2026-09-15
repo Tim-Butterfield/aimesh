@@ -26,10 +26,9 @@ var (
 	ErrSessionExpired   = errors.New("session expired")
 )
 
-// SessionRecord is the MINIMAL, safe session metadata persisted for cross-restart resume.
-// It deliberately holds NO prompt text, model output, provider metadata, reviewed-file or
-// inline-workspace content, run artifacts, secrets, or conversation history — only the
-// protocol session handle + the workspace cwd needed to make a post-reconnect prompt usable.
+// SessionRecord is the minimal session metadata persisted for cross-restart resume: the session handle
+// and workspace cwd. It holds no prompt text, model output, workspace content, run artifacts, secrets
+// or conversation history.
 type SessionRecord struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	SessionID     string `json:"sessionId"`
@@ -38,22 +37,19 @@ type SessionRecord struct {
 	UpdatedAt     string `json:"updatedAt"` // RFC3339 UTC
 }
 
-// SessionStore is the durable persistence the ACP surface uses for `session/resume` across an
-// agent process restart. It is ACP-surface-local: only the ACP session lifecycle uses it, and
-// it never touches the ReviewManager / domain. A nil store means resume is unsupported (not
-// advertised; `session/resume` → method-not-found).
+// SessionStore persists ACP sessions for `session/resume` across an agent process restart. A nil store
+// means resume is unsupported: it is not advertised and `session/resume` is method-not-found.
 type SessionStore interface {
 	Save(rec SessionRecord) error
 	Load(sessionID string) (SessionRecord, error)
 }
 
-// fileSessionStore persists one JSON file per session under a directory rooted at the
-// reviewmesh home (REVIEWMESH_HOME-aware via the caller). It tolerates a missing directory,
-// rejects malformed/expired records, and is path-safe against a hostile session id.
+// fileSessionStore persists one JSON file per session under dir. It tolerates a missing directory,
+// rejects malformed or expired records, and is safe against hostile session ids.
 type fileSessionStore struct{ dir string }
 
-// NewFileSessionStore returns a durable file-backed session store rooted at dir (typically
-// `<reviewmesh-home>/.reviewmesh/acp-sessions`). Nothing is created until the first Save.
+// NewFileSessionStore returns a file-backed session store rooted at dir. Nothing is created until the
+// first Save.
 func NewFileSessionStore(dir string) SessionStore { return &fileSessionStore{dir: dir} }
 
 // safeSessionID guards the on-disk filename against path traversal: a session id must be a

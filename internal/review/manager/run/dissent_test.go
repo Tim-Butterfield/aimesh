@@ -34,9 +34,8 @@ func TestConsensusOf_TheThreeVerdicts(t *testing.T) {
 
 // TestConsensusOf_RefusesToLabelWhatItCannotDescribe covers the two silences.
 //
-// The SINGLE-SEAT case is the one that matters. A lone seat that reported a finding has zero
-// dissenters, so the naive arithmetic calls it `unanimous` — dressing the thinnest possible evidence
-// in the strongest available word. There is no panel there to have agreed.
+// The single-seat case matters most: a lone seat has zero dissenters, so naive arithmetic would label
+// its finding `unanimous` although there is no panel to have agreed.
 func TestConsensusOf_RefusesToLabelWhatItCannotDescribe(t *testing.T) {
 	if got := consensusOf(1, 0); got != "" {
 		t.Errorf("one seat, nobody to disagree = %q, want no label at all (it is not unanimity)", got)
@@ -51,7 +50,7 @@ func TestConsensusOf_RefusesToLabelWhatItCannotDescribe(t *testing.T) {
 
 // TestConsensus_NeverTouchesTheFinding is the invariant this whole file exists to hold, and it is
 // asserted the same way the grounding and composition passes assert theirs: run the labeller over a
-// set of decisions and prove every field that decides what a caller SEES is byte-identical after.
+// set of decisions and prove every field that decides what a caller sees is unchanged after.
 func TestConsensus_NeverTouchesTheFinding(t *testing.T) {
 	adj := adjudication.Result{
 		Findings: []review.Finding{
@@ -82,7 +81,7 @@ func TestConsensus_NeverTouchesTheFinding(t *testing.T) {
 	if adj.Decisions[1].Consensus != ConsensusUnanimous {
 		t.Fatalf("3 of 3 seats = %q, want unanimous", adj.Decisions[1].Consensus)
 	}
-	// And NOTHING a caller reads has moved.
+	// Nothing a caller reads has changed.
 	if len(adj.Findings) != len(before) {
 		t.Fatalf("findings = %d, want %d — the contested finding was DROPPED", len(adj.Findings), len(before))
 	}
@@ -106,7 +105,7 @@ func TestConsensus_NeverTouchesTheFinding(t *testing.T) {
 	if sum.Panelled != 2 || sum.Contested != 1 || sum.Unanimous != 1 || sum.Majority != 0 {
 		t.Errorf("tally = %+v, want 2 panelled / 1 contested / 1 unanimous", *sum)
 	}
-	// The caveat travels WITH the number, in the artifact, so no surface can quote the count
+	// The caveat travels with the number, in the artifact, so no surface can quote the count
 	// without it.
 	if !strings.Contains(sum.Note, "silent seat is not a seat that disagreed") {
 		t.Errorf("note does not lead with what silence is NOT: %q", sum.Note)
@@ -167,8 +166,7 @@ func TestDissent_OnARealRun_TheContestedFindingIsReportedAnyway(t *testing.T) {
 	if out.Dissent.Contested != 1 || out.Dissent.Majority != 1 || out.Dissent.Panelled != 2 {
 		t.Errorf("tally = %+v, want 2 panelled / 1 majority / 1 contested", *out.Dissent)
 	}
-	// AND IT REACHES THE HUMAN ARTIFACT. Until this landed, review-summary.md listed every finding
-	// identically no matter how much of the panel stood behind it.
+	// The label reaches review-summary.md, the artifact a person opens.
 	summary := readFileT(t, filepath.Join(out.RunDir, "review-summary.md"))
 	if !strings.Contains(summary, "1 of 3 seats (contested)") {
 		t.Errorf("review-summary.md does not mark the contested finding:\n%s", summary)

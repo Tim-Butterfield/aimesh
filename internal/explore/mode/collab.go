@@ -1,34 +1,20 @@
 package mode
 
-// This file ships the AI-COLLAB COMPOSITION as a real, registered, runnable mode. The owner's
-// ai-collab decomposes into three stages exploremesh already has:
+// This file registers the ai-collab mode:
 //
-//	1. each agent SHORTLISTS its own findings, blind        → a blind round-1 findings fan-out
-//	2. the agents CHALLENGE each other's findings           → the collator-mediated cross-review round
-//	3. one final collate                                    → the severity-triaged register
+//	1. each explorer lists its own findings, blind   → blind round-1 findings
+//	2. explorers review each other's findings        → mediated cross-review round
+//	3. final collation                               → severity-triaged register
 //
-// The point of shipping it as a mode rather than as prose is that the decomposition is then TESTABLE: this
-// file adds exactly ONE artifact of its own — the blind round-1 prompt (schema.CollabFindingsPrompt, "your own
-// findings" rather than "attack this artifact") — and reuses Challenge's findings schema, closed severity
-// enum, cross-review contract, dual-canonicalizer + confirmation policy and terminal register UNCHANGED. If
-// the composition needed its own copy of any of those, the claim that ai-collab decomposes into exploremesh's
-// modes would be false, and the diff would say so.
-//
-// The one genuine task-level difference: ai-collab does NOT require a supplied artifact. The panel is
-// generating the findings, not attacking a document — so ValidateTask is nil here where Challenge sets
-// requireArtifact. An artifact may still be supplied (a panel often collaborates ON something) and the
-// round-1 prompt renders it behind the same untrusted framing when it is.
+// Apart from its round-1 prompt, ai-collab reuses Challenge's schema, cross-review contract, canonicalization
+// policy and register. Unlike Challenge it does not require an artifact; one may still be supplied.
 
 import "github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 
 func init() {
-	// ai-collab. Two FIXED rounds — blind self-shortlist, then mediated cross-review — with the
-	// ranking-grade governance policy, because the register it produces is count-bearing exactly like
-	// Challenge's and confirmation is required for EVERY count-bearing mode.
 	register(ModeSpec{
-		Name:            AICollab,
-		FormulationFree: true,
-		// The ONLY artifact this composition owns. Everything below is Challenge's, by value.
+		Name:             AICollab,
+		FormulationFree:  true,
 		Prompt:           schema.CollabFindingsPrompt,
 		ExplorerSchema:   schema.ChallengeExplorerSchema,
 		Objective:        ObjectiveCanonicalizeMediateCollate,

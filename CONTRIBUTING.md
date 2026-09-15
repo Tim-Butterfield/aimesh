@@ -12,7 +12,7 @@ Thanks for your interest. `aimesh` is a Go monorepo built around [`meshcore/`](m
 Because the workspace spans several modules, a root `go build ./...` does **not** cover the nested modules. Use the workspace-aware `make` targets:
 
 ```bash
-make gate         # gofmt + vet + build + test + race + boundary-check + both golden runs  (~90s)
+make gate         # gofmt + vet + staticcheck + build + test + race + boundary-check + both golden runs
                   #   ← run this before every PR
 ```
 
@@ -25,6 +25,7 @@ Individual targets:
 | `make test-all` | test every workspace module (`-count=1`: the gate never trusts the test cache) |
 | `make race-all` | every package under the race detector — the gate's check |
 | `make race` | the fast subset (transports, stdio pumps, the run registry) for a quick local loop |
+| `make staticcheck-all` | run the pinned staticcheck across every module (no install needed) |
 | `make fmt-check` | fail on gofmt drift (`gofmt -l` alone exits 0, so its output is what is tested) |
 | `make boundary-check` | enforce the meshcore import boundary (see below) |
 | `make golden-run` | assert reviewmesh's behavior is unchanged against a golden fixture |

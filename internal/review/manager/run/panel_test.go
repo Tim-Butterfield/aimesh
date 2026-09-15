@@ -16,15 +16,15 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/fake"
 )
 
-// seatFake is one panel seat's adapter: it reports ONE finding whose title/file are its own, so a
-// union across seats is distinguishable from a single seat's output. `evidence` lets a test give a
-// seat a WEAK identity (self-report) to exercise the quarantine.
+// seatFake is one panel seat's adapter. It reports one finding with its own title and file, so a union
+// across seats is distinguishable from one seat's output; `evidence` gives a seat a weak identity
+// (self-report).
 type seatFake struct {
 	name     string
 	title    string
 	file     string
 	evidence review.IdentityEvidence
-	// actual overrides the echoed model (an identity MISMATCH when it differs from the request).
+	// actual overrides the echoed model (an identity mismatch when it differs from the request).
 	actual string
 }
 
@@ -71,10 +71,8 @@ func panelManager(t *testing.T, seats ...seatFake) *Manager {
 	return &Manager{Cfg: cfg, Adapters: adapters, ArtifactDir: t.TempDir(), TempBase: t.TempDir()}
 }
 
-// TestPanel_EverySeatExecutesAndFindingsUnion: an N-seat panel runs EVERY seat (no clamping, no
-// dropping), the host sees the union of their findings, and the executed roster echoes one entry
-// per requested seat. On pre-panel code there is only one blind reviewer, so a 3-seat profile
-// would run once and report one finding.
+// TestPanel_EverySeatExecutesAndFindingsUnion checks that every seat of an N-seat panel runs, the host
+// sees the union of their findings, and the executed roster has one entry per requested seat.
 func TestPanel_EverySeatExecutesAndFindingsUnion(t *testing.T) {
 	// Distinct files ⇒ distinct fingerprints, so the union is observable (findings are deduped by
 	// kind|file|location, not by title).
@@ -124,10 +122,9 @@ func TestPanel_EverySeatExecutesAndFindingsUnion(t *testing.T) {
 	}
 }
 
-// TestPanel_SeatsAreBlindToEachOther: every seat's FIRST-round prompt is byte-identical (a seat can
-// only have seen the workspace), and no seat's prompt ever contains another seat's finding. This is
-// the blindness spec's observable half — the structural half is that runSeat passes nil decisions
-// and a seat-local `reported` slice.
+// TestPanel_SeatsAreBlindToEachOther checks that every seat's first-round prompt is identical and no
+// seat's prompt contains another seat's finding. Structurally, runSeat passes nil decisions and a
+// seat-local `reported` slice.
 func TestPanel_SeatsAreBlindToEachOther(t *testing.T) {
 	m := panelManager(t,
 		seatFake{name: "seat-a", title: "issue A", file: "a.go"},
@@ -155,7 +152,7 @@ func TestPanel_SeatsAreBlindToEachOther(t *testing.T) {
 	if strings.Contains(second, "issue A") {
 		t.Error("seat 2's prompt contains seat 1's finding — blindness violated")
 	}
-	// Later rounds carry ONLY the seat's own prior finding.
+	// Later rounds carry only the seat's own prior finding.
 	if b, rerr := os.ReadFile(filepath.Join(out.RunDir, "calls", "c-0001-s2-i2", "prompt.md")); rerr == nil {
 		if strings.Contains(string(b), "issue A") {
 			t.Error("seat 2's round-2 prompt contains seat 1's finding — blindness violated between rounds")
@@ -226,9 +223,9 @@ func TestPanel_IdentityMismatchKeepsTheSeatAndItsFindings(t *testing.T) {
 	}
 }
 
-// TestPanel_ProvenanceIsHostComputed: agreement counts and supporting seats are recorded on the
-// DECISION (never parsed from a model), a finding two seats reported carries both of them, and the
-// seats that ran but did not report it are recorded as dissent.
+// TestPanel_ProvenanceIsHostComputed checks that the host records agreement counts and supporting seats
+// on the decision, a finding two seats reported carries both, and seats that ran without reporting it
+// are recorded as dissent.
 func TestPanel_ProvenanceIsHostComputed(t *testing.T) {
 	m := panelManager(t,
 		seatFake{name: "seat-a", title: "shared issue", file: "shared.go"},
@@ -263,14 +260,10 @@ func TestPanel_ProvenanceIsHostComputed(t *testing.T) {
 	}
 }
 
-// TestPanel_WeakIdentitySupportIsAppliableAndLabeled: a finding supported ONLY by weak-identity seats
-// is applyable like any other, and each supporting seat's tier is recorded so a reader can see what
-// the support consists of.
-//
-// Refusing such findings for apply would presume we can tell a proven model from a claimed one — which
-// the codex echo test shows we cannot — and would withhold fixes for genuine defects on the strength of
-// a tier that might itself be our own argument handed back to us. Identity is recorded, never acted on
-// (../../../../docs/model-identity.md).
+// TestPanel_WeakIdentitySupportIsAppliableAndLabeled checks that a finding supported only by
+// weak-identity seats is applyable, with each supporting seat's tier recorded. Identity is recorded,
+// never acted on (../../../../docs/model-identity.md), because a proven model cannot reliably be told
+// from a claimed one.
 func TestPanel_WeakIdentitySupportIsAppliableAndLabeled(t *testing.T) {
 	finding := func(title, file string) review.Finding {
 		return review.Finding{ID: "x", Title: title, Kind: review.KindFail, Severity: review.SeverityHigh, File: file, Location: "1"}
@@ -316,9 +309,8 @@ func TestPanel_WeakIdentitySupportIsAppliableAndLabeled(t *testing.T) {
 	}
 }
 
-// TestPanelBudget_RefusesBudgetBelowSeatCount: a run-level budget that cannot give every seat one
-// round is a CONFIG ERROR, because quietly running fewer seats than requested is the silent
-// degradation the panel exists to rule out.
+// TestPanelBudget_RefusesBudgetBelowSeatCount checks that a run budget that cannot give every seat one
+// round is a configuration error rather than a silently smaller panel.
 func TestPanelBudget_RefusesBudgetBelowSeatCount(t *testing.T) {
 	two := 2
 	if _, err := newPanelBudget(&two, 4, 3); err == nil {
@@ -336,8 +328,8 @@ func TestPanelBudget_RefusesBudgetBelowSeatCount(t *testing.T) {
 	}
 }
 
-// TestPanel_BudgetCapsRoundsNotSeats: when the budget is exhausted, seats stop STABILIZING (and say
-// so in the roster) — they are never removed from the panel.
+// TestPanel_BudgetCapsRoundsNotSeats checks that an exhausted budget stops seats stabilizing, as the
+// roster records, and never removes a seat.
 func TestPanel_BudgetCapsRoundsNotSeats(t *testing.T) {
 	m := panelManager(t,
 		seatFake{name: "seat-a", title: "issue A", file: "a.go"},

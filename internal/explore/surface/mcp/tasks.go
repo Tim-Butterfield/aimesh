@@ -7,33 +7,20 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the `io.modelcontextprotocol/tasks` PROJECTION over this server's run registry.
-// It is the same projection reviewmesh carries, over
-// the same job shape, and it is deliberately a sibling rather than shared code: the two registries
-// are separate types in separate modules, and the adapter is small enough that a shared abstraction
-// would cost more than the duplication it removed.
-//
-// `taskId == runId`. Nothing here mints an identifier, drives a lifecycle, or keeps state. A task is
-// a READ of a `*record` — the same record `explore_run_status` and `explore_run_result` read.
-//
-// exploremesh has NO WRITE PATH, so the cancellation contract here is simpler than reviewmesh's and
-// is exactly the extension's own: cancelling stops spend, and the acknowledgement promises delivery
-// of the signal and nothing about the terminal status.
-//
-// The registry is in memory, so a `taskId` is durable for the life of THIS SERVER PROCESS only.
+// This file projects the run registry as `io.modelcontextprotocol/tasks` tasks. A task id is the run id,
+// and a task is a read of the same record explore_run_status and explore_run_result read; nothing here
+// keeps state. Explorations write nothing, so cancelling a task stops spend and promises nothing about the
+// terminal status. The registry is in memory, so a task id lasts only as long as the server process.
 
-// TaskPollIntervalMs is the `pollIntervalMs` this server suggests — see reviewmesh's copy for why
-// two seconds.
+// TaskPollIntervalMs is the `pollIntervalMs` this server suggests.
 const TaskPollIntervalMs = 2000
 
 // taskProvider adapts the run registry to the transport's TaskProvider seam.
 type taskProvider struct{ s *Server }
 
-// resolveTask returns the record a task id names, treating a terminal run whose retention TTL has
-// elapsed as GONE. Eviction is lazy, so without this a task could stay resolvable long past the
-// `ttlMs` we advertised and every later poll would have to report a zero lifetime — which tells a
-// conforming client to throw the handle away. The extension permits discarding an expired task and
-// answering "cannot be found".
+// resolveTask returns the record a task id names, with its remaining lifetime. A finished run past its
+// retention TTL is treated as gone, because eviction is lazy and an expired task may be reported as not
+// found.
 func (t taskProvider) resolveTask(taskID string) (*record, *int64, bool) {
 	rec := t.s.runs.get(taskID)
 	if rec == nil {
@@ -41,8 +28,7 @@ func (t taskProvider) resolveTask(taskID string) (*record, *int64, bool) {
 	}
 	state, _, _, _ := rec.snapshot()
 	if state == StateRunning {
-		// A RUNNING record is never evicted, so there is no lifetime bound to advertise. `null` is
-		// the honest value.
+		// A running record is never evicted, so its lifetime is reported as null.
 		return rec, nil, true
 	}
 	_, end := rec.timestamps()
@@ -50,10 +36,7 @@ func (t taskProvider) resolveTask(taskID string) (*record, *int64, bool) {
 	if remaining <= 0 {
 		return nil, nil, false
 	}
-	ms := remaining.Milliseconds()
-	if ms < 1 {
-		ms = 1
-	}
+	ms := max(remaining.Milliseconds(), 1)
 	return rec, &ms, true
 }
 
@@ -78,10 +61,8 @@ func (t taskProvider) Task(taskID string) (proto.TaskView, bool) {
 	case StateCancelled:
 		v.Status, v.StatusMessage = proto.TaskCancelled, text
 	default:
-		// `complete` AND `halted` both land here. The extension: "The `failed` status **MUST NOT**
-		// represent non-JSON-RPC errors like tool results with `isError: true`. Errors within
-		// protocol method results **MUST** use `completed` status with error details in the
-		// `result` field." A domain halt is not a protocol fault, so it is `completed` + `isError`.
+		// Complete and halted runs are both `completed`: the tasks extension reserves `failed` for
+		// protocol errors, so a halt is a completed task whose result has isError set.
 		v.Status, v.StatusMessage = proto.TaskCompleted, text
 		v.Result = t.s.payloadFor(rec)
 	}
@@ -102,9 +83,9 @@ func (t taskProvider) CancelTask(taskID string) bool {
 	return true
 }
 
-// taskHandOff reports whether THIS call answered with a task handle instead of the job shape. See
-// reviewmesh's copy: the run must still be running, and Call.CreateTask must accept — which it does
-// only for a modern request from a client that declared the extension.
+// taskHandOff reports whether this call answered with a task handle instead of the job shape: the run must
+// still be running, and Call.CreateTask accepts only a modern request from a client that declared the
+// tasks extension.
 func taskHandOff(c *proto.Call, rec *record) bool {
 	if state, _, _, _ := rec.snapshot(); state != StateRunning {
 		return false

@@ -9,21 +9,13 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// This file pins the reviewmesh half of the per-request protocol context: every path this server
-// judges, and every root it hands the write path, comes from the REQUEST's own resolver.
-//
-// The trap it guards: a remediation that read `s.trusted().Roots()` from inside its own goroutine,
-// minutes after the request arrived, would let a `roots/list_changed` in that window silently replace
-// the roots the write window is then recorded against, so the receipt would describe a confinement
-// the caller never asked for. The env captures the resolver once, when the call arrives, and the
-// write is recorded against that.
-//
-// The property is proved on the `fromRun` write, which is the only write this surface has: there is no
-// one-call review-and-write form (a write whose response is cancelled would leave the caller holding no
-// handle to the run it created).
+// Every path this server judges, and every root it gives the write path, comes from the resolver
+// captured when the request arrived. A roots/list_changed during a long remediation must not change
+// the roots its write is recorded against. The property is checked on the fromRun write, the only
+// write this surface has.
 
-// gatedReviewer is the fake Manager with a gate: the phase under test blocks until the test releases
-// it, which is the window in which the client changes its roots.
+// gatedReviewer blocks the phase under test until released, giving the client a window to change
+// its roots.
 type gatedReviewer struct {
 	fakeReviewer
 	entered chan struct{}
@@ -45,12 +37,11 @@ func TestPerRequestTrust_TheWriteIsRecordedAgainstTheRootsTheCallArrivedWith(t *
 	s := newServer(t, rv, func(s *mcp.Server) {
 		s.Ceiling, s.AllowWrites = []string{parent}, true
 	})
-	// The client declares the server's own root, so nothing is narrowed to begin with.
+	// The client declares the server's own root, so nothing is narrowed initially.
 	c := serveRooted(t, s, true, true, []string{parent})
 	settleRoots(t, c, 1)
 
-	// Turn one: the report that produces the durable handle. It completes before any write exists,
-	// which is the whole point of the two-step rule.
+	// The report that produces the handle completes before any write exists.
 	rep := c.tool(t, "review_report", map[string]any{"workspace": ws})
 	if rep.rpc != nil {
 		t.Fatalf("review_report: %+v", rep.rpc)
@@ -67,8 +58,8 @@ func TestPerRequestTrust_TheWriteIsRecordedAgainstTheRootsTheCallArrivedWith(t *
 		})
 	}()
 
-	// The write window is open. The client moves its workspace to a DISJOINT tree, which empties the
-	// server's effective root set — the process-global resolver now refuses everything.
+	// With the write window open, the client moves to a disjoint tree, emptying the server's effective
+	// root set.
 	<-rv.entered
 	c.setRoots([]string{elsewhere})
 	c.notify("notifications/roots/list_changed", nil)
@@ -84,8 +75,7 @@ func TestPerRequestTrust_TheWriteIsRecordedAgainstTheRootsTheCallArrivedWith(t *
 	if len(got) != 1 {
 		t.Fatalf("the write window was recorded against %v — it must carry the roots the REQUEST arrived with, not whatever the process-global resolver held when the write happened to run", got)
 	}
-	// And a NEW call, which arrives after the narrowing, is judged by the narrowed set: per-request
-	// means per-request in both directions.
+	// A new call after the narrowing is judged by the narrowed set.
 	if res := c.tool(t, "review_report", map[string]any{"workspace": ws}); !res.isError {
 		t.Fatal("a call arriving AFTER the client narrowed to a disjoint tree must be refused")
 	}

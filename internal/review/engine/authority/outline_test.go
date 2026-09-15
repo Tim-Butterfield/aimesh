@@ -33,9 +33,6 @@ func TestOutline_RangesSelectExactlyTheSection(t *testing.T) {
 		if !strings.HasPrefix(got, "# "+want[i]) {
 			t.Errorf("range %d..%d does not start at its own heading; got %q", s.Start, s.End, got)
 		}
-		if s.Bytes() != len(got) {
-			t.Errorf("Bytes() = %d but the range spans %d", s.Bytes(), len(got))
-		}
 	}
 	// The sections must PARTITION the document from the first heading on — a gap would mean the
 	// offered ranges silently omit text.

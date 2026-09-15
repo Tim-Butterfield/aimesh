@@ -1,20 +1,14 @@
 package pipeline
 
-// This file drives the FIXED-SPACE terminal path (compare and forecast):
+// This file runs the fixed-space terminal path used by compare and forecast:
 //
-//	blind round 1  →  HOST AGGREGATION (matrix + agreement + Pareto, or pooled estimate + dispersion)
-//	               →  governance CLAIMS over the blind round-1 baseline
-//	               →  the terminal collate call, which contributes NARRATIVE ONLY
-//	               →  the mode's terminal view over the host aggregate
+//	blind round 1  →  host aggregation
+//	               →  governance claims over the blind round-1 baseline
+//	               →  collator call for narrative only
+//	               →  the mode's output view
 //
-// It is the shortest path in the pipeline, and the omissions are the point. There is no canonicalizer call,
-// no confirmation round, no mediation and no partition, because the option set / estimation target was
-// DECLARED by the user before the fan-out — so there is no emergent universe to resolve and nothing for the
-// governance ceremony next door to adjudicate. Adding those stages here would not make the result
-// safer; it would invent a contestable judgment and then stage a process to settle it.
-//
-// The ordering does the enforcement. Every number is computed BEFORE the only model call left in the run,
-// so "the collator did not produce this value" is a property of the sequence rather than of the prompt.
+// The user declares the space, so there is no canonicalization, confirmation or mediation. Every number is
+// computed before the collator is called.
 
 import (
 	"fmt"
@@ -28,17 +22,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// fixedSpacePath runs the terminal path for a mode that sets FixedSpace. It returns the Result by value
-// (like Run) so callers keep the existing shape.
+// fixedSpacePath runs the terminal path for a mode that sets FixedSpace.
 func (r *runner) fixedSpacePath(primary []schema.Envelope, payloadHash string) (Result, error) {
 	res := r.res
 	if len(res.Rounds) == 0 {
 		return *res, fault.New(fault.Internal, "fixed-space aggregation: no recorded round-1 baseline")
 	}
-	// The blind baseline is built through the constructor that REFUSES anything but a blind round 1.
-	// A fixed-space mode has exactly one round, so this can only succeed — which is the point of asking: the
-	// anti-echo invariant must hold by the same mechanism here as everywhere else, not by the mode contract
-	// remembering that it declared a single round.
 	baseline, berr := govern.NewBlindBaseline(res.Rounds[0])
 	if berr != nil {
 		herr := fault.Wrap(fault.Internal, "fixed-space baseline", berr)
@@ -50,10 +39,8 @@ func (r *runner) fixedSpacePath(primary []schema.Envelope, payloadHash string) (
 		Panel: res.Panel, FormulationHash: payloadHash,
 	}
 
-	// -- HOST AGGREGATION: the whole result, computed from the recorded blind envelopes before
-	// any further model call. A failure here is a failure of the DECLARED space (an empty option set, a
-	// panel that produced no poolable estimate) — not a lost collator — so it halts without a degraded
-	// artifact, whose reason codes would misdescribe what happened.
+	// An aggregation failure reflects the declared space or the responses, not the collator, so it halts
+	// without a degraded artifact.
 	emit(r.onEvent, "info", "aggregate_start", fmt.Sprintf("fixed space (%s): host-aggregating %d blind response(s) — no canonicalizer, no confirmation round, no partition", r.spec.Name, len(primary)), map[string]any{
 		"mode": r.spec.Name, "primary": len(primary), "class": string(r.spec.ModeClass()),
 	})
@@ -64,9 +51,6 @@ func (r *runner) fixedSpacePath(primary []schema.Envelope, payloadHash string) (
 		return *res, herr
 	}
 
-	// -- Governance CLAIMS: the host's claims go into the same append-only ledger every other
-	// mode's do, so a fixed-space claim is auditable by exactly the same machinery — it simply carries
-	// FixedSpaceNoPartition where an emergent-space claim carries a partition revision.
 	ledger := &govern.ClaimLedger{}
 	for _, c := range view.Claims {
 		ledger.Emit(c)
@@ -78,8 +62,6 @@ func (r *runner) fixedSpacePath(primary []schema.Envelope, payloadHash string) (
 		"partition": govern.FixedSpaceNoPartition,
 	})
 
-	// -- Terminal collation: NARRATIVE ONLY. The collator is shown the finished numbers and its output can
-	// only ever reach the quarantined collatorNarrative namespace.
 	prompt, perr := r.spec.FixedSpace.CollatorPrompt(in, view)
 	if perr != nil {
 		return *res, fault.Wrap(fault.Internal, "fixed-space collator prompt", perr)
@@ -97,35 +79,27 @@ func (r *runner) fixedSpacePath(primary []schema.Envelope, payloadHash string) (
 	cleanup()
 	res.RawSynthesis = append([]byte(nil), responseBody(sres)...) // captured even on serr / parse failure
 	if serr != nil {
-		// The collator became UNAVAILABLE after the fan-out. This is a degraded-artifact case, and for
-		// a FIXED-space mode the degraded artifact is a REAL host register keyed on the mode's declared key
-		// field — a genuine comparison, because the key universe was given to the explorers.
 		herr := fault.Wrap(fault.Internal, "collator narrative call failed (the HOST-COMPUTED result is preserved in the degraded artifact)", serr)
 		emit(r.onEvent, "error", "halt", herr.Error(), map[string]any{"haltClass": haltClassOf(herr)})
 		res.Degraded = r.degrade(schema.DegradedCollatorUnavailable, serr.Error())
 		return *res, herr
 	}
-	// Formulation-free modes skip the formulate-phase collator identity check (there is no formulate call),
-	// so the collator identity is classified HERE at its only call. It is RECORDED and never gates.
+	// The collator's identity status is recorded but does not gate the run.
 	status, _ := classify(r.collAdapter, sres, r.plan.Collator.Model, r.plan.Collator.Adapter)
 	res.CollatorStatus = status
 	res.CollatorCaveat = collatorIdentityCaveat(status)
-	// SAME-IDENTITY invariant: the collate call must resolve to the model pinned at pre-flight.
+	// The collator must resolve to the model pinned at pre-flight.
 	if ierr := r.ids.observe("collator", sres.ActualModel); ierr != nil {
 		emit(r.onEvent, "error", "halt", ierr.Error(), map[string]any{"haltClass": haltClassOf(ierr)})
 		res.Degraded = r.degrade(schema.DegradedIdentityHalt, ierr.Error())
 		return *res, ierr
 	}
 
-	// The narrative is parsed into the quarantined namespace. An UNUSABLE narrative is deliberately NOT a
-	// halt: the collator contributed no value to this result, so a body it garbled degrades the explanation
-	// and nothing else — the contract records a host note saying so. Throwing away a complete host-computed
-	// matrix because the narrator stumbled would be the opposite of the honesty rule it is meant to serve.
+	// An unusable narrative does not halt; the contract records a host note instead.
 	narrative, nerr := r.spec.FixedSpace.ParseNarrative(responseBody(sres), r.plan.Collator.Identity())
 	if nerr != nil {
 		return *res, fault.Wrap(fault.Internal, "fixed-space narrative", nerr)
 	}
-	// Fold the prose into the governance report so collatorNarrative lives in exactly ONE place.
 	folded := govern.NewReport(res.Panel, ledger, narrative)
 	res.Governance = &folded
 

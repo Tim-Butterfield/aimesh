@@ -1,47 +1,32 @@
 package schema
 
-// This file holds ExtractJSONObject: the narrow, enumerated-and-RECORDED repair pass exploremesh runs
-// over UNTRUSTED model output before it is unmarshaled (model output is only ever parsed
-// as JSON data, never executed). A provider can fence its JSON
-// in a ```json … ``` block ("invalid character '`'"). The repair is extraction ONLY: strip a single code
-// fence, trim surrounding prose to exactly one balanced top-level object, and RECORD each repair — it
-// deliberately does NOT coerce field types or permissively decode (schema type-variance tolerance is
-// out of scope). A clean input that is already exactly one object returns byte-identical bytes with an
-// empty repair list, so the fake adapter + existing goldens see zero behavior change.
+// This file holds ExtractJSONObject, the repair pass applied to model output before it is decoded. It
+// only extracts: it strips one code fence and surrounding prose to leave exactly one top-level object,
+// and records each repair. It never coerces types or decodes permissively.
 
 import (
 	"bytes"
 	"errors"
 )
 
-// Repair labels — the closed set of transformations ExtractJSONObject may apply. Each is appended to
-// the returned repairs slice ONLY when actually applied, so a caller can audit exactly what was done.
-// Surrounding-whitespace trimming is deliberately NOT a repair: it never changes the JSON value, so a
-// whitespace-padded clean object still reports an empty repair list.
+// Repair labels are the transformations ExtractJSONObject may apply, each reported only when applied.
+// Trimming surrounding whitespace is not a repair, since it never changes the value.
 const (
 	RepairStrippedCodeFence    = "stripped-code-fence"
 	RepairTrimmedLeadingProse  = "trimmed-leading-prose"
 	RepairTrimmedTrailingProse = "trimmed-trailing-prose"
 )
 
-// ExtractJSONObject recovers the single top-level JSON object from an untrusted model response, applying
-// only the enumerated repairs above and appending a label for each one used. It returns the extracted
-// object bytes (a sub-slice of the input for a clean object — byte-identical, zero-copy), the ordered
-// repair list, and an error when the input does not contain exactly one unambiguous object.
-//
-// Guarantees:
-//   - A clean input that is already exactly one JSON object (optionally whitespace-padded) returns
-//     byte-identical object bytes with an EMPTY repair list.
-//   - TWO OR MORE top-level objects → error (ambiguous — it never silently picks one); ZERO → error.
-//   - It is extraction only: it does NOT validate the JSON, coerce types, or permissively decode. The
-//     caller still json.Unmarshal's (and schema-validates) the returned bytes.
+// ExtractJSONObject returns the single top-level JSON object in raw, a sub-slice of the input, and the
+// repairs applied in order. An input that is already one object, possibly padded with whitespace, comes
+// back unchanged with no repairs. No object, or more than one, is an error. The result is not validated;
+// the caller decodes and schema-checks it.
 func ExtractJSONObject(raw []byte) (obj []byte, repairs []string, err error) {
 	b := bytes.TrimSpace(raw)
 	if len(b) == 0 {
 		return nil, nil, errors.New("no JSON object found (empty response)")
 	}
-	// A single wrapping markdown code fence (```json … ``` or ``` … ```) is the common provider failure:
-	// unwrap it before searching for the object.
+	// Unwrap a single markdown code fence before searching for the object.
 	if inner, ok := stripCodeFence(b); ok {
 		b = bytes.TrimSpace(inner)
 		repairs = append(repairs, RepairStrippedCodeFence)
@@ -58,7 +43,7 @@ func ExtractJSONObject(raw []byte) (obj []byte, repairs []string, err error) {
 	case 0:
 		return nil, repairs, errors.New("no JSON object found")
 	case 1:
-		// single unambiguous object — the only accepted shape
+		// exactly one object
 	default:
 		return nil, repairs, errors.New("multiple top-level JSON objects (ambiguous)")
 	}
@@ -77,12 +62,9 @@ func ExtractJSONObject(raw []byte) (obj []byte, repairs []string, err error) {
 // fence is the CommonMark code-fence delimiter.
 const fence = "```"
 
-// stripCodeFence unwraps a SINGLE markdown code fence around b (which the caller has already
-// whitespace-trimmed), returning the inner content and true. It is conservative — it declines (returns
-// b, false) unless b is unambiguously one wrapping fence: it must open with ``` on its own line
-// (optionally followed by a plain info string), close with a trailing ```, and contain no further fence
-// delimiter inside (multiple code blocks are ambiguous, so they are left for the object scanner to
-// reject). It never treats brace/quote-bearing text as an info string.
+// stripCodeFence unwraps one markdown code fence around the trimmed input b and returns the inner content
+// and true. It returns b and false unless b opens with ``` and an optional plain info string on its own
+// line, ends with ```, and contains no other fence.
 func stripCodeFence(b []byte) ([]byte, bool) {
 	if !bytes.HasPrefix(b, []byte(fence)) {
 		return b, false
@@ -91,8 +73,7 @@ func stripCodeFence(b []byte) ([]byte, bool) {
 	if nl < 0 {
 		return b, false // a single-line ``` — not a wrapping block
 	}
-	// The remainder of the opening line after ``` is the info string (e.g. "json"); reject anything
-	// that carries JSON punctuation so we never mistake inline content for a language tag.
+	// The rest of the opening line is the info string; JSON punctuation there means it is content.
 	if info := b[len(fence):nl]; bytes.ContainsAny(info, "{}[]\"`") {
 		return b, false
 	}
@@ -102,23 +83,21 @@ func stripCodeFence(b []byte) ([]byte, bool) {
 	}
 	inner = inner[:len(inner)-len(fence)]
 	if bytes.Contains(inner, []byte(fence)) {
-		return b, false // a second fence ⇒ more than one block ⇒ ambiguous
+		return b, false // more than one block is ambiguous
 	}
 	return inner, true
 }
 
-// topLevelObjects returns the [start,end) byte spans of every top-level (nesting depth 0) JSON object in
-// b, in order. The scanner is JSON-string-aware: braces and brackets inside a string literal (honoring
-// backslash escapes) do NOT change depth, so a `}` inside a string can never falsely close an object.
-// A structural imbalance (unterminated object/array or string, or an unmatched close) is an error — the
-// caller surfaces it as the drop reason rather than guessing.
+// topLevelObjects returns the [start,end) spans of every top-level JSON object in b, in order. Brackets
+// inside string literals are ignored. An unterminated string or bracket, or an unmatched close, is an
+// error.
 func topLevelObjects(b []byte) ([][2]int, error) {
 	var spans [][2]int
 	depth := 0
 	inString := false
 	escaped := false
 	objStart := -1 // start index of the current top-level run when it opened with '{', else -1
-	for i := 0; i < len(b); i++ {
+	for i := range b {
 		c := b[i]
 		if inString {
 			switch {

@@ -34,12 +34,6 @@ func TestMinimumSchema_ValidatesAndRoundTrips(t *testing.T) {
 			t.Errorf("round-trip field %d = %+v, want %+v", i, back.Fields[i], m.Fields[i])
 		}
 	}
-	// every reserved field must be recognized
-	for _, f := range m.Fields {
-		if !IsReserved(f.Name) {
-			t.Errorf("minimum field %q not reported reserved", f.Name)
-		}
-	}
 }
 
 func TestGuard_AcceptsAdditive(t *testing.T) {

@@ -6,34 +6,11 @@ import (
 	"strings"
 )
 
-// defaultExcludedDirs are directory names never copied, diffed, committed, or
-// targeted by review. They are internal/generated/local folders that must be safe
-// against `aimesh review run --apply .` at a repo root.
-//
-// The agent/IDE client-config family (`.vscode`, `.idea`, `.windsurf`, `.claude`,
-// `.cursor`, `.codex`, `.gemini`, and this tool's own `.aimesh`) is excluded from the COPY
-// as well as write-denied by meshcore/scope. Write-denial alone is not enough: a file that
-// is copied is a file that can be SHOWN to a model, proposed as an edit, and accepted by a
-// human who is reading a diff rather than auditing a path — and `.vscode/mcp.json` or
-// `.claude/settings.json` is executable configuration, not source. Excluding it from the
-// copy removes the whole chain.
-//
-// `.reviewmesh` and `.exploremesh` are LEGACY locations — nothing writes them since state
-// moved under `.aimesh/{review,explore}` — and they stay listed precisely because of that.
-// Anyone who used an earlier build still has those directories on disk with real
-// configuration in them; dropping the entries would newly expose exactly the population
-// that has something to expose. An entry in a denylist costs two lines and protects a file
-// we cannot prove is absent from a user's machine.
-// WHAT EARNS A PLACE HERE: a name that is present on machines this tool has never seen. `.git` and
-// the build/artifact names are ecosystem conventions; the client-config family ships with widely
-// deployed agent/IDE tooling; `.aimesh` (and its legacy spellings) is this tool's own state.
-//
-// `.aikit` was removed for failing exactly that test. It is one author's local tool, and a
-// general-purpose reviewer has no business assuming it exists in anyone else's environment: on every
-// other machine the entry matched nothing, and on the one machine it did match it was the STRICTEST
-// tier — refusing review targets under a directory whose conventions the tool had simply absorbed
-// from where it happened to be developed. A private path in a shipped denylist is a development
-// environment leaking into a product.
+// defaultExcludedDirs are directory names never copied, diffed, committed or targeted. They cover
+// VCS, build and dependency output; agent and IDE client configuration, which is excluded from the
+// copy as well as write-denied, because a copied file can be shown to a model and proposed as an
+// edit; and this tool's state directories, including older per-application names. A name belongs
+// here only if it exists on machines this tool has never seen.
 var defaultExcludedDirs = map[string]struct{}{
 	".git":         {},
 	"tmp":          {},
@@ -63,13 +40,12 @@ var defaultExcludedFiles = map[string]struct{}{
 	"claude_desktop_config.json": {},
 }
 
-// IsExcluded reports whether a workspace-relative path is excluded from review: any path
-// component is an excluded directory or an excluded file name. Excluded FILE names are
-// matched per component too (not only on the basename), so `.mcp.json/x` — a directory
-// wearing a protected file's name — cannot slip a child through.
+// IsExcluded reports whether any component of a workspace-relative path is an excluded directory or
+// file name. File names are matched per component too, so a directory named `.mcp.json` cannot
+// expose its children.
 func IsExcluded(rel string) bool {
 	rel = filepath.ToSlash(rel)
-	for _, part := range strings.Split(rel, "/") {
+	for part := range strings.SplitSeq(rel, "/") {
 		if part == "" || part == "." || part == ".." {
 			continue
 		}
@@ -86,21 +62,11 @@ func IsExcluded(rel string) bool {
 	return false
 }
 
-// noteworthyExclusion reports whether an exclusion is worth telling the user about.
-//
-// NOT EVERY OMISSION IS NEWS, and treating them as if they were is how a disclosure becomes noise
-// that people learn to skip. `node_modules`, `dist`, `build`, `vendor`, `coverage`, `.cache`, `tmp`
-// and `.git` are excluded by universal convention: they exist in nearly every repository, nobody
-// asks for findings in them, and reporting them on every single run would bury the one line that
-// matters under five that never do.
-//
-// The CLIENT-CONFIG family is different, and it is the reason this exists. `.claude`, `.cursor`,
-// `.codex`, `.gemini`, `.vscode`, `.idea`, `.windsurf` and `.aimesh` hold rules, prompts and hooks
-// that ARE source — a user can reasonably point a review at a repository expecting those to be judged,
-// so dropping them silently would be a surprise. That is worth spending a line on, and
-// `--allow-protected-paths` is what a reader does about it.
+// noteworthyExclusion reports whether an exclusion is worth reporting. Conventional VCS, build and
+// dependency directories are excluded silently. Client configuration is reported, because it holds
+// rules, prompts and hooks a user may expect to be read, and --allow-protected-paths includes it.
 func noteworthyExclusion(rel string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+	for part := range strings.SplitSeq(filepath.ToSlash(rel), "/") {
 		if part == "" || part == "." || part == ".." {
 			continue
 		}
@@ -112,29 +78,18 @@ func noteworthyExclusion(rel string) bool {
 	return false
 }
 
-// noteworthyExcludedNames is the OTHER TOOLS' config half of defaultExcludedDirs, plus the config
-// FILES. It is a separate set rather than a flag on the other one because the two answer different
-// questions: what to exclude, and what a user would be surprised to learn was excluded.
-//
-// `.aimesh` AND ITS LEGACY SPELLINGS ARE NOT HERE, and that was learned by running the tool: a
-// review of an ordinary workspace reported
-//
-//	withheld by containment: .aimesh [workspace_excluded]: rule .aimesh/**
-//
-// on every run — because this tool puts its own run artifacts there, so the directory is frequently
-// created BY the very run that then reports it. Nobody is surprised that aimesh does not review its
-// own run records, and a line that appears every time is the noise this set exists to keep out.
+// noteworthyExcludedNames are the client-configuration directory and file names among the
+// exclusions. This tool's own state directories are not included: runs create them in the
+// workspace, so reporting them would add the same line to every run.
 var noteworthyExcludedNames = map[string]struct{}{
 	".vscode": {}, ".idea": {}, ".windsurf": {},
 	".claude": {}, ".cursor": {}, ".codex": {}, ".gemini": {},
 	".mcp.json": {}, "claude_desktop_config.json": {},
 }
 
-// excludedRule names the COMPONENT that caused an exclusion, so a caveat says which rule fired
-// rather than only that one did. `.claude/rules.md` is dropped because of `.claude`, and a reader
-// deciding whether they care needs to see that word.
+// excludedRule names the component that caused an exclusion, so a caveat shows which rule fired.
 func excludedRule(rel string) string {
-	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+	for part := range strings.SplitSeq(filepath.ToSlash(rel), "/") {
 		if part == "" || part == "." || part == ".." {
 			continue
 		}
@@ -149,8 +104,7 @@ func excludedRule(rel string) string {
 	return ""
 }
 
-// excludedDetail says what the caveat covers. A directory caveat stands for its whole subtree —
-// the walk skips it — and a reader must not take one line as one file.
+// excludedDetail says what a caveat covers; a directory caveat covers its whole subtree.
 func excludedDetail(isDir bool) string {
 	if isDir {
 		return "excluded from review: this directory and everything under it was not shown to any reviewer"
@@ -159,9 +113,8 @@ func excludedDetail(isDir bool) string {
 }
 
 // safeRel reports whether a workspace-relative path stays inside the workspace (not
-// absolute/rooted, no ".." escape). The check is **cross-platform**: it rejects a path
-// rooted by EITHER platform's conventions even when this platform's filepath.IsAbs would
-// not flag it (e.g. a POSIX-rooted "/abs/x" on Windows, or a backslash-rooted "\abs\x").
+// absolute or rooted, no ".." escape). It rejects a path rooted by either platform's conventions,
+// even where this platform's filepath.IsAbs would not (such as "/abs/x" on Windows or "\abs\x").
 func safeRel(rel string) bool {
 	// Empty is not a usable relative path; a leading '/' (POSIX root) or '\' (Windows
 	// drive-relative root / UNC) is rooted on every platform. (The index is guarded by the
@@ -169,10 +122,8 @@ func safeRel(rel string) bool {
 	if rel == "" || rel[0] == '/' || rel[0] == '\\' {
 		return false
 	}
-	// Reject a Windows drive-letter / drive-relative prefix ("C:\x", "C:rel") on EVERY
-	// platform: it is rooted/drive-relative on Windows and is never a legitimate
-	// workspace-relative path anywhere. (filepath.VolumeName only detects this on Windows,
-	// so check it explicitly to keep the invariant identical cross-platform.)
+	// Reject a drive-letter prefix ("C:\x", "C:rel") on every platform. filepath.VolumeName
+	// detects it only on Windows, so it is checked explicitly.
 	if len(rel) >= 2 && rel[1] == ':' &&
 		((rel[0] >= 'A' && rel[0] <= 'Z') || (rel[0] >= 'a' && rel[0] <= 'z')) {
 		return false
@@ -189,45 +140,17 @@ func safeRel(rel string) bool {
 	return clean != ".." && !strings.HasPrefix(clean, "../")
 }
 
-// SafeRel is the exported cross-platform workspace-relative path-safety check (see safeRel).
-// It is reused by the ACP inline-workspace materializer so both share one invariant.
+// SafeRel reports whether a workspace-relative path stays inside the workspace; see safeRel.
 func SafeRel(rel string) bool { return safeRel(rel) }
 
-// protectedAncestorDirs are the excluded directory names that are also PROTECTED BY
-// CONTENT, so choosing a DESCENDANT of one as the workspace root must be refused rather
-// than silently stripping the protection.
+// protectedAncestorDirs are excluded directory names whose content is protected, so a workspace
+// root inside one is refused. Exclusion is otherwise judged relative to the root, so a root of
+// `/trusted/.vscode` would make `mcp.json` an ordinary file.
 //
-// This guards the basename-only hole: `IsExcluded` and `excludedTarget` judge
-// components RELATIVE to the root, so a root of `/trusted/.vscode` makes `mcp.json` an
-// ordinary relative file — and `.vscode/mcp.json` routinely carries MCP server env vars
-// (API keys). The `.env`/`.ssh` families are already refused because they are read-DENIED
-// (see scope.DeniedRead), but this family is read-ALLOWED and would otherwise be reachable this
-// way. `docs/security.md` promises these are "never copied or accepted as a target"; that
-// promise is only true if the ANCESTORS of the root are judged too.
-//
-// The set is deliberately NARROWER than defaultExcludedDirs. The generic build/artifact
-// names (`tmp`, `node_modules`, `vendor`, `dist`, `build`, `coverage`, `.cache`) are
-// excluded from it on purpose: nothing inside them is protected by content, a repo
-// legitimately lives at `.../build/myrepo`, and refusing every root under a `tmp` ancestor
-// would refuse most of `/tmp` — a false refusal with no security value.
-//
-// Every member is here because its CONTENT is protected: `.git/config` and `.git/hooks/**`
-// execute on the next git command, and the client-config family declares MCP servers and run
-// configurations.
-//
-// `.aimesh` AND ITS LEGACY SPELLINGS ARE NOT MEMBERS, for the same reason the build names are
-// not. `.aimesh/{review,explore}/runs/**` is where every run artifact lands, and reading a
-// previous run is ordinary work — some review and exploration modes exist to do exactly that.
-// Blanket-refusing any root beneath `.aimesh` made those runs unreachable as a target, which is
-// a false refusal against this tool's own output. The state that IS protected here is protected
-// where it matters: `.aimesh` remains WRITE-denied (scope.deniedDirs), so nothing model-authored
-// edits the config, and it remains in defaultExcludedDirs, so reviewing a PROJECT still does not
-// drag its run artifacts into the payload. Naming a run directory is a different act from
-// walking past one, and only the second needed refusing.
-//
-// `.aikit` was removed earlier — it is one author's local tool directory, it holds no content
-// this rule protects, and it was the only member that was never write-denied, which is what an
-// entry added by habit rather than by reasoning looks like.
+// Generic build names are not members: nothing in them is protected, and repositories legitimately
+// live under directories such as `build` or `tmp`. This tool's state directories are not members
+// either: previous runs stored there are legitimate targets, and the directories stay write-denied
+// and excluded from workspace copies.
 var protectedAncestorDirs = map[string]string{
 	".git":      ".git/** (includes .git/config and .git/hooks/**)",
 	".vscode":   ".vscode/** (includes .vscode/mcp.json)",
@@ -239,19 +162,17 @@ var protectedAncestorDirs = map[string]string{
 	".gemini":   ".gemini/**",
 }
 
-// protectedAncestorFiles are the excluded FILE names that must also refuse a root sitting
-// underneath them — a directory wearing a protected file's name (`.mcp.json/`) is the same
-// bypass one level down. `.ds_store` is deliberately absent: it is noise, not a secret.
+// protectedAncestorFiles are excluded file names that also refuse a root beneath a directory of
+// that name. `.ds_store` is not listed because it protects nothing.
 var protectedAncestorFiles = map[string]string{
 	".mcp.json":                  ".mcp.json",
 	"claude_desktop_config.json": "claude_desktop_config.json",
 }
 
-// protectedAncestorRule returns the rule refusing p because p ITSELF or one of its
-// ancestors is a protected path, or "". p must be ABSOLUTE — the whole point is to judge
-// the components a workspace-relative view cannot see.
+// protectedAncestorRule returns the rule refusing p because p or one of its ancestors is a
+// protected path, or "". p must be absolute.
 func protectedAncestorRule(p string) string {
-	for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(p)), "/") {
+	for part := range strings.SplitSeq(filepath.ToSlash(filepath.Clean(p)), "/") {
 		if part == "" || part == "." || part == ".." {
 			continue
 		}
@@ -266,14 +187,9 @@ func protectedAncestorRule(p string) string {
 	return ""
 }
 
-// rootForms returns the forms of a workspace ROOT that must be judged: its absolute path
-// and, when it differs, its symlink-resolved absolute path. Both are checked because a
-// symlink is otherwise a one-step alias past a component rule — `/trusted/link` pointing
-// at `/trusted/.vscode` has no protected component in its own spelling.
-//
-// A path that cannot be made absolute or resolved contributes nothing; the caller still
-// judges the forms that ARE available, so a resolution failure can never turn a refusal
-// into an acceptance.
+// rootForms returns the forms of a workspace root to judge: as given, absolute and
+// symlink-resolved, without duplicates. The resolved form catches a link such as `/trusted/link` to
+// `/trusted/.vscode`. A form that cannot be computed is omitted; the others are still judged.
 func rootForms(p string) []string {
 	forms := []string{filepath.Clean(p)}
 	abs, err := filepath.Abs(p)
@@ -295,14 +211,10 @@ func containsForm(list []string, p string) bool {
 	return false
 }
 
-// excludedTarget reports whether a review *target* must be refused by its own NAME. A
-// directory target is judged by its basename (a repo legitimately living under a generic
-// excluded-named ancestor like .../build/myrepo is allowed; its excluded subdirs are
-// filtered later by IsExcluded). A single-file target is also refused when it sits directly
-// inside an excluded dir (e.g. `.git/config`).
-//
-// Protected ANCESTORS are a separate, stronger rule — see protectedAncestorRule, which the
-// root check applies to the target's absolute path.
+// excludedTarget reports whether a copy target must be refused by its own name. A directory target
+// is judged by its basename, so a repository under `.../build/myrepo` is allowed. A single-file
+// target is also refused when it sits directly inside an excluded directory (such as
+// `.git/config`). Protected ancestors are judged separately by protectedAncestorRule.
 func excludedTarget(p string, isDir bool) bool {
 	p = filepath.Clean(p)
 	base := normalizeName(filepath.Base(p))
@@ -319,11 +231,8 @@ func excludedTarget(p string, isDir bool) bool {
 	return ok
 }
 
-// normalizeName lower-cases a path component and strips the trailing spaces/dots Windows
-// drops on create (`.git ` names `.git`), so an exact lookup cannot be aliased past. On
-// Windows it also drops an NTFS alternate-data-stream suffix, where `.git::$DATA` resolves
-// to the real `.git`; the trim is Windows-only because `:` is an ordinary filename
-// character elsewhere (see scope.stripStream for the same rule and the same reasoning).
+// normalizeName lower-cases a path component and strips the trailing spaces and dots Windows drops
+// on create, plus, on Windows only, an NTFS stream suffix. It matches scope's normalization.
 func normalizeName(s string) string {
 	if streamAliasing {
 		if i := strings.IndexByte(s, ':'); i >= 0 {

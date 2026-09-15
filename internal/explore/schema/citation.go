@@ -1,15 +1,8 @@
 package schema
 
-// This file holds the CITATION contract: the frozen
-// prompt-facing citation grammar, the HOST's authoritative alias vocabulary for one collation, and
-// the single validation pass that rewrites a collator's `Finding.Sources` into refs that actually
-// resolve.
-//
-// The governing idea is that a citation is a HOST fact, not a model claim. The collator is asked to
-// cite the `envelope#k` aliases it drew from, but nothing it emits is taken on trust: the host parses
-// each ref against the frozen grammar, checks it against the aliases THIS run actually produced, and
-// decides what survives. A model can therefore make a finding harder to source, but it can never
-// manufacture provenance for one.
+// This file holds the citation contract: the citation grammar the collator prompt teaches, the aliases
+// one collation can cite, and the pass that reduces a collator's Finding.Sources to citations that
+// resolve. The host decides which citations stand, so a model cannot invent provenance for a finding.
 
 import (
 	"fmt"
@@ -18,14 +11,10 @@ import (
 	"strings"
 )
 
-// CitationRefPattern is the FROZEN citation grammar: the prompt-facing alias
-// `envelope#k` (k = the envelope's panel Order), optionally narrowed to one claim as
-// `envelope#k/claims/i` (i zero-based). Anchored, so a ref embedded in prose is NOT a citation.
-//
-// It is a package constant rather than an inline literal because it is a contract shared by the
-// prompt (which teaches the vocabulary), the validator (which enforces it), and the capture manifest
-// (whose `envelope#k → Envelope.ID` alias table is the same namespace). One of those drifting from
-// the others is exactly the failure the constant exists to prevent.
+// CitationRefPattern is the citation grammar: `envelope#k`, where k is the envelope's panel Order,
+// optionally narrowed to one claim as `envelope#k/claims/i` (i zero-based). It is anchored, so a ref
+// inside prose is not a citation. The prompt, the validator and the capture manifest's alias table all
+// share it.
 const CitationRefPattern = `^envelope#([0-9]+)(?:/claims/([0-9]+))?$`
 
 var citationRef = regexp.MustCompile(CitationRefPattern)
@@ -33,14 +22,9 @@ var citationRef = regexp.MustCompile(CitationRefPattern)
 // claimsField is the explorer-response field a `envelope#k/claims/i` ref indexes into.
 const claimsField = "claims"
 
-// CitationIndex is the HOST's alias vocabulary for ONE collation: which `envelope#k` aliases exist
-// and, per envelope, how many claims a `/claims/i` narrowing may address. It is built from the
-// PRIMARY envelopes — the panel the collator was actually shown — so a syntactically well-formed ref
-// to a dropped, weak or nonexistent explorer is correctly rejected as unknown.
-//
-// Note that k values are NOT contiguous in general: dropped and weak-identity explorers consume panel
-// Order indices, so a three-explorer run whose middle explorer was weak has primary aliases {0, 2}.
-// Membership is therefore a set lookup, never a range check.
+// CitationIndex is the set of aliases one collation can cite, with each envelope's claim count. It is built
+// from the primary envelopes the collator was shown, so a ref to a dropped or weak explorer is unknown.
+// Aliases need not be contiguous, because dropped explorers keep their panel Order.
 type CitationIndex struct {
 	claims map[int]int // envelope Order → len(Response["claims"]); 0 when the mode has no claims array
 	order  []int       // primary Orders in panel order (the prompt-facing alias list)
@@ -60,8 +44,7 @@ func NewCitationIndex(primary []Envelope) CitationIndex {
 	return ix
 }
 
-// Aliases returns the citable aliases in panel order — the exact vocabulary the collator prompt
-// shows, so the prompt and the validator can never disagree about what is citable.
+// Aliases returns the citable aliases in panel order, as the collator prompt lists them.
 func (ix CitationIndex) Aliases() []string {
 	out := make([]string, 0, len(ix.order))
 	for _, k := range ix.order {
@@ -70,13 +53,8 @@ func (ix CitationIndex) Aliases() []string {
 	return out
 }
 
-// Alias renders the prompt-facing alias for one primary envelope (round-1 `envelope#k`).
-func (ix CitationIndex) Alias(order int) string { return EnvelopeRef(1, order) }
-
-// Valid reports whether a raw `Finding.Sources` entry is a citation this run can honor: it matches
-// the frozen grammar, has no leading-zero padding (so `envelope#0` and `envelope#00` cannot both name
-// slot 0), names an envelope in the PRIMARY panel, and — when it narrows to a claim — indexes inside
-// that envelope's actual `claims` array. Everything else is unknown, and unknown is dropped.
+// Valid reports whether ref is a citation this run can honor: it matches the grammar without leading
+// zeros, names a primary envelope, and any claim index is within that envelope's claims.
 func (ix CitationIndex) Valid(ref string) bool {
 	m := citationRef.FindStringSubmatch(strings.TrimSpace(ref))
 	if m == nil {
@@ -88,7 +66,7 @@ func (ix CitationIndex) Valid(ref string) bool {
 	}
 	n, known := ix.claims[k]
 	if !known {
-		return false // syntactically fine, but not an envelope of THIS primary panel
+		return false // well-formed, but not an envelope of this primary panel
 	}
 	if m[2] == "" {
 		return true
@@ -110,17 +88,15 @@ func parseIndex(s string) (int, bool) {
 	return n, true
 }
 
-// CitationReport is the host's record of what the citation pass did. It is reported, never gated:
-// the citation axis is FAIL-SOFT by design (see ApplyCitations).
+// CitationReport records what the citation pass did. It is reported and never fails a run.
 type CitationReport struct {
 	Findings    int `json:"findings"`
 	Cited       int `json:"cited"`
 	Uncited     int `json:"uncited"`
 	RefsKept    int `json:"refsKept"`
 	RefsDropped int `json:"refsDropped"`
-	// RefsUnverified counts the sources that named something OUTSIDE this run — a path, a URL, a
-	// document — rather than one of its aliases. They are retained on the finding as
-	// UnverifiedReferences instead of being dropped; see there for why.
+	// RefsUnverified counts sources that name something outside the run, such as a path or URL. They are
+	// kept on the finding as UnverifiedReferences.
 	RefsUnverified int `json:"refsUnverified,omitempty"`
 }
 
@@ -134,27 +110,20 @@ func (r CitationReport) String() string {
 	return s
 }
 
-// The bounds on retained external references. A reference is a pointer, not a payload: eight of them
-// is already more than a reader will follow, and a model that puts a paragraph in `sources` must not
-// be able to move that paragraph into the result under a label that says the host examined it.
+// Bounds on retained external references, so a model cannot move prose into the result through
+// `sources`.
 const (
 	maxUnverifiedRefs     = 8
 	maxUnverifiedRefBytes = 200
 )
 
-// external reports whether a source names something outside this run ENTIRELY, as opposed to being a
-// citation of this run that failed to resolve.
-//
-// The distinction is the whole reason unverified references are a separate field. `envelope#9` on a
-// three-explorer panel is a ref the host CHECKED and rejected — it was addressed to this run, this run
-// knows every alias it produced, and the answer is a definite no. `src/foo.rs` was never addressed to
-// this run at all, and the honest thing to say about it is not "rejected" but "nothing here looked".
-// Collapsing the two would either drop a live pointer or claim a check that never happened.
+// external reports whether a source names something outside the run, rather than being a citation of
+// the run. An unresolvable `envelope#9` is checked and dropped; `src/foo.rs` was never checked and is
+// kept as unverified.
 func external(ref string) bool { return !citationRef.MatchString(strings.TrimSpace(ref)) }
 
-// clipRef normalizes one retained reference to a single bounded line. Newlines are collapsed because a
-// reference occupying six lines of a result is prose that was put in the wrong field, and the clip is
-// MARKED so a shortened pointer never reads like a complete one.
+// clipRef collapses a retained reference to one line of at most maxUnverifiedRefBytes, marking a clipped
+// reference.
 func clipRef(ref string) string {
 	s := strings.Join(strings.Fields(ref), " ")
 	if len(s) > maxUnverifiedRefBytes {
@@ -163,29 +132,11 @@ func clipRef(ref string) string {
 	return s
 }
 
-// ApplyCitations is the SINGLE, HOST-AUTHORITATIVE citation pass over a Map collation.
-// For every finding it:
-//
-//   - keeps each source that resolves to a primary `envelope#k` alias of this run;
-//   - DROPS each source that is a ref to THIS run and does not resolve — `envelope#9` on a three-seat
-//     panel is checked and rejected, never "corrected" to a nearby alias and never left in place.
-//     Silently rewriting a ref would fabricate provenance; leaving it would let a dangling ref pass as
-//     a citation;
-//   - RETAINS each source that names something outside this run — a path, a URL, a document — as an
-//     UnverifiedReference rather than dropping it. exploremesh reads no filesystem, so it cannot say
-//     whether `src/foo.rs` exists; it can say that the finding points there and that nothing here
-//     checked. That is a different statement from both "sourced" and "unsourced", and it needs its own
-//     field to stay distinguishable from either;
-//   - sets Uncited UNCONDITIONALLY from the surviving refs, overwriting whatever the model supplied.
-//     The model is a witness about the world, never an authority about its own sourcing. An unverified
-//     external reference does NOT count toward being cited — nothing was verified, so nothing was
-//     sourced.
-//
-// The finding itself is always RETAINED. This is deliberately fail-soft on the citation axis: the
-// collator contract is per-mode and a citation defect is not an epistemic failure of the run, so a
-// bad ref must not turn a working exploration into a halt. An uncited finding is delivered and
-// LABELED — the user sees a conclusion whose support the host could not confirm, which is strictly
-// more information than either dropping it or pretending it was sourced.
+// ApplyCitations is the host's citation pass over a map collation. For every finding it keeps sources
+// that resolve to a primary alias, drops citations of the run that do not resolve (never correcting
+// them), keeps sources naming something outside the run as unverified references, and sets Uncited from
+// the kept citations alone, overriding the model. Findings are always kept: an uncited finding is
+// delivered and labeled rather than failing the run.
 func ApplyCitations(out *CollatorOutput, primary []Envelope) CitationReport {
 	ix := NewCitationIndex(primary)
 	rep := CitationReport{Findings: len(out.Findings)}
@@ -209,7 +160,7 @@ func ApplyCitations(out *CollatorOutput, primary []Envelope) CitationReport {
 		}
 		f.Sources = kept
 		f.UnverifiedReferences = unverified
-		f.Uncited = len(kept) == 0 // host-owned: overwrites any model-supplied claim
+		f.Uncited = len(kept) == 0 // overrides any model-supplied value
 		if f.Uncited {
 			rep.Uncited++
 		} else {

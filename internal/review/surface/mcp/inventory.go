@@ -9,17 +9,12 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is the SANITIZED configuration projection behind `review_list` and `review_doctor`.
+// This file builds the sanitized configuration projection behind review_list and review_doctor.
 //
-// The sanitization is the point, not an afterthought. A tool result is inference input for a third
-// party: whatever these tools return is very likely to end up in someone else's model provider's
-// logs. Adapter IDENTIFIERS, their availability and who performs writes are what a caller needs in
-// order to compose a valid run. Binary paths, launch arguments, root paths and environment detail are
-// what an attacker (or an inattentive log retention policy) needs in order to map the operator's
-// machine — and they buy the caller nothing, because it cannot configure anything anyway.
-//
-// The projection types below carry NO path field at all, so the rule is enforced by the type system
-// rather than remembered by the next person who adds a field.
+// Tool results are likely to reach a third party's model provider logs. Callers need adapter names,
+// availability and who performs writes; binary paths, launch arguments, root paths and environment
+// details would only map the operator's machine. The projection types have no path fields, so the
+// type system enforces this.
 
 // AdapterFact is one adapter this server was launched with, projected to logical facts only.
 type AdapterFact struct {
@@ -32,8 +27,7 @@ type AdapterFact struct {
 	Reason    string `json:"reason,omitempty"`
 	// Source is where the operator named the adapter: "flag" or "env".
 	Source string `json:"source,omitempty"`
-	// IdentityEvidenceCapability is the adapter's DECLARED evidence tier, not a live verdict —
-	// proving a model's identity still takes a real call.
+	// IdentityEvidenceCapability is the adapter's declared evidence tier, not a live verification.
 	IdentityEvidenceCapability string `json:"identityEvidenceCapability,omitempty"`
 }
 
@@ -44,26 +38,24 @@ type ReadinessCheck struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// Config is the read-only configuration view this server projects. It is an interface so the server
-// stays testable without real CLIs, and so the SURFACE — not the caller — owns what a tool result is
-// allowed to contain.
+// Config is the read-only configuration view this server projects. The surface, not the
+// implementation, decides what a tool result may contain.
 type Config interface {
 	// Adapters lists the adapters this server was launched with, with their availability now.
 	Adapters() []AdapterFact
-	// Readiness runs the STATIC readiness checks. It starts no process and spends nothing — which
-	// is why `review_doctor` can honestly carry readOnlyHint.
+	// Readiness runs the static readiness checks. It starts no process and spends nothing, so
+	// review_doctor can be annotated read-only.
 	Readiness() (bool, []ReadinessCheck)
 }
 
-// pathRE matches an absolute or home-relative filesystem path appearing as its own token. Readiness
-// details are composed by meshcore, which legitimately names where it found a binary — so the check
-// text is sanitized on the way out rather than meshcore being made to guess who is reading.
+// pathRE matches an absolute or home-relative path appearing as its own token. Readiness details come
+// from meshcore and may name binary locations, so they are sanitized here.
 var pathRE = regexp.MustCompile(`(^|[\s"'(\[=:,])((?:[A-Za-z]:[\\/]|~[\\/]|[\\/])[^\s"'\)\],;]{2,})`)
 
 const maxDetailBytes = 400
 
-// sanitizeDetail redacts filesystem paths from a human detail string and bounds its length. It is
-// applied to EVERY string that leaves this surface having been composed elsewhere.
+// sanitizeDetail redacts filesystem paths from s and bounds its length. It is applied to every string
+// composed elsewhere that leaves this surface.
 func sanitizeDetail(s string) string {
 	s = pathRE.ReplaceAllString(s, "$1<path>")
 	if len(s) > maxDetailBytes {
@@ -72,7 +64,7 @@ func sanitizeDetail(s string) string {
 	return s
 }
 
-// writesNote is the sentence beside `writes`, for both read-only tools.
+// writesNote returns the sentence shown beside writes in both read-only tools.
 func (s *Server) writesNote() string {
 	if s.AllowWrites {
 		return "aimesh can apply accepted findings: review_remediate with output=apply and allowWrite: true writes the workspace. output=patch supplies the diff instead."
@@ -80,7 +72,7 @@ func (s *Server) writesNote() string {
 	return "aimesh does not change project content on this server. review_remediate with output=patch supplies the complete diff; apply it with your own file tools."
 }
 
-// listPayload builds the `review_list` result.
+// listPayload builds the review_list result.
 func (s *Server) listPayload() map[string]any {
 	adapters := make([]map[string]any, 0)
 	for _, a := range s.Config.Adapters() {
@@ -118,16 +110,14 @@ func (s *Server) listPayload() map[string]any {
 			"diffAvailable": true,
 			"note":          s.writesNote(),
 		},
-		// The COUNT of --root ceiling directories, never the paths: a caller needs to know whether its
-		// declared paths are bounded, and nothing more.
+		// The number of --root ceiling directories, never the paths.
 		"roots": map[string]any{"ceiling": len(s.Ceiling)},
 		"note":  "Logical identifiers only. Every panel is composed per call from these adapters, with model identifiers the caller supplies; each call declares its own absolute workspace. This server reports no binary paths, launch arguments, root paths or environment detail, and it cannot change any configuration.",
 	}
 }
 
-// doctorPayload builds the `review_doctor` result from the STATIC readiness checks, with every detail
-// string sanitized, plus who performs writes and whether a --root ceiling bounds calls. Every field is a
-// count, an enum or a boolean — never a path.
+// doctorPayload builds the review_doctor result: sanitized static readiness checks, who performs
+// writes, and whether a --root ceiling applies. Every field is a count, enum or boolean.
 func (s *Server) doctorPayload(env *proto.RequestEnv) map[string]any {
 	ok, checks := s.Config.Readiness()
 	rows := make([]map[string]any, 0, len(checks))
@@ -144,8 +134,7 @@ func (s *Server) doctorPayload(env *proto.RequestEnv) map[string]any {
 		"writes":        s.writesValue(),
 		"diffAvailable": true,
 		"rootCeiling":   len(s.Ceiling),
-		// The operator's bounded-execution grant: how many project commands run on each review's
-		// containment copy, never the commands themselves.
+		// How many verify commands run on each review's containment copy, never the commands.
 		"verify": map[string]any{
 			"commands":       len(s.VerifyCommands),
 			"baseline":       s.VerifyBaseline,
@@ -157,13 +146,11 @@ func (s *Server) doctorPayload(env *proto.RequestEnv) map[string]any {
 	}
 }
 
-// protocolEra reports WHICH REVISION FAMILY is answering this very call.
+// protocolEra reports which protocol revision family is serving this request. protocolMode is what
+// the operator chose at launch (dual or legacy); on a dual process the era is set by how the client
+// connected.
 //
-// It is separate from `protocolMode` because the two answer different questions: `protocolMode` is what
-// the OPERATOR chose at launch (`dual` or `legacy`); `protocolEra` is what this REQUEST is being served
-// under, and on a `dual` process that is decided by the client, once, by how it opened.
-//
-// SUNSET-PATH (MCP26-SUNSET): both fields go with the era.
+// SUNSET-PATH (MCP26-SUNSET): both fields go with the legacy era.
 func protocolEra(env *proto.RequestEnv) string {
 	if env != nil && env.Era == proto.EraModern {
 		return string(proto.EraModern)
@@ -215,7 +202,7 @@ func renderDoctor(payload map[string]any) string {
 		}
 		b.WriteString("\n")
 	}
-	// Repeated in the human rendering, because some clients show a model ONLY this channel.
+	// Repeated in the text rendering, since some clients show a model only this channel.
 	fmt.Fprintf(&b, "Writes: %v (diff available: %v). Root ceiling: %v director(y/ies) (paths are never reported).\n",
 		payload["writes"], payload["diffAvailable"], payload["rootCeiling"])
 	return strings.TrimRight(b.String(), "\n")

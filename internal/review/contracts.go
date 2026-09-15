@@ -1,12 +1,9 @@
 package review
 
-// This file declares the service contracts (interfaces) for each layer of the
-// IDesign architecture. Concrete implementations live under internal/.
+// This file declares the service contracts for each layer of the architecture.
 
-// --- Clients ---
-
-// Surface is a host-surface Client. It calls one Manager per command and renders
-// the returned Outcome; the Manager never calls up into the Client.
+// Surface is a host-surface client. It calls one Manager per command and renders the returned
+// Outcome; the Manager never calls up into the client.
 type Surface interface {
 	Command() Command
 	ReviewRequest() ReviewRequest // valid when Command() == CommandReview
@@ -18,34 +15,30 @@ type Surface interface {
 	Render(o Outcome)
 }
 
-// --- Managers ---
-
-// ReviewManager owns the review-and-remediate use case (CUC-1).
+// ReviewManager owns the review-and-remediate use case.
 type ReviewManager interface {
 	Run(req ReviewRequest, caps SurfaceCaps, rep Reporter) RunOutcome
 }
 
-// SetupManager owns the interactive setup/repair use case (CUC-3). It is the only
-// component that writes the config store.
+// SetupManager owns the setup and repair use case. It is the only component that writes the
+// config store.
 type SetupManager interface {
 	Setup(req SetupRequest, caps SurfaceCaps, rep Reporter, ask Prompter) SetupOutcome
 	Repair(req RepairRequest, caps SurfaceCaps, rep Reporter, ask Prompter) SetupOutcome
 }
 
-// --- Engines ---
-
-// AdjudicationEngine implements the activity of judging findings. hostJudgment is
-// the verified CallStatus from the Manager's author_remediator adjudication call.
+// AdjudicationEngine judges findings. hostJudgment is the verified CallStatus from the
+// author_remediator adjudication call.
 type AdjudicationEngine interface {
 	Judge(findings []Finding, hostJudgment CallStatus, state ArtifactState) []Decision
 }
 
-// RemediationEngine returns the edits for an accepted decision (pure; it does not write).
+// RemediationEngine returns the edits for an accepted decision without writing them.
 type RemediationEngine interface {
 	Propose(decision Decision, state ArtifactState) ([]Edit, error)
 }
 
-// SetupEngine decides setup/repair. Pure: the Manager does all I/O and passes results in.
+// SetupEngine makes setup and repair decisions; the Manager performs all I/O.
 type SetupEngine interface {
 	SuggestLanes(detected []AdapterStatus, want []Role, cat ModelCatalog) []LaneSuggestion
 	ValidatePath(adapter string, probe PathProbe) PathCheck
@@ -54,13 +47,11 @@ type SetupEngine interface {
 	PatchFor(action RepairAction, value string, scope ConfigScope, cat ModelCatalog) ConfigPatch
 }
 
-// --- ResourceAccess ---
-
-// ModelAccess is the single contract every adapter implements (atomic verbs only).
+// ModelAccess is the contract every adapter implements.
 type ModelAccess interface {
 	Available() Availability
-	ValidateBinary(path string) PathProbe                             // stat + adapter-identity a pending path (wizard)
-	ProbeIdentity(model ModelArg, pathOverride string) IdentityResult // pathOverride "" = configured binary
+	ValidateBinary(path string) PathProbe                             // checks a candidate binary path
+	ProbeIdentity(model ModelArg, pathOverride string) IdentityResult // pathOverride "" means the configured binary
 	Invoke(spec CallSpec, ws WorkspaceHandle) CallStatus
 	Caps() AdapterCaps
 }
@@ -73,7 +64,7 @@ type WorkspaceAccess interface {
 	ApplyEdit(h WorkspaceHandle, edit Edit) ApplyResult
 	Diff(h WorkspaceHandle) PatchSet
 	Commit(h WorkspaceHandle) error
-	Discard(h WorkspaceHandle) (PatchSet, *HaltClass) // returns M5 diff + HaltClass on unexpected mutation
+	Discard(h WorkspaceHandle) (PatchSet, *HaltClass) // returns the M5 diff and halt class on unexpected mutation
 }
 
 // AuditAccess persists and re-reads the audit trail.
@@ -91,9 +82,7 @@ type ConfigAccess interface {
 	Path(scope ConfigScope) string
 }
 
-// --- Utilities ---
-
-// Resolver turns config + detection + capabilities into a run plan.
+// Resolver turns configuration, detection and capabilities into a run plan.
 type Resolver interface {
 	Resolve(req ReviewRequest, detected []AdapterStatus, caps SurfaceCaps) (RunPlan, error)
 }
@@ -116,7 +105,7 @@ type Reporter interface {
 	Progress(ev Event)
 }
 
-// Prompter is the input source the Client supplies for the wizard (nil if non-interactive).
+// Prompter is the input source the client supplies for the wizard; nil when non-interactive.
 type Prompter interface {
 	Ask(prompt string) string
 	Choose(prompt string, options []string) int

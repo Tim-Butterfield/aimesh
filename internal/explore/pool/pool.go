@@ -1,21 +1,9 @@
-// Package pool is exploremesh's HOST-SIDE ESTIMATE POOLING: the
-// declared, versioned rule that turns a panel of independent numeric estimates into one aggregate, an
-// interval, a dispersion picture and an identified outlier set. Nothing here calls a model and nothing
-// here reads prose — it is pure arithmetic over recorded, attributed estimates, which is exactly what a machine
-// governance value requires.
+// Package pool combines a panel's numeric estimates into an aggregate, an interval, dispersion statistics
+// and a set of outliers, using a declared, versioned rule. It is pure arithmetic over recorded estimates.
 //
-// Three properties are deliberate:
-//
-//   - THE RULE IS DECLARED AND VERSIONED, NOT CHOSEN AFTER THE FACT. Pool takes the rule as an argument and
-//     stamps RulesVersion + the rule name onto its result, so a pooled number read later is interpretable
-//     under the rule that produced it. A "pick whichever aggregate looks reasonable" step is precisely how
-//     a host quietly authors the answer.
-//   - AN OUTLIER IS IDENTIFIED, NEVER DELETED. Outliers are flagged and returned WITH the estimate they
-//     came from — reasoning and all — and the aggregate is still computed over EVERY estimate under the
-//     declared rule. A forecaster who is far from the panel is sometimes the only one who knows something,
-//     so the honest move is to surface them, not to trim them out of the record.
-//   - THE COLLATOR NEVER COMPUTES ANY OF THIS. The pooled value exists before the terminal collation is
-//     even prompted; the collator is shown it as a finished number and may only write prose about it.
+//   - The rule is an argument and is recorded with the result.
+//   - Outliers are reported with their estimates and reasoning, and are still included in the aggregate.
+//   - The collator only sees the finished result.
 package pool
 
 import (
@@ -26,47 +14,40 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// RulesVersion is the version of the HOST pooling rules implemented here (aggregation, interval,
-// dispersion, outlier identification). Every pooled result pins it.
+// RulesVersion identifies the pooling rules in this package. Every pooled result records it.
 const RulesVersion = "host-forecast-pooling@v1"
 
-// OutlierRuleVersion is the versioned outlier rule: the MODIFIED Z-SCORE over the median absolute
-// deviation (Iglewicz–Hoaglin), threshold 3.5. It is used in preference to a 1.5×IQR fence because an
-// exploremesh panel is small — with three or five estimates a quartile fence flags nothing, which would
-// make "no outliers" a statement about the sample size rather than about the panel.
+// OutlierRuleVersion identifies the outlier rule: a modified z-score over the median absolute deviation
+// (Iglewicz and Hoaglin) above 3.5. An interquartile fence flags nothing on panels this small.
 const OutlierRuleVersion = "modified-z-score-over-mad@v1"
 
-// IntervalRuleVersion is the versioned rule for the pooled INTERVAL: the median of the panel's stated lows
-// and the median of its stated highs. It is deliberately not the min/max envelope — the widest bound any
-// single forecaster stated is that forecaster's interval, not the panel's.
+// IntervalRuleVersion identifies the interval rule: the medians of the stated lows and highs, rather than
+// the widest bounds any single forecaster gave.
 const IntervalRuleVersion = "median-of-stated-bounds@v1"
 
-// outlierThreshold is the modified z-score above which an estimate is flagged (the standard 3.5).
+// outlierThreshold is the modified z-score above which an estimate is flagged.
 const outlierThreshold = 3.5
 
-// Rule is a DECLARED aggregation rule. It is frozen into the mode contract, not chosen at runtime.
+// Rule is an aggregation rule, fixed by the mode contract.
 type Rule string
 
+// Aggregation rules.
 const (
-	// RuleMedian is the default: the median of the recorded estimates. Robust to a single extreme estimate
-	// WITHOUT discarding it — which is why the outlier can be reported rather than removed.
+	// RuleMedian aggregates with the median, which tolerates an extreme estimate without discarding it.
 	RuleMedian Rule = "median"
-	// RuleTrimmedMean is the declared alternative: the mean after trimming trimFraction of the estimates
-	// from each end (nothing is trimmed when that would round to zero, so a small panel degrades to the
-	// plain mean rather than to an undefined value).
+	// RuleTrimmedMean aggregates with the mean after trimming trimFraction from each end, or the plain mean
+	// when the trim would remove nothing or everything.
 	RuleTrimmedMean Rule = "trimmed_mean"
 )
 
-// trimFraction is the symmetric trim of RuleTrimmedMean (25% from each end).
+// trimFraction is the fraction RuleTrimmedMean trims from each end.
 const trimFraction = 0.25
 
-// Valid reports whether the rule is one this package implements.
+// Valid reports whether r is a known rule.
 func (r Rule) Valid() bool { return r == RuleMedian || r == RuleTrimmedMean }
 
-// Estimate is ONE explorer's recorded numeric estimate, attributed to the blind round-1 envelope it came
-// from. Reasoning and Assumptions are the forecaster's own words: they carry no governance value (they are
-// never arithmetic input) but they travel with the estimate, because an outlier without its reasoning is
-// just a number somebody would like to ignore.
+// Estimate is one explorer's numeric estimate and the envelope it came from. Assumptions and Reasoning are
+// carried with the estimate but never used in the arithmetic.
 type Estimate struct {
 	Explorer    schema.ExplorerIdentity `json:"explorer"`
 	EnvelopeRef string                  `json:"envelopeRef"`
@@ -79,9 +60,7 @@ type Estimate struct {
 	Reasoning   string                  `json:"reasoning,omitempty"`
 }
 
-// Dispersion is the HOST's spread picture over the pooled estimates. Every field is reported: a reader who
-// wants a different spread measure than the one the rule uses can compute it from these without re-reading
-// the estimates.
+// Dispersion describes the spread of the pooled estimates.
 type Dispersion struct {
 	N      int     `json:"n"`
 	Min    float64 `json:"min"`
@@ -92,24 +71,21 @@ type Dispersion struct {
 	IQR    float64 `json:"iqr"`
 	StdDev float64 `json:"stdDev"`
 	MAD    float64 `json:"mad"`
-	// Range is Max−Min, carried explicitly because it is the number a human reads first.
+	// Range is Max minus Min.
 	Range float64 `json:"range"`
 }
 
-// Outlier is one estimate the declared outlier rule flagged, carried WITH the estimate itself (see the
-// package comment): the deviation score that flagged it, and the host's stated reason.
+// Outlier is an estimate flagged by the outlier rule, with its score and the host's reason.
 type Outlier struct {
 	Estimate Estimate `json:"estimate"`
 	// ModifiedZ is the estimate's modified z-score under OutlierRuleVersion.
 	ModifiedZ float64 `json:"modifiedZ"`
-	// Reason is the HOST's arithmetic reason — never a model's words, and never a judgment about whether
-	// the outlier is WRONG. It says what the arithmetic found, and nothing more.
+	// Reason states the arithmetic that flagged the estimate; it does not judge the estimate wrong.
 	Reason string `json:"reason"`
 }
 
-// Pooled is the terminal pooling result: the aggregate, the interval, the dispersion, the identified
-// outliers, and every contributing estimate. The versions are on the value, not in a comment, so a
-// persisted result is self-describing.
+// Pooled is a pooling result: the aggregate, interval, dispersion, outliers and every estimate, with the
+// rule versions used.
 type Pooled struct {
 	Rule                Rule    `json:"rule"`
 	RulesVersion        string  `json:"rulesVersion"`
@@ -118,19 +94,15 @@ type Pooled struct {
 	Aggregate           float64 `json:"aggregate"`
 	IntervalLow         float64 `json:"intervalLow"`
 	IntervalHigh        float64 `json:"intervalHigh"`
-	// IntervalSources is how many of the pooled estimates actually stated an interval — the interval's own
-	// denominator, kept because "3 of 3 stated a bound" and "1 of 3 stated a bound" are different results.
+	// IntervalSources is the number of estimates that stated an interval.
 	IntervalSources int        `json:"intervalSources"`
 	Dispersion      Dispersion `json:"dispersion"`
 	Outliers        []Outlier  `json:"outliers,omitempty"`
 	Estimates       []Estimate `json:"estimates"`
 }
 
-// Pool computes the pooled result over the recorded estimates under the declared rule. It REFUSES an empty panel rather than returning a zero aggregate: an aggregate over no estimates is
-// not a forecast, and a 0 that looks like one is worse than an error.
-//
-// Estimates are sorted by value for the order statistics but the returned Estimates keep the ATTRIBUTION
-// ORDER they arrived in, so the record still reads as "who said what" rather than as an anonymous sample.
+// Pool pools estimates under rule. It returns an error for an empty panel rather than a zero aggregate.
+// The returned Estimates keep their input order.
 func Pool(estimates []Estimate, rule Rule) (Pooled, error) {
 	if len(estimates) == 0 {
 		return Pooled{}, fmt.Errorf("pool: no estimates to pool — an aggregate over an empty panel is not a forecast")
@@ -163,13 +135,12 @@ func Pool(estimates []Estimate, rule Rule) (Pooled, error) {
 	return out, nil
 }
 
-// dispersion computes the spread picture over the SORTED values. Quartiles use the inclusive-median method
-// (each half INCLUDES the median for an odd count), which is the convention most readers expect and is
-// stable for the small samples an exploremesh panel produces.
+// dispersion computes spread statistics over sorted values. Quartiles use the inclusive-median method: for
+// an odd count, both halves include the median.
 func dispersion(sorted []float64) Dispersion {
 	n := len(sorted)
 	med := median(sorted)
-	mid := (n + 1) / 2 // inclusive halves: the median belongs to both for an odd n
+	mid := (n + 1) / 2
 	d := Dispersion{
 		N: n, Min: sorted[0], Max: sorted[n-1], Median: med,
 		Q1: median(sorted[:mid]), Q3: median(sorted[n-mid:]),
@@ -181,8 +152,7 @@ func dispersion(sorted []float64) Dispersion {
 	return d
 }
 
-// median returns the median of a SORTED slice (the mean of the two middle values for an even count — the
-// standard definition, stated here because it is the one place this package averages anything).
+// median returns the median of a sorted slice, averaging the two middle values for an even count.
 func median(sorted []float64) float64 {
 	n := len(sorted)
 	if n == 0 {
@@ -194,9 +164,8 @@ func median(sorted []float64) float64 {
 	return (sorted[n/2-1] + sorted[n/2]) / 2
 }
 
-// trimmedMean drops frac of the SORTED values from each end (floor) and averages the rest. When the trim
-// would remove everything — or would round to zero — it degrades to the plain mean rather than to an
-// undefined value, and that degradation is visible in the result's N.
+// trimmedMean drops floor(frac·n) sorted values from each end and averages the rest, falling back to the
+// plain mean when that would remove every value.
 func trimmedMean(sorted []float64, frac float64) float64 {
 	n := len(sorted)
 	k := int(math.Floor(float64(n) * frac))
@@ -211,8 +180,7 @@ func trimmedMean(sorted []float64, frac float64) float64 {
 	return sum / float64(len(rest))
 }
 
-// stdDev is the POPULATION standard deviation of the recorded estimates: the panel is the whole population
-// of estimates this run produced, not a sample drawn from a larger one.
+// stdDev returns the population standard deviation of values; the panel is the whole population.
 func stdDev(values []float64) float64 {
 	n := float64(len(values))
 	mean := 0.0
@@ -227,7 +195,7 @@ func stdDev(values []float64) float64 {
 	return math.Sqrt(sum / n)
 }
 
-// mad is the median absolute deviation from the median — the scale the outlier rule is measured in.
+// mad returns the median absolute deviation from med.
 func mad(sorted []float64, med float64) float64 {
 	devs := make([]float64, len(sorted))
 	for i, v := range sorted {
@@ -237,9 +205,8 @@ func mad(sorted []float64, med float64) float64 {
 	return median(devs)
 }
 
-// meanAbsDev is the MEAN absolute deviation from the median — Iglewicz–Hoaglin's stated fallback scale for
-// the case MAD == 0 (a majority of identical estimates). Without it, a panel where two of three forecasters
-// gave the same number would divide by zero and flag the third by construction.
+// meanAbsDev returns the mean absolute deviation from med, the fallback scale when the median absolute
+// deviation is zero.
 func meanAbsDev(values []float64, med float64) float64 {
 	sum := 0.0
 	for _, v := range values {
@@ -248,12 +215,10 @@ func meanAbsDev(values []float64, med float64) float64 {
 	return sum / float64(len(values))
 }
 
-// outliers identifies the estimates the declared rule flags. It returns them in the input's attribution
-// order, each carrying its whole Estimate — reasoning included (see the package comment).
+// outliers returns the estimates flagged by the outlier rule, in input order. Fewer than three estimates
+// have no majority to deviate from, so none are flagged.
 func outliers(estimates []Estimate, d Dispersion) []Outlier {
 	if len(estimates) < 3 {
-		// With two estimates there is no majority to be far FROM: either one is as much the outlier as the
-		// other, and flagging one would be the host picking a side. The dispersion still reports the gap.
 		return nil
 	}
 	values := make([]float64, len(estimates))
@@ -265,7 +230,7 @@ func outliers(estimates []Estimate, d Dispersion) []Outlier {
 		scale, scaleName = meanAbsDev(values, d.Median)*1.2533, "mean absolute deviation (MAD was 0)"
 	}
 	if scale == 0 {
-		return nil // every estimate is identical — there is nothing to be far from
+		return nil // all estimates are identical
 	}
 	var out []Outlier
 	for _, e := range estimates {
@@ -282,10 +247,8 @@ func outliers(estimates []Estimate, d Dispersion) []Outlier {
 	return out
 }
 
-// pooledInterval computes the pooled bounds under IntervalRuleVersion: the median of the stated lows and
-// the median of the stated highs, over the estimates that actually stated an interval. When NOBODY stated
-// one the interval collapses to the aggregate itself and IntervalSources is 0 — an honest "no interval was
-// reported" rather than a fabricated spread.
+// pooledInterval returns the medians of the stated lows and highs and the number of estimates that stated
+// an interval. With none, both bounds equal aggregate and the count is 0.
 func pooledInterval(estimates []Estimate, aggregate float64) (low, high float64, sources int) {
 	var lows, highs []float64
 	for _, e := range estimates {

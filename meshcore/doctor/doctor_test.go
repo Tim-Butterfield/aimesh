@@ -12,17 +12,14 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model"
 )
 
-// doctor is the readiness substrate BOTH apps compose their `doctor` surface from (and the gate the
-// ACP-validation flow runs before spending anything). Its load-bearing rule is the required/opt-in
-// asymmetry: an unavailable OPT-IN adapter must not fail a report, while an unavailable REQUIRED one
-// must — get that backwards and either every install looks broken or a broken one looks ready.
+// The key rule under test: an unavailable opt-in adapter does not fail a report, while an
+// unavailable required one does.
 
-// stubAdapter is a model.Adapter with controllable availability. probe != nil also makes it a Prober.
+// stubAdapter is a model.Adapter with controllable availability.
 type stubAdapter struct {
 	name   string
 	avail  bool
 	detail string
-	probe  *model.ProbeResult
 }
 
 func (s stubAdapter) Name() string              { return s.name }

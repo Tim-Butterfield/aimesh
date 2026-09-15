@@ -1,18 +1,16 @@
 package acp
 
-// ROOTS — which directories a call may read.
+// This file decides which directories a call may read.
 //
-// An agent-driven surface has no single launch folder: an IDE can change folders after starting its
-// agents, and several conversations can be active at once. So nothing is inferred from where this
-// process started. Every call (an MCP tool call, an ACP turn) declares the absolute directories it is
-// about, and CallScope builds that call's resolver from exactly those paths. The operator's optional
-// `--root` directories are a CEILING every declared path must lie inside (ResolveCeiling).
+// An agent surface has no launch folder: an IDE can change folders, and several conversations can
+// share one server. Every call declares the absolute directories it is about, and CallScope builds
+// that call's resolver from exactly those paths. The operator's optional --root directories are a
+// ceiling every declared path must lie inside.
 //
-// Two rules judge every root, declared or operator-named, and both on the CANONICAL form so a symlink
-// cannot alias past them: the non-overridable read denylist (a protected path is never a root), and
-// the degenerate-root rule (the filesystem root, a home directory or its parent, or a system/shared
-// tree is never a project). An operator may waive the degenerate rule for an explicit `--root` with
-// `--allow-broad-root`; a path a call declares can never waive it.
+// Two rules judge every root on its canonical form, so a symlink cannot alias past them: the read
+// denylist (a protected path is never a root) and the degenerate-root rule (the filesystem root, a
+// home directory or its parent, or a system tree is never a project). Only an operator's explicit
+// --root with --allow-broad-root waives the degenerate rule.
 
 import (
 	"fmt"
@@ -26,30 +24,25 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 )
 
-// Stable MACHINE reason codes for a trusted-root refusal at launch (lower_snake, never
-// sentences), so a host/wrapper can branch on them the way it branches on a run halt.
+// Reason codes for a --root refused at launch.
 const (
-	// ReasonDegenerateRoot — an EXPLICIT `--root` is a location that is never a project (the
-	// filesystem root, a home directory, a system/shared tree). It is a separate code from
-	// ReasonDegenerateDefaultRoot because the remedy differs: the operator named this root,
-	// so the fix is to name a narrower one (or to opt in with `--allow-broad-root`), not to
-	// switch from the cwd default.
+	// ReasonDegenerateRoot refuses a --root that is never a project: the filesystem root, a home
+	// directory or a system tree. The remedy is a narrower root or --allow-broad-root.
 	ReasonDegenerateRoot = "acp_degenerate_root"
-	// ReasonRootUnusable — a `--root` does not exist, is not a directory, or cannot be resolved.
+	// ReasonRootUnusable refuses a --root that does not exist, is not a directory, or cannot be resolved.
 	ReasonRootUnusable = "acp_root_unusable"
-	// ReasonRootDenied — a `--root` is itself a protected path (a secret directory / key
-	// material); the non-overridable denylist refuses it as a root, not just inside one.
+	// ReasonRootDenied refuses a --root that is itself a protected path.
 	ReasonRootDenied = "acp_root_denied"
 )
 
-// Reason codes for a path a CALL declares as its scope.
+// Reason codes for a path a call declares as its scope.
 const (
-	// ReasonCallPathRelative — a declared path is not absolute. A server shares no working directory
-	// with its caller, so a relative path has no meaning to it.
+	// ReasonCallPathRelative refuses a declared path that is not absolute; a server shares no working
+	// directory with its caller.
 	ReasonCallPathRelative = "scope_call_path_relative"
-	// ReasonCallNoPath — the call declared no path at all.
+	// ReasonCallNoPath refuses a call that declared no path.
 	ReasonCallNoPath = "scope_call_no_path"
-	// ReasonOutsideCeiling — a declared path is outside the operator's `--root` ceiling.
+	// ReasonOutsideCeiling refuses a declared path outside the operator's --root ceiling.
 	ReasonOutsideCeiling = "scope_outside_root_ceiling"
 )
 
@@ -60,15 +53,14 @@ type ValidateOptions struct {
 	// AllowBroad waives the degenerate-root rule. Only an operator's explicit `--root` with
 	// `--allow-broad-root` sets it; a path a call declares never does.
 	AllowBroad bool
-	// Home is the user's home directory ("" → os.UserHomeDir). Injectable for tests.
+	// Home is the user's home directory; "" means os.UserHomeDir.
 	Home string
 }
 
-// ValidateRoot judges one candidate root and returns its absolute form. It refuses a path that cannot
-// be resolved or is not a directory, a protected path (on its spelling and its canonical form, so a
-// symlink cannot alias past the rule), and — unless AllowBroad — a location that is never a project:
-// the filesystem root, a home directory or its parent, or a system/shared tree. When AllowBroad waived
-// the degenerate rule, broad names why the root was broad.
+// ValidateRoot judges one candidate root and returns its absolute form. It refuses a path that
+// cannot be resolved or is not a directory, a protected path (by spelling and canonical form), and,
+// unless AllowBroad is set, a location that is never a project. When AllowBroad waived that rule,
+// broad says why the root was broad.
 func ValidateRoot(raw string, o ValidateOptions) (abs, broad string, err error) {
 	label := strings.TrimSpace(o.Label)
 	if label == "" {
@@ -105,9 +97,8 @@ func ValidateRoot(raw string, o ValidateOptions) (abs, broad string, err error) 
 	return a, broad, nil
 }
 
-// ExpandRoots expands each `--root` value with the same path grammar `--adapter` paths use (`%VAR%` on
-// Windows, `$VAR`/`${VAR}` elsewhere, a leading `~`). An undefined variable is an error, never an empty
-// expansion, so the launch refuses rather than bounding calls by a different directory.
+// ExpandRoots expands each --root value with the path grammar --adapter paths use: %VAR% on
+// Windows, $VAR or ${VAR} elsewhere, and a leading ~. An undefined variable is an error.
 func ExpandRoots(raw []string, env pathexpand.Env) ([]string, error) {
 	out := make([]string, 0, len(raw))
 	for _, r := range raw {
@@ -123,8 +114,8 @@ func ExpandRoots(raw []string, env pathexpand.Env) ([]string, error) {
 	return out, nil
 }
 
-// ResolveCeiling validates the operator's `--root` directories into the CEILING every call's scope must
-// fall inside. No `--root` is no ceiling (nil, nil): nothing is inferred from the launch directory.
+// ResolveCeiling validates the operator's --root directories into the ceiling every call's scope
+// must lie inside. With no --root it returns nil, meaning no ceiling.
 func ResolveCeiling(explicit []string, allowBroad bool, surface, home string) ([]string, error) {
 	var roots, broad []string
 	for _, raw := range explicit {
@@ -150,10 +141,9 @@ func ResolveCeiling(explicit []string, allowBroad bool, surface, home string) ([
 	return roots, nil
 }
 
-// CallScope builds the resolver for ONE call from the paths that call declared — its workspace and any
-// extra roots. Every path must be absolute, must pass ValidateRoot with no breadth waiver, and must lie
-// inside ceiling when the operator set one. The resolver's roots are exactly the declared paths, so each
-// call is judged against its own scope and never against another call's.
+// CallScope builds the resolver for one call from the paths it declared: its workspace and any
+// extra roots. Every path must be absolute, pass ValidateRoot without the breadth waiver, and lie
+// inside ceiling when one is set.
 func CallScope(paths, ceiling []string, home string) (*scope.Resolver, error) {
 	var ceil *scope.Resolver
 	if len(ceiling) > 0 {
@@ -196,17 +186,10 @@ func CallScope(paths, ceiling []string, home string) (*scope.Resolver, error) {
 	return r, nil
 }
 
-// degenerateRoot reports WHY dir is not a plausible project root, or "" when it is. The rule
-// is deliberately a small, exact-match denylist of locations that are never a project: the
-// filesystem/volume root, the user's home directory itself (or its parent — `/Users`,
-// `/home`), and the well-known system/shared trees. It never rejects an ordinary directory (a
-// temp dir IS a plausible root — that is how the web UI's isolated ACP validation runs),
-// because a heuristic that guesses "this doesn't look like a project" would fail closed on
-// new, still-empty projects.
-//
-// `dir` should already be canonical (both callers canonicalize first); canonicalRoot is
-// applied again here because it is idempotent and this function must be safe to call
-// directly.
+// degenerateRoot reports why dir is not a plausible project root, or "" when it is. It is an
+// exact-match list: the filesystem or volume root, the home directory or its parent, and well-known
+// system trees. Ordinary directories, including temp directories, are accepted, so new empty
+// projects are not refused. dir is canonicalized again because canonicalRoot is idempotent.
 func degenerateRoot(dir, home string) string {
 	abs := canonicalRoot(dir)
 	fi, err := os.Stat(abs)
@@ -234,12 +217,8 @@ func degenerateRoot(dir, home string) string {
 	return ""
 }
 
-// matchSystemRoot returns the system/shared root `abs` IS, or "".
-//
-// On Windows the entries are matched DRIVE-LETTER AGNOSTICALLY, against the path with its
-// volume stripped. The previous list hardcoded `C:`, which made the rule a coincidence of
-// where Windows happened to be installed: `D:\Windows` on any machine with a second drive
-// (or any VHD/network mapping) passed straight through.
+// matchSystemRoot returns the system root abs is, or "". Windows entries are matched against the
+// path with its volume stripped, so D:\Windows matches as well as C:\Windows.
 func matchSystemRoot(abs string) string {
 	abs = filepath.Clean(abs)
 	if windowsPaths {
@@ -260,20 +239,10 @@ func matchSystemRoot(abs string) string {
 	return ""
 }
 
-// unixSystemRoots are directories that are never a project root. EXACT matches only — a
-// project UNDER one of them (a temp workspace under the OS temp dir, a checkout under
-// `/srv/git`) is fine, and refusing whole subtrees would be a false refusal with no security
-// value.
-//
-// Three families, all of them "naming this root puts an enormous amount of unrelated, often
-// other-people's, content in scope":
-//
-//   - OS trees (`/etc`, `/usr`, `/var`, `/System`, …);
-//   - multi-user roots (`/Users`, `/home`, `/root`, `/Users/Shared`) — `/Users/Shared` is
-//     world-writable on macOS, so it is also a place an attacker can PLANT content;
-//   - mount/volume parents (`/mnt`, `/media`, `/Volumes`, `/srv`, `/net`) — the whole point
-//     of these is that arbitrary removable or network filesystems appear beneath them, so
-//     "the root" is not a fixed set of files at all.
+// unixSystemRoots are directories that are never a project root. Matches are exact: a project
+// under one of them is fine. The list covers OS trees (/etc, /usr, /var, /System, …), multi-user
+// roots (/Users, /home, /root, /Users/Shared) and mount parents (/mnt, /media, /Volumes, /srv,
+// /net), each of which would put large amounts of unrelated content in scope.
 var unixSystemRoots = []string{
 	"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libexec",
 	"/etc", "/dev", "/proc", "/sys", "/boot", "/run",
@@ -285,8 +254,7 @@ var unixSystemRoots = []string{
 	"/mnt", "/media", "/Volumes", "/srv", "/net", "/export",
 }
 
-// windowsSystemRoots are the same families on Windows, written WITHOUT a drive letter: they
-// are compared against the path's volume-stripped remainder (see matchSystemRoot).
+// windowsSystemRoots are the same families on Windows, without a drive letter; see matchSystemRoot.
 var windowsSystemRoots = []string{
 	`\Windows`, `\Windows\System32`, `\Windows\SysWOW64`,
 	`\Program Files`, `\Program Files (x86)`, `\ProgramData`,
@@ -294,8 +262,7 @@ var windowsSystemRoots = []string{
 	`\$Recycle.Bin`, `\System Volume Information`,
 }
 
-// canonicalRoot resolves a path to its absolute, symlink-free form (best effort: an
-// unresolvable path is returned cleaned, so comparisons still work on a non-existent path).
+// canonicalRoot returns p's absolute, symlink-free form, or p cleaned if it cannot be resolved.
 func canonicalRoot(p string) string {
 	abs, err := filepath.Abs(p)
 	if err != nil {
@@ -307,17 +274,11 @@ func canonicalRoot(p string) string {
 	return abs
 }
 
-// windowsPaths is true only on Windows: the filesystem is case-insensitive there, and the
-// over-broad-root list has to be matched drive-letter agnostically against a volume-stripped
-// path. It is a VAR — the pattern meshcore/scope's `foldPaths` and meshcore/workspace's
-// `streamAliasing` already use — so that both Windows branches of the trusted-root rules can be
-// exercised on any platform. This repository does not gate on Windows, so an inline
-// `runtime.GOOS ==` would leave the branch that refuses `D:\Windows` compiled everywhere and
-// executed nowhere. It tests the DECISION, not the filesystem; see docs/security.md's matrix.
+// windowsPaths enables case folding and volume-stripped matching. It is a variable rather than a
+// runtime.GOOS check so tests can exercise the Windows branch on any platform.
 var windowsPaths = runtime.GOOS == "windows"
 
-// sameRootPath compares two canonical paths, folding case only on Windows — the same rule
-// meshcore/scope uses.
+// sameRootPath compares two canonical paths, folding case only on Windows, as meshcore/scope does.
 func sameRootPath(a, b string) bool {
 	a, b = filepath.Clean(a), filepath.Clean(b)
 	if windowsPaths {
@@ -326,7 +287,7 @@ func sameRootPath(a, b string) bool {
 	return a == b
 }
 
-// userHome returns the injected home or the OS's ("" when neither is available).
+// userHome returns injected, or the OS home directory, or "".
 func userHome(injected string) string {
 	if h := strings.TrimSpace(injected); h != "" {
 		return h
@@ -338,8 +299,7 @@ func userHome(injected string) string {
 	return h
 }
 
-// rootFault types a launch-time root refusal as a USAGE fault (exit 2) carrying a stable
-// machine reason: it is a wrong invocation, not a failed run.
+// rootFault returns a usage fault (exit 2) with a machine reason for a launch-time root refusal.
 func rootFault(reason, msg string) error {
 	return fault.New(fault.Usage, msg).WithReason(reason)
 }

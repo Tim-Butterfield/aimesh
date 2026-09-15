@@ -6,10 +6,8 @@ import (
 	"testing"
 )
 
-// WithDebug/DebugWriter is the seam behind BOTH apps' shipped `--debug` flag: an app enables
-// diagnostics once and EVERY adapter family (shell, acpagent, …) must read the same key, or
-// `--debug` would silently produce nothing for some adapters. It is also off by default — a
-// diagnostic writer must never be picked up accidentally.
+// WithDebug and DebugWriter back the `--debug` flag: every adapter family reads the same context key,
+// and diagnostics are off by default.
 
 func TestDebugWriter_OffByDefault(t *testing.T) {
 	if w := DebugWriter(context.Background()); w != nil {

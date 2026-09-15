@@ -12,14 +12,12 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/acpagent"
 )
 
-// This file is the governed write surface for USER-DEFINED generic ACP adapters (the "Add ACP" flow).
-// There is no fixed ACP catalog: a user points the generic ACP driver at any ACP-capable CLI binary, the
-// launch args are auto-detected + validated (a real handshake), and the instance is saved to the
-// user-scope shared .aimesh/adapters.yaml `acpAdapters`. registry.ResolveACPInstances then synthesizes
-// it into a runnable adapter on the next re-resolve.
+// This file holds the writes for user-defined ACP adapters. A user points the generic ACP driver at an
+// ACP-capable CLI; its launch arguments are detected and validated with a real handshake, and the
+// instance is saved to `acpAdapters` in the user-scope shared adapters.yaml, where
+// registry.ResolveACPInstances picks it up.
 
-// acpProbeTimeout bounds a candidate-binary probe: ValidateCandidate launches the real CLI (each try is
-// itself watchdog-bounded), so this caps the total detect/validate wall time.
+// acpProbeTimeout bounds detection and validation of a candidate binary, which launch the real CLI.
 const acpProbeTimeout = 90 * time.Second
 
 // DetectDTO reports probing a candidate ACP binary: the launch Args that worked, the Model the session
@@ -32,10 +30,9 @@ type DetectDTO struct {
 	Detail         string   `json:"detail,omitempty"`
 }
 
-// DetectACP validates a candidate binary as an ACP adapter: it finds the launch args (via `--help` + a
-// real ACP handshake) and reads the model the session reports, proposing an editable "ACP: <CLI>" title.
-// Read-only (no config write). It launches the real CLI but is bounded by acpProbeTimeout + the acpagent
-// startup watchdog.
+// DetectACP validates a candidate binary as an ACP adapter: it finds working launch arguments with
+// `--help` and a real handshake, and reads the model the session reports. It writes no configuration.
+// The run is bounded by acpProbeTimeout and the acpagent startup watchdog.
 func (m *Manager) DetectACP(path string, argsHint []string) (DetectDTO, error) {
 	if strings.TrimSpace(path) == "" {
 		return DetectDTO{}, fault.New(fault.Usage, "a binary path is required")
@@ -49,12 +46,11 @@ func (m *Manager) DetectACP(path string, argsHint []string) (DetectDTO, error) {
 	return DetectDTO{OK: c.OK, Args: c.Args, Model: c.Model, SuggestedTitle: c.Title, Detail: c.Detail}, nil
 }
 
-// SaveACP adds or updates a user-defined ACP adapter instance in the user-scope shared adapters.yaml.
-// name is the stable key — when empty it is derived from the binary basename (`acp-<basename>`) and
-// uniquified. It VALIDATES the candidate (a real ACP handshake) to confirm the launch args and capture
-// the reported model (the expected model for identity verification). A handshake failure does NOT block
-// the save — the instance is still written (with the user's args, no captured model) and the failure is
-// surfaced as a warning — so a CLI mid-login can be saved and re-validated later. Re-resolves + bumps.
+// SaveACP adds or updates a user-defined ACP adapter in the user-scope shared adapters.yaml. An empty
+// name derives `acp-<basename>`, made unique. The candidate is validated with a real handshake to confirm
+// the launch arguments and capture the reported model. A failed handshake still saves the instance, with
+// the given arguments and no model, and returns a warning, so a CLI awaiting login can be saved and
+// validated later.
 func (m *Manager) SaveACP(name, title, path string, args []string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -76,8 +72,6 @@ func (m *Manager) SaveACP(name, title, path string, args []string) ([]string, er
 		args = []string{"--acp"}
 	}
 
-	// Validate: confirm the launch args + capture the reported model. On success save the args that
-	// actually worked; on failure keep the user's args and warn (no model captured).
 	ctx, cancel := context.WithTimeout(context.Background(), acpProbeTimeout)
 	defer cancel()
 	var messages []string
@@ -96,7 +90,6 @@ func (m *Manager) SaveACP(name, title, path string, args []string) ([]string, er
 	if err := m.reresolveLocked(); err != nil {
 		return nil, err
 	}
-	m.generation++
 	if model != "" {
 		messages = append(messages, fmt.Sprintf("Saved ACP adapter %q (%s) — validated, model %s.", title, key, model))
 	} else {
@@ -105,9 +98,8 @@ func (m *Manager) SaveACP(name, title, path string, args []string) ([]string, er
 	return messages, nil
 }
 
-// RemoveACP deletes a user-defined ACP adapter instance from the user-scope shared adapters.yaml. It is
-// BLOCKED (a *BlockedError with the using slots) while the roster references the adapter, and reports a
-// clear error when the named instance is not a saved ACP adapter.
+// RemoveACP deletes a user-defined ACP adapter from the user-scope shared adapters.yaml. It returns a
+// *BlockedError while a roster slot uses the adapter, and an error when no such ACP adapter is saved.
 func (m *Manager) RemoveACP(name string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -137,12 +129,11 @@ func (m *Manager) RemoveACP(name string) ([]string, error) {
 	if err := m.reresolveLocked(); err != nil {
 		return nil, err
 	}
-	m.generation++
 	return []string{fmt.Sprintf("Removed the ACP adapter %q.", name)}, nil
 }
 
-// uniqueACPKeyLocked derives a stable slug key `acp-<basename>` for a new instance, uniquified against
-// the shared file's existing ACP instances (…-2, …-3). Caller holds the mutex.
+// uniqueACPKeyLocked returns `acp-<basename>` for binPath, suffixed (-2, -3, ...) to avoid an existing
+// ACP instance name. The caller holds m.mu.
 func (m *Manager) uniqueACPKeyLocked(binPath string) string {
 	base := acpSlug(filepath.Base(binPath))
 	if base == "" {
@@ -166,7 +157,7 @@ func (m *Manager) uniqueACPKeyLocked(binPath string) string {
 	}
 }
 
-// acpSlug lowercases a binary basename into a config-key-safe slug (alnum runs joined by '-').
+// acpSlug lowercases a binary basename into a key-safe slug: runs of letters and digits joined by '-'.
 func acpSlug(base string) string {
 	base = strings.TrimSuffix(strings.ToLower(base), ".exe")
 	var b strings.Builder
@@ -183,7 +174,7 @@ func acpSlug(base string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-// humanizeBase title-cases a binary basename for a default ACP title.
+// humanizeBase capitalizes a binary basename for a default ACP title.
 func humanizeBase(binPath string) string {
 	base := strings.TrimSuffix(filepath.Base(binPath), ".exe")
 	if base == "" {

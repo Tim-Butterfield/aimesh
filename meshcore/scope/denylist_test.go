@@ -114,15 +114,9 @@ func TestDenylist_TrailingDotSpaceAliasing(t *testing.T) {
 	}
 }
 
-// TestDenylist_NTFSStreamAliasing pins H7: on NTFS every file has a default data stream, and
-// `.git::$DATA` (or `.git:x:$DATA`) resolves to the very same `.git` directory. Trailing
-// dot/space trimming does not touch that shape, so an exact component lookup of the
-// untrimmed name matches no rule while the write lands on the real target.
-//
-// The trim is deliberately Windows-only, so this test states BOTH platforms' expectations
-// by toggling the gate: on unix `:` is an ordinary filename character, and stripping the
-// suffix there would LOOSEN the denylist (a real file named `report:.pem` would stop
-// matching the `*.pem` key-material rule).
+// On NTFS `.git::$DATA` (or `.git:x:$DATA`) resolves to `.git`, so the stream suffix must be stripped
+// before matching. The strip is Windows-only, so both platforms are tested by toggling the gate: on
+// unix `:` is an ordinary character, and stripping it would stop `report:.pem` matching `*.pem`.
 func TestDenylist_NTFSStreamAliasing(t *testing.T) {
 	aliased := []string{
 		`.git::$DATA/config`,
@@ -196,7 +190,7 @@ func TestDenylist_NearMissesStillAllowed(t *testing.T) {
 	}
 }
 
-// TestResolve_NestedSecretDirRefused exercises the same hole through the RESOLVER, on a
+// TestResolve_NestedSecretDirRefused checks the same rule through the resolver on a
 // real filesystem: a file inside a `.env` directory sits happily inside the allowed root
 // and must still be refused for read and write.
 func TestResolve_NestedSecretDirRefused(t *testing.T) {
@@ -215,9 +209,8 @@ func TestResolve_NestedSecretDirRefused(t *testing.T) {
 	}
 }
 
-// TestResolve_DeniedRootDeniesItsChildren pins F2 at the resolver: when the ROOT a caller
-// consented to is itself a protected directory, its children are not innocent because
-// their own names are innocent — the whole subtree is the secret.
+// When the root itself is a secret directory, the resolver denies its whole subtree, whatever the
+// children are named.
 func TestResolve_DeniedRootDeniesItsChildren(t *testing.T) {
 	parent := mkRoot(t)
 	root := filepath.Join(parent, ".env")

@@ -1,8 +1,7 @@
-// Package localstate discovers a project's VCS root and initializes a local, VCS-excluded `.aimesh/`
-// state directory (config, run artifacts, containment copies). It is a GIT-FOCUSED SUBSET of aikit's
-// `init` semantics: a pure-filesystem walk-up finds the nearest `.git` (directory or file) or `.hg`
-// directory; the `.git`-file (worktree/submodule) case skips the exclude step rather than chase the
-// real git dir; Mercurial ignore-registration is not yet supported. Domain-free — no app vocabulary.
+// Package localstate finds a project's VCS root and initializes the local, VCS-excluded `.aimesh/` state
+// directory (configuration, run artifacts, containment copies). The walk up finds the nearest `.git`
+// (directory or file) or `.hg` directory. For a `.git` file (a worktree or submodule) the exclude step is
+// skipped, and Mercurial ignore registration is not supported.
 package localstate
 
 import (
@@ -13,19 +12,17 @@ import (
 	"strings"
 )
 
-// HomeDirName is the project-local aimesh state directory; TempSubdir is its scratch/containment area
-// (named `temp`, matching aikit's `.aikit/temp`).
+// HomeDirName is the project-local state directory; TempSubdir is its scratch and containment area.
 const (
 	HomeDirName = ".aimesh"
 	TempSubdir  = "temp"
 )
 
-// ErrRepoNotFound is returned by Init in repo mode when no VCS root is found (mirrors aikit's
-// blocked_repo_not_found).
+// ErrRepoNotFound is returned by Init in repo mode when no VCS root is found.
 var ErrRepoNotFound = errors.New("not inside a Git or Mercurial repository; use `folder init` for a plain directory")
 
-// ErrInsideRepo is returned by Init in folder mode when a VCS root IS found — folder mode refuses to
-// create an un-ignored .aimesh inside a repo; use `repo init`.
+// ErrInsideRepo is returned by Init in folder mode when a VCS root is found, since folder mode would
+// create an un-ignored .aimesh inside a repository.
 var ErrInsideRepo = errors.New("inside a repository; use `repo init` so .aimesh is VCS-excluded")
 
 // gitEntry reports whether dir has a `.git` entry and whether it is a directory (worktrees use a file).
@@ -67,6 +64,7 @@ func FindRoot(start string) (string, bool) {
 // InitMode selects how Init resolves the target directory.
 type InitMode int
 
+// Init modes.
 const (
 	InitAuto   InitMode = iota // repo if a root is found, else folder
 	InitRepo                   // require a repo (error if none)
@@ -82,9 +80,8 @@ type InitResult struct {
 	Actions  []string // human-readable actions taken
 }
 
-// Init creates <base>/.aimesh/ + <base>/.aimesh/temp/ and, in a git repo whose `.git` is a DIRECTORY,
-// idempotently appends `/.aimesh/` to `.git/info/exclude`. Directories only — no seeded config (adapter
-// detection is a separate explicit step).
+// Init creates <base>/.aimesh/ and <base>/.aimesh/temp/ and, in a git repository whose `.git` is a
+// directory, idempotently appends `/.aimesh/` to `.git/info/exclude`. It creates no configuration.
 func Init(start string, mode InitMode) (InitResult, error) {
 	abs, err := filepath.Abs(start)
 	if err != nil {
@@ -132,8 +129,7 @@ func Init(start string, mode InitMode) (InitResult, error) {
 				res.Actions = append(res.Actions, "/"+HomeDirName+"/ already in .git/info/exclude")
 			}
 		} else {
-			// .git is a FILE (worktree/submodule): the real info/exclude needs gitdir chasing — skip
-			// with a notice rather than guess.
+			// .git is a file (worktree or submodule): skip with a notice rather than resolve the gitdir.
 			res.Actions = append(res.Actions, "note: .git is not a directory (worktree?) — add /"+HomeDirName+"/ to your ignore rules manually")
 		}
 	}

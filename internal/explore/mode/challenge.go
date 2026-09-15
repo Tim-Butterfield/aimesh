@@ -1,25 +1,16 @@
 package mode
 
-// This file is the CHALLENGE mode — an ADJUDICATIVE mode, and the one
-// that has to be honest about a count.
+// This file implements the Challenge mode:
 //
-//	round 1 (BLIND)   each explorer attacks the supplied artifact: typed findings with a closed severity
-//	canonicalize      TWO independent canonicalizers; only merges BOTH propose hold (canon.CanonicalizeDual)
-//	confirm           the BINDING confirmation round: typed panel challenges → a versioned host rule
-//	round 2 (MEDIATED) the pooled CONFIRMED-canonical digest is redistributed; explorers deepen or refute it
-//	collate           a SEVERITY-TRIAGED register, every entry pinned to a HOST-computed govern.Claim
+//	round 1 (blind)    each explorer attacks the supplied artifact with typed findings
+//	canonicalize       two canonicalizers; only merges both propose hold
+//	confirm            the confirmation round resolves typed challenges with a host rule
+//	round 2 (mediated) the confirmed findings are shown back; explorers deepen or refute them
+//	collate            a severity-triaged register, each entry pinned to a govern.Claim
 //
-// Challenge is count-bearing, so it takes the full ranking-grade canonicalization policy (Dual + Confirm) —
-// Confirmation covers EVERY count-bearing mode, and giving Shortlist a guard Challenge
-// lacked would be exactly the asymmetry the design warns about.
-//
-// The register's arithmetic is the part worth stating plainly. Corroboration is NOT "how many reviewers
-// mentioned it in the whole run": it is the number of distinct BLIND round-1 sources behind the confirmed
-// canonical entity, computed by internal/govern over a baseline the type system will not let a later round
-// enter. So the round-2 cross-review can sharpen a finding, escalate its severity in the reviewer's own
-// assessment, or refute it — and it can never move the count. Minority findings are never dropped: a
-// single-source finding survives into the register with its `single_source` label, because de-dup may
-// cluster and may not drop.
+// Corroboration counts the distinct blind round-1 sources behind each confirmed finding, so the
+// cross-review round can add depth or refute a finding but cannot change a count. Findings raised by a
+// single reviewer stay in the register, labeled single_source.
 
 import (
 	"encoding/json"
@@ -34,52 +25,38 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// --- the terminal output ---
-
-// ChallengeOutput is the FIXED, exploremesh-owned terminal output of the Challenge mode: a SEVERITY-TRIAGED
-// register of the confirmed canonical findings, the strengths that survived the attack, and the quarantined
-// model narrative. It lives in this package rather than in internal/schema because every register entry
-// embeds the host-computed govern.Claim, and govern sits above schema in the import graph.
+// ChallengeOutput is the Challenge mode's output: the severity-triaged register, the strengths that
+// survived cross-review, and the model narrative. It is defined here rather than in package schema because
+// it uses govern types.
 type ChallengeOutput struct {
-	// ArtifactDigest is the SHA-256 of the exact artifact bytes the panel attacked ("" for a composition that
-	// supplies none) — so a register can be tied to the artifact revision it was produced against.
+	// ArtifactDigest is the SHA-256 of the attacked artifact, or empty when none was supplied.
 	ArtifactDigest string `json:"artifactDigest,omitempty"`
-	// PartitionRevisionHash is the CONFIRMED partition every entry's count was computed at (every count
-	// pins the partition revision it rides on).
+	// PartitionRevisionHash is the confirmed partition the counts were computed at.
 	PartitionRevisionHash string `json:"partitionRevisionHash"`
-	// Register is the severity-triaged finding register, most severe first. Minority findings are present —
-	// carried, labeled single_source, never dropped.
+	// Register lists the confirmed findings, most severe first, including single-source findings.
 	Register []ChallengeEntry `json:"register"`
-	// SurvivingStrengths are the register entries a round-2 reviewer REFUTED without any reviewer deepening
-	// them — the honest inverse of the register, recorded so "the panel attacked this and it held" is visible
-	// rather than inferred from an absence.
+	// SurvivingStrengths are findings that cross-review refuted and no reviewer deepened.
 	SurvivingStrengths []ChallengeStrength `json:"survivingStrengths,omitempty"`
-	// CollatorNarrative is the quarantined MODEL PROSE namespace: coverage notes and the like. No
-	// machine governance field above may carry model text, which is why it is all collected here.
+	// CollatorNarrative holds model prose, such as coverage notes.
 	CollatorNarrative []govern.Narrative `json:"collatorNarrative,omitempty"`
 }
 
-// ChallengeEntry is ONE confirmed canonical finding in the register.
+// ChallengeEntry is one confirmed finding in the register.
 type ChallengeEntry struct {
 	CanonicalID string `json:"canonicalId"`
-	// Statement is the canonical entity's label — the host's stable name for the finding, not one reviewer's
-	// wording (every reviewer's exact wording is carried below in Findings).
+	// Statement is the canonical finding's label; each reviewer's wording is in Findings.
 	Statement string `json:"statement"`
-	// Severity is the HOST triage severity: the MAXIMUM severity any BLIND round-1 source assigned. Max rather
-	// than mean because severity is a claim about a worst case, and averaging one reviewer's "critical" with
-	// another's "low" would produce a number neither of them made.
+	// Severity is the highest severity any blind round-1 source assigned, since severity describes a worst
+	// case.
 	Severity schema.Severity `json:"severity"`
-	// Corroboration is the HOST-computed claim over the BLIND round-1 baseline: the count, BOTH denominators,
-	// the label (corroborated | single_source | withheld_contested_partition | withheld_below_quorum), the
-	// pinned inputs, and a sensitivity range when the partition under it is contested.
+	// Corroboration is the host's claim over blind round 1, with its label, denominators and any sensitivity
+	// range.
 	Corroboration govern.Claim `json:"corroboration"`
-	// SingleSource marks a carried minority finding (salience, not corroboration).
+	// SingleSource marks a finding raised by only one reviewer.
 	SingleSource bool `json:"singleSource"`
-	// Findings are the attributed BLIND round-1 findings clustered into this entity — every reviewer's exact
-	// statement, severity, failure scenario and evidence.
+	// Findings are the attributed blind round-1 findings in this cluster.
 	Findings []AttributedFinding `json:"findings"`
-	// Deepening is the round-2 CROSS-REVIEW record for this entity, attributed. It adds depth and stances; it
-	// contributes NOTHING to Corroboration.
+	// Deepening is the attributed cross-review record. It does not affect Corroboration.
 	Deepening []AttributedAssessment `json:"deepening,omitempty"`
 }
 
@@ -89,15 +66,13 @@ type AttributedFinding struct {
 	EnvelopeRef string                  `json:"envelopeRef"`
 	Statement   string                  `json:"statement"`
 	Severity    schema.Severity         `json:"severity"`
-	// FailureScenario + Evidence are the reviewer's own words about this finding, kept attributed rather than
-	// blended into a single host sentence.
+	// FailureScenario and Evidence are the reviewer's own words.
 	FailureScenario string `json:"failureScenario,omitempty"`
 	Evidence        string `json:"evidence,omitempty"`
 }
 
-// AttributedAssessment is one round-2 cross-review reaction with its source. Its severity is that reviewer's
-// own post-mediation assessment and is deliberately NOT folded into the entry's host triage severity, which
-// is computed over blind round 1 only.
+// AttributedAssessment is one cross-review response with its source. Its severity does not affect the
+// entry's severity.
 type AttributedAssessment struct {
 	Explorer    schema.ExplorerIdentity `json:"explorer"`
 	EnvelopeRef string                  `json:"envelopeRef"`
@@ -107,8 +82,7 @@ type AttributedAssessment struct {
 	Evidence    string                  `json:"evidence,omitempty"`
 }
 
-// ChallengeStrength records a finding the cross-review round REFUTED and nobody deepened — i.e. a part of the
-// artifact that survived the attack, named by the finding that failed to stick.
+// ChallengeStrength is a finding that cross-review refuted and no reviewer deepened.
 type ChallengeStrength struct {
 	CanonicalID string                    `json:"canonicalId"`
 	Statement   string                    `json:"statement"`
@@ -116,8 +90,7 @@ type ChallengeStrength struct {
 	Reason      string                    `json:"reason"`
 }
 
-// Summary returns the one-line human summary — counts by label, never a verdict of its own. It implements the
-// ModeOutput contract.
+// Summary returns a one-line summary of the register by severity and label.
 func (o ChallengeOutput) Summary() string {
 	bySeverity := map[schema.Severity]int{}
 	corroborated, single, withheld := 0, 0, 0
@@ -138,9 +111,8 @@ func (o ChallengeOutput) Summary() string {
 		corroborated, single, withheld, shortHash(o.PartitionRevisionHash))
 }
 
-// Validate checks the register is usable: at least one finding survived canonicalization. An attack that
-// produced nothing is a legitimate outcome of a review but not of this collation — the pipeline would have
-// halted at the surjectivity gate long before, so an empty register here means the assembly lost something.
+// Validate requires a non-empty register. An empty one means findings were lost during assembly, since
+// canonicalization would already have failed.
 func (o ChallengeOutput) Validate() error {
 	if len(o.Register) == 0 {
 		return fmt.Errorf("challenge output has an empty register")
@@ -148,7 +120,7 @@ func (o ChallengeOutput) Validate() error {
 	return nil
 }
 
-// shortHash renders the first 12 hex chars of a hash for a human line.
+// shortHash returns the first 12 characters of a hash.
 func shortHash(h string) string {
 	if len(h) <= 12 {
 		return h
@@ -156,16 +128,10 @@ func shortHash(h string) string {
 	return h[:12]
 }
 
-// --- the round-2 (mediated cross-review) contract ---
-
-// challengeReview is the Challenge mode's LaterRoundContract: it accepts ONLY the pooled confirmed-canonical
-// uniques at the current artifact schema version, and it embeds the host's already-framed untrusted-data
-// block VERBATIM — a contract may not re-frame or re-label it.
+// challengeReview is the Challenge mode's cross-review round contract.
 type challengeReview struct{}
 
-// Accepts declares the round→round edge this round will take. It names KindCanonicalUniques and nothing else,
-// so feeding it raw blind envelopes is rejected before spend — which is the mechanical form of "explorers
-// never see raw peer output".
+// Accepts accepts only confirmed canonical entities, so explorers never receive raw peer output.
 func (challengeReview) Accepts() round.Accepts {
 	return round.Accepts{Kinds: []round.Kind{round.KindCanonicalUniques}, SchemaVersion: round.SchemaVersion}
 }
@@ -176,18 +142,11 @@ func (challengeReview) Prompt(raw schema.RawTask, untrustedDataBlock string) str
 
 func (challengeReview) ExplorerSchema() schema.Schema { return schema.ChallengeReviewSchema() }
 
-// --- the canonicalizing + governed terminal contract ---
-
-// challengeCollator is the Challenge mode's terminal contract. It is a CanonicalizingContract (the raw
-// findings go through the dual canonicalizer + the append-only ledger + the surjectivity gate) AND a
-// GovernedCollator (the register is assembled as a view over the confirmed partition plus the host's emitted
-// claims and the recorded rounds).
+// challengeCollator is the Challenge mode's CanonicalizingContract and GovernedCollator.
 type challengeCollator struct{}
 
-// Nominations flattens the verified blind round-1 panel into raw nominations: each finding's STATEMENT is the
-// nomination, attributed to its explorer + envelope ref. The statement is what gets canonicalized because it
-// is what two reviewers can independently arrive at; the severity/scenario/evidence travel with it and are
-// re-attached at collate time from the same recorded envelopes.
+// Nominations returns one nomination per finding statement. Severity and evidence are reattached from the
+// recorded envelopes at collation.
 func (challengeCollator) Nominations(primary []schema.Envelope) []canon.Nomination {
 	var out []canon.Nomination
 	for _, env := range primary {
@@ -202,18 +161,15 @@ func (challengeCollator) Nominations(primary []schema.Envelope) []canon.Nominati
 	return out
 }
 
-// challengeNominationWire is the per-nomination shape rendered into the canonicalizer prompt: the model
-// clusters by INDEX, so the index is explicit alongside the raw statement + source.
+// challengeNominationWire is one finding as shown to the canonicalizer, which clusters by index.
 type challengeNominationWire struct {
 	Index          int                     `json:"index"`
 	Raw            string                  `json:"raw"`
 	SourceExplorer schema.ExplorerIdentity `json:"sourceExplorer"`
 }
 
-// CanonicalizerPrompt renders the canonicalizer instruction for FINDINGS. It differs from Catalog's in the
-// one way that matters: two findings are the same finding only when they name the same underlying DEFECT —
-// two different defects in the same component are two findings, and merging them would silently manufacture
-// corroboration for whichever wording survived.
+// CanonicalizerPrompt builds the Challenge canonicalizer prompt, which clusters findings only when they
+// describe the same defect.
 func (challengeCollator) CanonicalizerPrompt(noms []canon.Nomination) (string, error) {
 	wire := make([]challengeNominationWire, len(noms))
 	for i, n := range noms {
@@ -248,25 +204,19 @@ func (challengeCollator) CanonicalizerPrompt(noms []canon.Nomination) (string, e
 		"nominations:\n" + string(arr) + "\n", nil
 }
 
-// ParseProposal decodes the canonicalizer's raw output into a canon.Proposal, stamping the deciding call ref +
-// the SEPARATELY-verified canonicalizer identity. The surjectivity GATE is canon's host-checked invariant, not
-// this parser's — one authority, no second opinion about whether a finding was dropped.
+// ParseProposal decodes the canonicalizer's output with parseClusterProposal.
 func (challengeCollator) ParseProposal(raw []byte, _ []canon.Nomination, decidedByCall string, identity schema.ExplorerIdentity) (canon.Proposal, error) {
 	return parseClusterProposal(raw, decidedByCall, identity)
 }
 
-// Collate is the PARTITION-ONLY fallback required by CanonicalizingContract. Challenge always runs governed
-// (the pipeline prefers CollateGoverned), so reaching this would mean the register was assembled without the
-// claims that give it its meaning — an error, not a degraded rendering.
+// Collate always returns an error: the register needs the governance claims, so Challenge uses
+// CollateGoverned.
 func (challengeCollator) Collate(canon.Result) (ModeOutput, error) {
 	return nil, fmt.Errorf("challenge: the register may only be assembled from the governed record (claims + rounds); a partition-only collation would report counts with nothing pinning them")
 }
 
-// CollateGoverned assembles the severity-triaged register as a deterministic HOST VIEW: the confirmed
-// partition supplies the entities, the recorded BLIND round-1 envelopes supply each finding's severity and
-// evidence, the emitted governance claims supply every count + label + sensitivity, and the recorded round-2
-// envelopes supply the attributed depth. Nothing here counts anything — the counting already happened in
-// internal/govern over a baseline this function could not widen if it tried.
+// CollateGoverned builds the register from the confirmed partition, the blind round-1 findings, the
+// emitted claims and the cross-review envelopes. It counts nothing itself.
 func (challengeCollator) CollateGoverned(in CollateInput) (ModeOutput, error) {
 	if in.Governance == nil {
 		return nil, fmt.Errorf("challenge: no governance claims were emitted — every register entry must be pinned to a host-computed claim")
@@ -297,16 +247,13 @@ func (challengeCollator) CollateGoverned(in CollateInput) (ModeOutput, error) {
 		for _, m := range cl.Members {
 			f, ok := findings[findingKey{m.EnvelopeRef, m.RawNomination}]
 			if !ok {
-				// The member came from a round the register does not read details for (it cannot: only blind
-				// round 1 feeds the partition). Carry the attribution anyway — losing a member here would be a
-				// silent drop, which the surjectivity gate exists to make impossible.
+				// Keep the member even without details, so no finding is dropped.
 				f = schema.ChallengeFinding{Statement: m.RawNomination, Severity: schema.SeverityUnspecified}
 			}
 			entry.Findings = append(entry.Findings, AttributedFinding{
 				Explorer: m.SourceExplorer, EnvelopeRef: m.EnvelopeRef, Statement: f.Statement,
 				Severity: f.Severity, FailureScenario: f.FailureScenario, Evidence: f.Evidence,
 			})
-			// HOST triage: the maximum severity any blind source assigned (see the Severity field's comment).
 			if f.Severity.Rank() > entry.Severity.Rank() {
 				entry.Severity = f.Severity
 			}
@@ -315,8 +262,7 @@ func (challengeCollator) CollateGoverned(in CollateInput) (ModeOutput, error) {
 		out.Register = append(out.Register, entry)
 	}
 
-	// TRIAGE (a deterministic host sort, never a model's ordering): severity first, then the corroboration
-	// count, then the canonical ID so identical standing always serializes identically.
+	// Order by severity, then corroboration count, then canonical ID for determinism.
 	sort.SliceStable(out.Register, func(i, j int) bool {
 		a, b := out.Register[i], out.Register[j]
 		switch {
@@ -335,15 +281,13 @@ func (challengeCollator) CollateGoverned(in CollateInput) (ModeOutput, error) {
 	return out, nil
 }
 
-// findingKey identifies one blind round-1 finding by the pair the partition records for it (envelope ref +
-// raw statement) — the same key canon uses, so a member always resolves to the finding it came from.
+// findingKey identifies a blind round-1 finding by envelope ref and statement, as the partition does.
 type findingKey struct {
 	envelopeRef string
 	statement   string
 }
 
-// blindFindings indexes every BLIND round-1 finding by (envelope ref, statement). Only round 1 is read: a
-// later round's findings are not in the partition and must not acquire a register position by being detailed.
+// blindFindings indexes the round-1 findings by envelope ref and statement.
 func blindFindings(rounds []round.Round) map[findingKey]schema.ChallengeFinding {
 	out := map[findingKey]schema.ChallengeFinding{}
 	if len(rounds) == 0 {
@@ -358,10 +302,8 @@ func blindFindings(rounds []round.Round) map[findingKey]schema.ChallengeFinding 
 	return out
 }
 
-// reviewAssessments indexes every round-2+ cross-review assessment by the canonical ID it referenced. An
-// assessment naming a ref that is not in the partition is simply not indexed — it attaches to nothing, and a
-// reviewer's mis-cited ref must never create an entity (that would be the round-2 injection the mediated
-// design forbids).
+// reviewAssessments indexes cross-review assessments by the canonical ID they reference. An assessment
+// citing an unknown ID attaches to nothing and never creates an entry.
 func reviewAssessments(rounds []round.Round) map[string][]AttributedAssessment {
 	out := map[string][]AttributedAssessment{}
 	for k := 1; k < len(rounds); k++ {
@@ -379,9 +321,8 @@ func reviewAssessments(rounds []round.Round) map[string][]AttributedAssessment {
 	return out
 }
 
-// survivingStrengths names the entries the cross-review REFUTED with nobody deepening them. It is a strict
-// mechanical read of the recorded stances — the host asserts nothing about whether the refutation was right,
-// only that the panel's second look pushed back and no reviewer pushed the other way.
+// survivingStrengths returns the entries at least one reviewer refuted and none deepened. It reads the
+// recorded stances only and does not judge the refutations.
 func survivingStrengths(register []ChallengeEntry) []ChallengeStrength {
 	var out []ChallengeStrength
 	for _, e := range register {
@@ -406,8 +347,7 @@ func survivingStrengths(register []ChallengeEntry) []ChallengeStrength {
 	return out
 }
 
-// artifactDigest is the SHA-256 of the exact artifact bytes attacked ("" when none was supplied). It ties a
-// register to an artifact revision without copying the artifact into the machine surface.
+// artifactDigest returns the SHA-256 of the trimmed artifact, or "" when there is none.
 func artifactDigest(artifact string) string {
 	body := strings.TrimSpace(artifact)
 	if body == "" {
@@ -416,8 +356,7 @@ func artifactDigest(artifact string) string {
 	return sha256Hex([]byte(body))
 }
 
-// requireArtifact is Challenge's ModeSpec.ValidateTask: the mode exists to attack a supplied artifact, so a
-// missing one is a task error caught by every surface BEFORE any spend, with one message.
+// requireArtifact is Challenge's ValidateTask: the task must supply an artifact.
 func requireArtifact(raw schema.RawTask) error {
 	if strings.TrimSpace(raw.Artifact) == "" {
 		return fmt.Errorf("mode %q requires an ARTIFACT to attack: supply the thing under review (CLI: --artifact <path|->; ACP: _meta.exploremesh.artifact)", Challenge)
@@ -426,10 +365,6 @@ func requireArtifact(raw schema.RawTask) error {
 }
 
 func init() {
-	// Challenge. Formulation-free like every registered mode: the app owns BOTH the
-	// round-1 prompt and schema, so the collator authors no explorer schema. Count-bearing ⇒ the full
-	// ranking-grade policy (Dual + Confirm). Two FIXED rounds: blind attack, then the collator-mediated
-	// cross-review over the pooled confirmed-canonical digest.
 	register(ModeSpec{
 		Name:             Challenge,
 		FormulationFree:  true,
@@ -441,8 +376,6 @@ func init() {
 		Rounds:           2,
 		LaterRound:       challengeReview{},
 		ValidateTask:     requireArtifact,
-		// EMERGENT space: the findings are authored by the reviewers, so grouping them across reviewers is
-		// entity resolution and may only happen through the recorded canonicalization ledger.
-		Class: schema.EmergentSpace,
+		Class:            schema.EmergentSpace,
 	})
 }

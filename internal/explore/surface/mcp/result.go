@@ -12,36 +12,28 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/surface/runview"
 )
 
-// This file builds what a tool call HANDS BACK: the structuredContent (which must validate against the
-// declared outputSchema) and the short human rendering that rides `content`.
-//
-// Both channels are populated for every result, including failures. Some clients show the model only the
-// text; some pass only the structured payload to a validator. A result that lived in one channel would be
-// invisible to half of them, which is the same failure mode as reporting a count without its denominator.
+// This file builds tool results: the structuredContent, which must match the tool's outputSchema, and a
+// short text rendering. Every result fills both, since some clients show only one.
 
-// slot is one panel seat on the wire.
+// slot is one panel seat as sent by the caller.
 type slot struct {
 	Adapter string `json:"adapter"`
 	Model   string `json:"model"`
 	Effort  string `json:"effort,omitempty"`
 }
 
-// panelPick is the panel a call asked for AND the panel that will execute — kept together because the
-// echo is only meaningful as a pair.
+// panelPick holds the panel a call requested and the plan that runs.
 type panelPick struct {
-	source     string // "adhoc": every call composes its panel
+	source     string // always "adhoc"
 	reqSeats   []slot
 	reqCollate *slot
-	// reqCanon is the caller's `canonicalizers` argument, when it supplied one. It is on the pick rather
-	// than folded into the plan alone so the echo can say what was ASKED FOR next to what ran.
-	reqCanon   []slot
+	reqCanon   []slot // the caller's canonicalizers, if any
 	plan       roster.Plan
 	selected   int
 	configured int
 }
 
-// echo renders the requested-vs-executed panel block. It is REQUIRED in the output schema: a seat that
-// dropped mid-run is visible only by comparing the two halves.
+// echo renders the requested and executed panel. out is nil while the run has not finished.
 func (p panelPick) echo(out *pipeline.Result) map[string]any {
 	req := map[string]any{"source": p.source}
 	if len(p.reqSeats) > 0 {
@@ -59,14 +51,8 @@ func (p panelPick) echo(out *pipeline.Result) map[string]any {
 		"selected":   p.selected,
 		"configured": p.configured,
 	}
-	// WHICH identities held the merge-agreement rule, and WHO CHOSE THEM. The provenance comes from the run
-	// itself once one has finished (the pipeline records it); before that, from the resolved panel.
 	exec["canonicalizers"] = canonSeats(p.plan.Canonicalizers)
 	exec["canonicalizerSource"] = canonicalizerSourceOf(p, out)
-	// WHAT THE PAIR IS WORTH, once a run has resolved it. `shared_model` says both canonicalizers ran one
-	// model behind two adapters, which makes every merge-agreement — and so every corroboration count in
-	// this result — weaker evidence than the same count from two different models. It is reported rather
-	// than refused, so reporting it is the whole safeguard.
 	if out != nil && out.CanonicalizerIndependence != "" {
 		exec["canonicalizerIndependence"] = out.CanonicalizerIndependence
 	}
@@ -76,9 +62,7 @@ func (p panelPick) echo(out *pipeline.Result) map[string]any {
 	return map[string]any{"requested": req, "executed": exec}
 }
 
-// canonicalizerSourceOf reports how the canonicalizers were (or will be) chosen: `explicit` when a caller
-// or a profile named them, `derived` when the host picks them. A finished run's OWN provenance wins — it is
-// the recorded fact, and the two can only differ if the resolution changed under us.
+// canonicalizerSourceOf returns `explicit` or `derived`, preferring the finished run's recorded provenance.
 func canonicalizerSourceOf(p panelPick, out *pipeline.Result) string {
 	if out != nil && out.CanonicalizerProvenance != "" {
 		return out.CanonicalizerProvenance
@@ -117,10 +101,8 @@ func planSeats(p roster.Plan) []map[string]any {
 	return out
 }
 
-// governanceBlock is runview's shared governance projection, made UNCONDITIONAL for MCP. A mode that
-// emits no host-computed counts states that fact (`countsEmitted: false`) instead of omitting the block:
-// the schema can then require it, and "this mode does not count" stops being indistinguishable from "the
-// count was dropped on the way out".
+// governanceBlock returns runview.Governance with `countsEmitted` added. For a mode without counts it
+// returns a block saying so, since the output schema requires the block.
 func governanceBlock(out pipeline.Result) map[string]any {
 	gov := runview.Governance(out)
 	if gov == nil {
@@ -134,8 +116,8 @@ func governanceBlock(out pipeline.Result) map[string]any {
 	return gov
 }
 
-// identityCaveatMaps projects the shared caveat list. It is always a non-nil slice: an empty array is the
-// positive statement that every seat's identity was verified.
+// identityCaveatMaps converts runview.IdentityCaveats to maps. The slice is never nil; empty means every
+// seat was verified.
 func identityCaveatMaps(out pipeline.Result) []map[string]any {
 	caveats := runview.IdentityCaveats(out)
 	res := make([]map[string]any, 0, len(caveats))
@@ -179,13 +161,7 @@ func completeResult(rec *record, raw schema.RawTask, pick panelPick, out pipelin
 	if detail := runview.ModeDetail(out); detail != nil {
 		structured["result"] = detail
 	}
-	// Whether the blind round 1 was COLD. The caller cannot turn this on and did not ask for it, which is
-	// precisely why the result has to say it: without the key, a caller comparing two runs of one question
-	// has no way to tell that the second was shown the first's conclusions.
-	// A DRY RUN finished the call without exploring anything. It is marked on the payload rather than left
-	// to be inferred from an empty result, because the inference a caller would otherwise make — "the panel
-	// ran and produced nothing" — is the opposite of what happened. `dryRun` is the flag to branch on;
-	// `shape` is its machine-readable content, and the two always travel together.
+	// A dry run is flagged explicitly so it is not mistaken for a run that found nothing.
 	if out.Shape != nil {
 		structured["dryRun"] = true
 		structured["shape"] = runview.Shape(out)
@@ -194,8 +170,8 @@ func completeResult(rec *record, raw schema.RawTask, pick panelPick, out pipelin
 	return structured, renderComplete(structured, out)
 }
 
-// renderShape is the text channel's version of the dry run: the total, the stages behind it, and the two
-// things a reader must not assume — that the count is a guess, and that anything was proven reachable.
+// renderShape renders a dry run as text: the call total, the stages, and the fact that no model was
+// contacted.
 func renderShape(rec *record, sh pipeline.Shape) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Dry run (mode %s, run %s): nothing was spent.\n", sh.Mode, rec.ID)
@@ -215,9 +191,7 @@ func renderShape(rec *record, sh pipeline.Shape) string {
 	return b.String()
 }
 
-// haltResult builds the terminal payload for a run that HALTED. It rides `isError: true` on a successful
-// JSON-RPC response — a JSON-RPC error's `data` is routinely flattened or dropped by clients, and losing
-// the taxonomy is losing exactly the field the model needs in order to react correctly.
+// haltResult builds the payload for a halted or cancelled run, returned as an `isError` tool result.
 func haltResult(rec *record, pick panelPick, raw schema.RawTask, out pipeline.Result, err error, capturedID string, cancelled bool) (map[string]any, string) {
 	state := StateHalted
 	if cancelled {
@@ -248,9 +222,8 @@ func haltResult(rec *record, pick panelPick, raw schema.RawTask, out pipeline.Re
 	return structured, text
 }
 
-// refusalResult builds the payload for a call refused BEFORE any spend — an admission limit, a
-// fail-closed panel resolution, an unknown run id. It is the same taxonomy shape as a halt, so a caller
-// branches on `reasonCode` without caring whether the refusal came before or after the money.
+// refusalResult builds the payload for a call refused before any spend, such as an unknown run id. It has
+// the same fields as a halt.
 func refusalResult(runID string, err error) (map[string]any, string) {
 	structured := map[string]any{
 		"state":      StateHalted,
@@ -262,16 +235,8 @@ func refusalResult(runID string, err error) (map[string]any, string) {
 	return structured, err.Error()
 }
 
-// reasonOf returns the stable machine reason code, NEVER an empty string. `reasonCode` is the field the
-// docs tell a caller to branch on, and the output schema marks it required — so a failure that arrived
-// without a typed reason must still answer with a code rather than with "". An empty machine-readable
-// field forces every consumer to special-case it, and it reads like "no error" to anything that tests
-// truthiness.
-//
-// meshcore's fault.ReasonOf already carries the heavy half: any non-nil error yields a code-shaped
-// fallback from the per-exit-code table (`internal_error` for something nobody classified). This is the
-// last guard, for the one input that answers "". It is character-for-character reviewmesh's reasonOf,
-// so the two MCP surfaces cannot drift apart on what an unclassified halt says.
+// reasonOf returns err's reason code, or "unclassified" when there is none. The output schema requires a
+// non-empty reasonCode. It matches the review MCP surface's reasonOf.
 func reasonOf(err error) string {
 	if r := fault.ReasonOf(err); r != "" {
 		return r
@@ -279,15 +244,13 @@ func reasonOf(err error) string {
 	return "unclassified"
 }
 
-// maxFailureItems + maxFailureText bound the failure breakdown that reaches a third-party inference log.
+// Limits on the failure breakdown returned to the client.
 const (
 	maxFailureItems = 16
 	maxFailureText  = 2000
 )
 
-// capFailure bounds the halt breakdown: a long message is truncated with an explicit marker and a long
-// drop list is cut with a stated remainder. Truncation is always ANNOUNCED — a silently shortened failure
-// report is worse than a long one, because it reads complete.
+// capFailure truncates a long failure message and a long drop list, marking each truncation.
 func capFailure(f map[string]any) map[string]any {
 	if msg, ok := f["message"].(string); ok && len(msg) > maxFailureText {
 		f["message"] = msg[:maxFailureText] + fmt.Sprintf("… [truncated, %d bytes total]", len(msg))
@@ -299,9 +262,8 @@ func capFailure(f map[string]any) map[string]any {
 	return f
 }
 
-// renderComplete is the SHORT human rendering of a finished run. It leads with the governance facts a
-// reader must not miss (withheld claims, quorum, weak identity) rather than burying them under the
-// headline, because the text channel is all some clients ever show the model.
+// renderComplete renders a finished run as short text, including withheld claims, quorum and identity
+// caveats.
 func renderComplete(structured map[string]any, out pipeline.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Exploration complete (mode %v, run %v).\n", structured["mode"], structured["runId"])
@@ -334,9 +296,7 @@ func renderComplete(structured map[string]any, out pipeline.Result) string {
 	return b.String()
 }
 
-// runningResult is what a call returns when the run outlived its inline wait budget: the run id, the
-// state, and the panel that IS executing — enough for the caller to report honestly what it started
-// before it has an answer.
+// runningResult builds the payload for a run still running after the inline wait: its id, state and panel.
 func runningResult(rec *record, pick panelPick, waited int) (map[string]any, string) {
 	structured := map[string]any{
 		"runId":         rec.ID,

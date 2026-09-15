@@ -8,8 +8,7 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// TestParseSeatSpec_Grammar pins the `--reviewer` grammar, including the reason it is key=value
-// and not `adapter:model`: a model tag may contain a colon, so a value is taken verbatim.
+// The --reviewer grammar is key=value because a model tag may contain a colon.
 func TestParseSeatSpec_Grammar(t *testing.T) {
 	seat, err := parseSeatSpec("adapter=ollama,model=llama3:8b,effort=high")
 	if err != nil {
@@ -42,8 +41,7 @@ func TestParseSeatSpec_Grammar(t *testing.T) {
 	}
 }
 
-// TestParseReviewerPanel_OrderAndCap: the flag order IS the panel order, and an oversized panel is
-// refused at the flag boundary (the count is never trimmed for the user).
+// Flag order is panel order, and an oversized panel is refused rather than trimmed.
 func TestParseReviewerPanel_OrderAndCap(t *testing.T) {
 	seats, err := parseReviewerPanel([]string{"adapter=a,model=m1", "adapter=b,model=m2", "adapter=c,model=m3"})
 	if err != nil {
@@ -53,7 +51,7 @@ func TestParseReviewerPanel_OrderAndCap(t *testing.T) {
 		t.Fatalf("panel order must follow flag order, got %+v", seats)
 	}
 	many := make([]string, 0, 17)
-	for i := 0; i < 17; i++ {
+	for range 17 {
 		many = append(many, "adapter=a,model=m")
 	}
 	if _, err := parseReviewerPanel(many); err == nil || !strings.Contains(err.Error(), "panel cap") {
@@ -61,9 +59,8 @@ func TestParseReviewerPanel_OrderAndCap(t *testing.T) {
 	}
 }
 
-// TestReview_ReviewerAndProfileAreMutuallyExclusive: composing a panel and selecting a profile that
-// carries one are two answers to the same question, so naming both is a usage error rather than a
-// silent precedence rule.
+// Composing a panel and selecting a profile answer the same question, so naming both is a usage
+// error.
 func TestReview_ReviewerAndProfileAreMutuallyExclusive(t *testing.T) {
 	var out, errw bytes.Buffer
 	code := runReview([]string{"--reviewer", "adapter=fake,model=fake-model", "--profile", "default", t.TempDir()}, &out, &errw)
@@ -75,8 +72,8 @@ func TestReview_ReviewerAndProfileAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// TestReview_ReviewerAndSetReviewerConflict: a per-ROLE override cannot address one of N seats, so
-// combining it with an ad-hoc panel is refused instead of being applied to an arbitrary seat.
+// A per-role override cannot address one of several seats, so combining it with an ad-hoc panel is
+// refused.
 func TestReview_ReviewerAndSetReviewerConflict(t *testing.T) {
 	var out, errw bytes.Buffer
 	code := runReview([]string{"--reviewer", "adapter=fake,model=fake-model", "--set", "reviewer.adapter=fake", t.TempDir()}, &out, &errw)

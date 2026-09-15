@@ -10,15 +10,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review"
 )
 
-// A DRY RUN MUST NOT REFUSE A ROOT THE REAL RUN WOULD ACCEPT.
-//
-// The dry-run stop judges workspace admissibility so it cannot answer "here is your plan, 2..10
-// calls" for a root the next step refuses. That check kept the STRICT form after
-// `--allow-protected-paths` landed, so the waiver was honoured by the run and ignored by the dry
-// run: `--dry-run --allow-protected-paths` was refused while the same command without `--dry-run`
-// went ahead. Exactly backwards — the free preview was stricter than the thing it previews.
-//
-// No test paired the two flags; driving the real binary is what caught it.
+// TestDryRun_TheProtectedPathWaiverAppliesToTheDryRunToo checks that a dry run does not refuse a root
+// the real run would accept: the dry-run admissibility check honours `--allow-protected-paths` exactly
+// as the run does.
 func TestDryRun_TheProtectedPathWaiverAppliesToTheDryRunToo(t *testing.T) {
 	m, _ := countingPanel(t)
 	ws := filepath.Join(t.TempDir(), ".vscode", "sub")
@@ -30,12 +24,12 @@ func TestDryRun_TheProtectedPathWaiverAppliesToTheDryRunToo(t *testing.T) {
 	}
 	base := Request{Workspace: ws, Mode: review.ModeReport, Surface: "cli", Profile: "panel", DryRun: true}
 
-	// WITHOUT the waiver the refusal stands — the guard still guards.
+	// Without the waiver the root is refused.
 	if _, err := m.RunContext(context.Background(), base); err == nil {
 		t.Fatal("a protected root must still be refused without the waiver")
 	}
 
-	// WITH it, the dry run reports a shape, exactly as the real run would proceed.
+	// With it, the dry run reports a shape, as the real run would proceed.
 	withWaiver := base
 	withWaiver.AllowProtectedPaths = true
 	out, err := m.RunContext(context.Background(), withWaiver)
@@ -50,8 +44,8 @@ func TestDryRun_TheProtectedPathWaiverAppliesToTheDryRunToo(t *testing.T) {
 	}
 }
 
-// TestDryRun_TheWaiverStillDoesNotAdmitASecret. The waiver reaches protected CONFIG only; a `.ssh`
-// root is refused on both paths, waiver or not.
+// TestDryRun_TheWaiverStillDoesNotAdmitASecret checks that the waiver covers protected configuration
+// only: a `.ssh` root is refused with or without it.
 func TestDryRun_TheWaiverStillDoesNotAdmitASecret(t *testing.T) {
 	m, _ := countingPanel(t)
 	ws := filepath.Join(t.TempDir(), ".ssh")

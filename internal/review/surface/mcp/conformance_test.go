@@ -18,36 +18,22 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file is reviewmesh's CONFORMANCE HARNESS, and it is deliberately the twin of
-// exploremesh/internal/surface/mcp/conformance_test.go: the whole protocol tail, walked end to end by
-// the OFFICIAL MCP Go SDK client rather than by a client written alongside the server.
+// These conformance tests drive the reviewmesh MCP server with the official MCP Go SDK client, as
+// exploremesh's do, covering:
 //
-// The pair exists because the asymmetry ran the wrong way. exploremesh had this coverage and
-// reviewmesh did not — and reviewmesh is the server with the WRITE tool, whose tool list, annotations
-// and cancellation semantics are the ones a host reads before it decides whether to ask a human. The
-// shared transport (meshcore/mcp) being proved once elsewhere is not the same claim as "a real client
-// can drive THIS server's tools", which is what these tests assert.
-//
-// The transcript it walks, in order:
-//
-//	initialize → notifications/initialized (the SDK's Connect does both, and REFUSES a server whose
-//	echoed protocolVersion it does not support — so a successful Connect is itself an assertion)
-//	→ tools/list, including a paged tools/list with a cursor
-//	→ tools/call success
-//	→ tools/call returning isError
-//	→ a protocol error (unknown tool)
-//	→ tools/call WITH a progressToken, and WITHOUT one
+//	initialize and notifications/initialized (Connect fails on an unsupported protocolVersion)
+//	→ tools/list, including a paged request with a cursor
+//	→ tools/call success, isError, and an unknown-tool protocol error
+//	→ tools/call with and without a progressToken
 //	→ cancellation of an in-flight run
-//	→ logging/setLevel + notifications/message
+//	→ logging/setLevel and notifications/message
 //	→ ping
 //
-// The dependency is test-only. `go build ./...` pulls none of it; the shipped binary's module graph is
-// unchanged (verify with `GOWORK=off go list -deps ./cmd/...`, which must contain no
-// `modelcontextprotocol` entry).
+// The SDK is a test-only dependency: `GOWORK=off go list -deps ./cmd/...` must list no
+// modelcontextprotocol package.
 
-// eventingReviewer is a deterministic Manager stand-in that EMITS the pipeline's real phase events, so
-// the progress and logging halves of the protocol have something to carry. It optionally blocks, for
-// the cancellation transcript.
+// eventingReviewer is a deterministic manager stand-in that emits real phase events, so progress and
+// logging have something to carry. It can block, for the cancellation test.
 type eventingReviewer struct {
 	fakeReviewer
 	block chan struct{}
@@ -59,8 +45,7 @@ func (e *eventingReviewer) RunContext(ctx context.Context, r run.Request) (revie
 	e.lastRun = r
 	e.mu.Unlock()
 	if r.OnEvent != nil {
-		// Four PHASE boundaries from the fixed ladder (mcp.go's phaseFraction), in ascending order:
-		// the progress stream is only meaningful if it moves.
+		// Four phase boundaries from phaseFraction, in ascending order.
 		for _, ev := range []string{"run_started", "panel_started", "panel_completed", "host_adjudication_completed"} {
 			r.OnEvent(audit.EventLine{Timestamp: "2026-01-01T00:00:00Z", Level: "info", EventType: ev, Message: ev + " reached"})
 		}
@@ -75,8 +60,7 @@ func (e *eventingReviewer) RunContext(ctx context.Context, r run.Request) (revie
 	return cannedOutcome(r.Mode), nil
 }
 
-// connect wires the server to in-memory pipes and returns an initialized OFFICIAL-SDK client session.
-// It is `serve`'s counterpart: same server, a client nobody here wrote.
+// connect wires s to in-memory pipes and returns an initialized SDK client session.
 func connect(t *testing.T, s *mcp.Server, opts ...*sdk.ClientOptions) *sdk.ClientSession {
 	t.Helper()
 	sr, cw := io.Pipe()
@@ -105,14 +89,8 @@ func connect(t *testing.T, s *mcp.Server, opts ...*sdk.ClientOptions) *sdk.Clien
 	return session
 }
 
-// structured decodes a result's structuredContent.
-// waitFor polls cond until it holds, and fails the test if it never does.
-//
-// A returned CallTool does NOT mean that call's notifications have been handled: the result travels
-// the same connection as the progress and logging notifications, but the handlers run on the
-// session's own goroutine, so reading the collected slices the instant CallTool returns is a race.
-// It is a race this suite happened to win on an unloaded macOS host and lost the first time it ran
-// on Windows — the assertion was never platform-specific, only the timing was.
+// waitFor polls cond until it holds and fails the test if it never does. Notifications are handled on
+// the session's goroutine, so they may arrive after CallTool returns.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -125,6 +103,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// structured decodes a result's structuredContent.
 func structured(t *testing.T, res *sdk.CallToolResult) map[string]any {
 	t.Helper()
 	b, err := json.Marshal(res.StructuredContent)
@@ -148,20 +127,14 @@ func textOf(res *sdk.CallToolResult) string {
 	return b.String()
 }
 
-// TestConformance_FromRunFromDiskIsWireVisibleToAnSDKClient. A `fromRun` naming a run the in-memory
-// registry does not hold resolves from the run's own directory and APPLIES. A host decides whether to
-// ask a human on the strength of `isError` and reads the outcome out of `structuredContent`, so this is
-// asserted through the OFFICIAL SDK client — the same three things a real host reads, read by a client
-// nobody in this repo wrote.
-//
-// Both halves are asserted, because a write tool that succeeds is only half the claim: the
-// handle that must STILL be refused is refused over the same transport, as a domain refusal carrying
-// one reason code rather than as a protocol error.
+// A fromRun naming a run absent from the in-memory registry resolves from the run's directory and
+// applies, as seen through the SDK client's isError and structuredContent. A handle that must be
+// refused is refused as a domain error with one reason code.
 func TestConformance_FromRunFromDiskIsWireVisibleToAnSDKClient(t *testing.T) {
 	f := newFromRunFixture(t)
 	sourceRun := f.report(t, f.server(t))
 
-	// A server that never saw that run — a restarted one, in every respect that matters here.
+	// A server that never saw the run, like a restarted one.
 	session := connect(t, newServer(t, f.mgr, func(s *mcp.Server) {
 		s.Ceiling, s.AllowWrites = []string{f.ws}, true
 	}))
@@ -185,7 +158,7 @@ func TestConformance_FromRunFromDiskIsWireVisibleToAnSDKClient(t *testing.T) {
 		t.Fatalf("nothing was written to the live workspace; file = %q", f.body(t))
 	}
 
-	// The fail-closed half, over the same transport.
+	// The refusal, over the same transport.
 	bad, berr := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_remediate", Arguments: map[string]any{
 		"fromRun": t.TempDir(), "workspace": f.ws, "output": "apply", "allowWrite": true,
 	}})
@@ -225,8 +198,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 	session := connect(t, newServer(t, rv, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }), opts)
 	ctx := context.Background()
 
-	// --- lifecycle: a successful Connect already proves version negotiation + echo, since the SDK client
-	// disconnects on a protocolVersion it does not support.
+	// A successful Connect already proves version negotiation.
 	init := session.InitializeResult()
 	if init.ProtocolVersion != proto.LatestProtocolVersion {
 		t.Errorf("negotiated protocolVersion = %q, want the client's own %q echoed", init.ProtocolVersion, proto.LatestProtocolVersion)
@@ -240,8 +212,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 		t.Fatalf("ping: %v", err)
 	}
 
-	// --- tools/list. Seven tools, because the write primitive is granted on this server; a host that
-	// cannot enumerate them cannot present them.
+	// Seven tools, including the write tool.
 	list, err := session.ListTools(ctx, &sdk.ListToolsParams{})
 	if err != nil {
 		t.Fatalf("tools/list: %v", err)
@@ -249,8 +220,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 	if len(list.Tools) != 7 {
 		t.Fatalf("tools = %d, want the 7 declared (review_report, review_remediate, list, doctor, agents_md, run_status, run_result)", len(list.Tools))
 	}
-	// The one annotation an SDK client is most likely to act on, read back through the SDK's own types:
-	// the write tool is destructive and never read-only.
+	// The write tool is annotated destructive and not read-only.
 	for _, tool := range list.Tools {
 		if tool.Name != "review_remediate" {
 			continue
@@ -278,7 +248,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 		t.Error("a successful result must carry a human rendering too")
 	}
 
-	// --- tools/call: isError (a domain halt is NOT a protocol error)
+	// A domain halt is isError, not a protocol error.
 	bad, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_run_result", Arguments: map[string]any{"runId": "nope"}})
 	if err != nil {
 		t.Fatalf("a domain refusal must not be a protocol error: %v", err)
@@ -292,16 +262,14 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 		t.Error("an unknown tool must be a JSON-RPC error")
 	}
 
-	// --- progress WITHOUT a token: nothing may be emitted (a token is not optional decoration; without
-	// one a progress notification is unroutable, and inventing one is worse than staying quiet).
+	// Without a token no progress is emitted; a progress notification needs a token to be routed.
 	mu.Lock()
 	progress, tokens = nil, nil
 	mu.Unlock()
 	if _, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws, "panel": defaultPanel()}}); err != nil {
 		t.Fatalf("review_report: %v", err)
 	}
-	// A negative has nothing to wait FOR, so this one settles instead: without a pause it would pass
-	// simply by reading the slice before a notification the server did send could arrive.
+	// Settle before asserting the negative, so a notification the server did send has time to arrive.
 	time.Sleep(100 * time.Millisecond)
 	mu.Lock()
 	gotWithout := len(progress)
@@ -310,7 +278,7 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 		t.Errorf("%d progress notification(s) emitted without a caller-supplied token", gotWithout)
 	}
 
-	// --- progress WITH a token: echoed verbatim and monotonic.
+	// With a token, progress echoes it verbatim and increases monotonically.
 	params := &sdk.CallToolParams{Name: "review_report", Arguments: map[string]any{"workspace": ws, "panel": defaultPanel()}}
 	params.Meta = sdk.Meta{"progressToken": "tok-review"}
 	if _, err := session.CallTool(ctx, params); err != nil {
@@ -363,10 +331,8 @@ func TestConformance_FullTranscriptAgainstTheOfficialSDKClient(t *testing.T) {
 	}
 }
 
-// Cancellation gets its own server: the cancelled call receives NO response (a SHOULD NOT on 2025-06-18,
-// a MUST NOT on 2026-07-28 stdio), so the proof that anything happened has to come from somewhere else — here, from the idempotency key, which
-// returns the very run that was cancelled. On the server with the write tool this is the load-bearing
-// one: a cancelled run must settle as CANCELLED, not linger as running and not report complete.
+// Cancellation gets its own server. A cancelled call receives no response, so the test finds the run
+// through its idempotency key and requires it to settle as cancelled, not running or completed.
 func TestConformance_CancellationStopsTheRunAndCommitsNothing(t *testing.T) {
 	ws := workspaceFixture(t)
 	block := make(chan struct{})
@@ -381,8 +347,7 @@ func TestConformance_CancellationStopsTheRunAndCommitsNothing(t *testing.T) {
 			Arguments: map[string]any{"workspace": ws, "panel": defaultPanel(), "idempotencyKey": "cancel-me", "waitSeconds": 60}})
 		done <- err
 	}()
-	// Give the call time to reach the server and start the run, then cancel it. The SDK turns a
-	// cancelled context into `notifications/cancelled` on the wire.
+	// Give the call time to start the run, then cancel; the SDK sends notifications/cancelled.
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 	select {
@@ -394,8 +359,7 @@ func TestConformance_CancellationStopsTheRunAndCommitsNothing(t *testing.T) {
 		t.Fatal("the cancelled call never returned")
 	}
 
-	// The run is reachable through its idempotency key, and it is CANCELLED — not quietly still
-	// running, and not completed. Re-issuing the same key returns it rather than spending again.
+	// The idempotency key returns the cancelled run instead of spending again.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		res, err := session.CallTool(context.Background(), &sdk.CallToolParams{Name: "review_report",
@@ -420,8 +384,8 @@ func TestConformance_CancellationStopsTheRunAndCommitsNothing(t *testing.T) {
 	}
 }
 
-// tools/list paging: the reviewmesh server ships a handful of tools and returns them in one page, but
-// a cursor must be HONORED rather than ignored — including a foreign one, which is -32602 per spec.
+// The server returns its tools in one page but must honor a cursor; a foreign cursor is invalid
+// params.
 func TestConformance_ToolsListCursorIsHonored(t *testing.T) {
 	ws := workspaceFixture(t)
 	s := newServer(t, &eventingReviewer{}, func(sv *mcp.Server) { sv.Ceiling, sv.AllowWrites = []string{ws}, true })
@@ -460,10 +424,8 @@ func TestConformance_ToolsListCursorIsHonored(t *testing.T) {
 	}
 }
 
-// STDOUT PURITY, at the surface level: while a run is in flight — with progress AND log notifications
-// interleaving with responses — every byte on the protocol stream is a JSON-RPC frame. The server that
-// spawns model CLIs gets one chance at this, so it is asserted rather than assumed. The real-binary
-// version of the same claim is in subprocess_test.go.
+// While a run is in flight, with progress and log notifications interleaving, every byte on the
+// protocol stream is a JSON-RPC frame. subprocess_test.go checks the same over the real binary.
 func TestConformance_StdoutIsPureJSONRPCWhileRunning(t *testing.T) {
 	ws := workspaceFixture(t)
 	s := newServer(t, &eventingReviewer{}, func(sv *mcp.Server) { sv.Ceiling = []string{ws} })

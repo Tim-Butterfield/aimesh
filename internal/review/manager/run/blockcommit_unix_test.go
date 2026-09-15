@@ -2,10 +2,9 @@
 
 package run
 
-// blockCommit makes the commit's write to the live tree FAIL, so the receipt can be checked against
-// a commit that genuinely could not be performed. The mechanism is necessarily platform-specific —
-// see blockcommit_windows_test.go for the other half — because "make this unlink fail" has no
-// portable spelling.
+// blockCommit makes the commit's write to the live tree fail, so the receipt can be checked against a
+// commit that could not be performed. The mechanism is platform-specific; see
+// blockcommit_windows_test.go.
 
 import (
 	"os"

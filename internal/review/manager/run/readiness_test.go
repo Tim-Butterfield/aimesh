@@ -29,12 +29,9 @@ func (b blockedAdapter) ProbeDeep(context.Context, model.DeepProbeSpec) model.Pr
 	return model.ProbeResult{OK: false, Stage: "invoke", Signal: b.signal, Detail: b.detail}
 }
 
-// TestVerifyReadiness_RefusesBeforeDispatchingAnySeat is the defect this exists to prevent, in one
-// assertion: the LAST seat is the broken one, and no seat runs at all.
-//
-// Without it, a panel dispatches concurrently, seat 1 pays for a full workspace-sized prompt, and
-// the run then halts on seat 2's CLI having been blocked on a folder-trust prompt the whole time.
-// `Available()` cannot see that — the binary is installed and starts fine.
+// TestVerifyReadiness_RefusesBeforeDispatchingAnySeat checks that when the last seat is not ready, no
+// seat runs. Without the probe a concurrent panel would pay for seat 1's full prompt before halting on
+// a seat blocked on a folder-trust prompt, which `Available()` cannot detect.
 func TestVerifyReadiness_RefusesBeforeDispatchingAnySeat(t *testing.T) {
 	m, calls := countingPanel(t)
 	ws, _ := makeWorkspace(t)
@@ -55,7 +52,7 @@ func TestVerifyReadiness_RefusesBeforeDispatchingAnySeat(t *testing.T) {
 	if !strings.Contains(err.Error(), "cannot do real work") {
 		t.Errorf("refusal does not say what happened: %v", err)
 	}
-	// THE POINT: not one seat was dispatched, including the two that were perfectly ready.
+	// No seat was dispatched, including the ready ones.
 	if n := atomic.LoadInt32(calls); n != 0 {
 		t.Errorf("%d seat call(s) were paid for before the blocked agent was found, want 0", n)
 	}

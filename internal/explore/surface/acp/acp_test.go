@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -88,9 +89,7 @@ func testPanel() map[string]any {
 // so a test can send a prompt with no panel at all.
 func withPanel(em map[string]any) map[string]any {
 	out := make(map[string]any, len(em)+1)
-	for k, v := range em {
-		out[k] = v
-	}
+	maps.Copy(out, em)
 	if p, has := out["panel"]; !has {
 		out["panel"] = testPanel()
 	} else if p == nil {
@@ -442,9 +441,7 @@ func newSession(t *testing.T, client *testhost.Client) string {
 // under test. It adds no panel: a test that needs one names it.
 func promptMeta(extra map[string]any) map[string]any {
 	em := map[string]any{"criteria": []string{"c1"}}
-	for k, v := range extra {
-		em[k] = v
-	}
+	maps.Copy(em, extra)
 	return map[string]any{"exploremesh": em}
 }
 

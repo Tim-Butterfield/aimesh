@@ -1,19 +1,11 @@
 package cli
 
-// `aimesh mcp` — ONE MCP server carrying both domains' tools.
+// `aimesh mcp` serves both domains' tools from one MCP server, so a host needs one config entry.
 //
-// It exists because an MCP server is configured once, in a host's config file, and then serves every
-// workspace the operator opens. Two entries (`aimesh review mcp`, `aimesh explore mcp`) means two
-// processes, two tool lists to keep straight and two places to state posture; one entry means the
-// host launches `aimesh mcp` and gets the whole tool.
-//
-// Every flag here is LAUNCH-time, and that is not an oversight. The grants (--adapter, --allow-writes,
-// --verify-cmd, --allow-protected-paths) and the --root ceiling CANNOT be per-call: the caller on the
-// other end of this wire is a model, and a model that could grant itself write access, choose who
-// receives content, or widen its own filesystem reach would make the grant meaningless. Everything a
-// caller may legitimately vary per run — the workspace, extra `roots`, the panel and its models,
-// waitSeconds, maxParallel — is a tool parameter instead, so one configured server serves many
-// workspaces without the operator editing a config and restarting a host.
+// Every flag is launch-time. The grants (--adapter, --allow-writes, --verify-cmd,
+// --allow-protected-paths) and the --root ceiling cannot be tool parameters, because the caller is a
+// model and must not extend its own access. What a caller may vary per run (workspace, roots, panel,
+// waitSeconds, maxParallel) is a tool parameter.
 
 import (
 	"flag"
@@ -33,17 +25,10 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// domainFlags names which domain owns each domain-specific flag, so a flag whose domain is not being
-// served can be REFUSED rather than silently ignored.
-//
-// Silently ignoring is the failure that matters here: `--only explore --allow-writes` reads to an
-// operator as "explore, and writes are on". Accepting it quietly would leave them believing they had
-// granted a capability that the served domain does not even have. `--adapter` is absent because both
-// domains use it.
+// domainFlags maps each domain-specific flag to its domain, so a flag set for a domain that is not
+// served is refused rather than ignored: `--only explore --allow-writes` must not look like a grant.
+// Flags both domains use, such as --adapter and --framing, are absent.
 var domainFlags = map[string]mcpserve.Domain{
-	// NOTE: `framing` is deliberately ABSENT. It is transport posture for the whole process (see
-	// internal/mcpflags), so refusing it under `--only explore` told a user their flag "would do
-	// nothing" when framing is precisely what it would have done.
 	"root":                  mcpserve.DomainReview,
 	"allow-broad-root":      mcpserve.DomainReview,
 	"allow-writes":          mcpserve.DomainReview,
@@ -54,16 +39,15 @@ var domainFlags = map[string]mcpserve.Domain{
 	"no-capture":            mcpserve.DomainExplore,
 }
 
+// runMCP runs the composed MCP server over stdio.
 func runMCP(args []string, stdout, errw io.Writer) int {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(errw)
 	cliflags.Style(fs, "aimesh mcp")
 	only := fs.String("only", "", "serve ONE domain's tools instead of both: review | explore. Narrowing is worth having because a tool list costs a model attention on every call, and a review-only user should not carry explore's tools")
-	// The shared flags are registered ONCE — which is the whole reason internal/mcpflags exists. Both
-	// domains declare them, and registering the same name twice on one flag set panics.
+	// Shared flags and launch grants are registered once on this flag set and handed to each domain;
+	// registering a name twice panics.
 	sh := mcpflags.Register(fs, reviewmcp.DefaultWaitSeconds)
-	// The launch grants are registered ONCE here, by the command that owns the flag set, and handed to
-	// each domain builder.
 	adapters := launchflags.RegisterAdapters(fs)
 	writes := launchflags.RegisterWrites(fs)
 	buildReview := reviewcli.RegisterMCPFlags(fs, sh, adapters, writes)
@@ -81,14 +65,9 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 		return code
 	}
 
-	// ONE DOMAIN THAT CANNOT START MUST NOT TAKE THE OTHER DOWN WITH IT.
-	//
-	// A domain refuses to build only when its own launch arguments are invalid. When both were asked
-	// for, a domain that cannot be built is SKIPPED and said out loud, and the other one serves: a host
-	// that discards stderr would otherwise see only "server disconnected". An explicit `--only
-	// <domain>` still fails hard, because there the user named the thing that cannot start.
-	// Framing comes from the SHARED flag, so it holds whichever domain(s) actually build — an
-	// explore-only server can be pinned to content-length exactly as a review-only one can.
+	// When both domains are requested, one whose launch arguments are invalid is skipped with a
+	// notice and the other serves. With --only, a build failure is fatal because the user named that
+	// domain. Framing comes from the shared flag, so it applies whichever domains build.
 	srv := &mcpserve.Server{Only: domain, Diagnostics: errw, Version: version.Get().Version, Framing: *sh.Framing}
 	both := domain == mcpserve.DomainAll
 	var lastCode int
@@ -101,8 +80,7 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 			lastCode = code
 			fmt.Fprintln(errw, "aimesh mcp: serving EXPLORE only — the review domain could not start (its refusal is above). Fix its launch arguments, or pass --only explore to silence this.")
 		} else {
-			// The composed server owns the transport; framing is already set from the shared flag
-			// above, so only the era posture travels up here.
+			// The composed server owns the transport; only the era posture comes from the domain.
 			srv.Review, srv.Protocol = s, s.Protocol
 		}
 	}
@@ -121,23 +99,20 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 			}
 		}
 	}
-	// Both failed: there is no server to run, so this is the same hard failure as before.
+	// Neither domain built, so there is nothing to serve.
 	if srv.Review == nil && srv.Explore == nil {
 		fmt.Fprintln(errw, "aimesh mcp: neither domain could start, so there are no tools to serve. Fix the launch arguments named above.")
 		return lastCode
 	}
-	// Narrow what is ADVERTISED to what actually built, so the tool list never promises a domain
-	// this process cannot serve.
+	// Advertise only the domains that built.
 	if srv.Review == nil {
 		srv.Only = mcpserve.DomainExplore
 	} else if srv.Explore == nil {
 		srv.Only = mcpserve.DomainReview
 	}
 
-	// STDOUT PURITY, for the same reason each domain's own `mcp` does it: the protocol stream is the
-	// writer handed in from main, and repointing the os.Stdout package variable at stderr sends every
-	// stray print — from this process, a library, or a spawned provider CLI that inherited the
-	// descriptor — to stderr instead of into a JSON-RPC frame.
+	// The protocol stream is the writer passed in from main. Pointing os.Stdout at stderr keeps stray
+	// prints from this process or its libraries out of the JSON-RPC stream.
 	restore := os.Stdout
 	os.Stdout = os.Stderr
 	defer func() { os.Stdout = restore }()
@@ -148,8 +123,8 @@ func runMCP(args []string, stdout, errw io.Writer) int {
 	return int(fault.OK)
 }
 
-// refuseForeignFlags rejects a domain-specific flag the caller SET whose domain is not being served.
-// fs.Visit walks only flags actually set, so a default is never mistaken for an instruction.
+// refuseForeignFlags rejects any set flag whose domain is not being served. fs.Visit walks only
+// flags that were set, so defaults are never refused.
 func refuseForeignFlags(fs *flag.FlagSet, domain mcpserve.Domain, errw io.Writer) int {
 	var bad []string
 	fs.Visit(func(f *flag.Flag) {

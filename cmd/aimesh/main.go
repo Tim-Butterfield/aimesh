@@ -1,6 +1,5 @@
-// Command aimesh is the single entry point: provider-diverse, governed AI review and exploration.
-// It replaces the separate reviewmesh and exploremesh binaries — those domains are now reached as
-// `aimesh review …` and `aimesh explore …`.
+// Command aimesh runs provider-diverse, governed AI reviews (`aimesh review`) and explorations
+// (`aimesh explore`).
 package main
 
 import (

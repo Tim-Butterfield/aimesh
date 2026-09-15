@@ -1,8 +1,7 @@
 package pipeline
 
-// End-to-end tests for the multi-round + ranking-grade governance machinery.
-// Everything here is hermetic — deterministic in-process fakes, no real CLI — and every test pins ONE
-// invariant from the design rather than the shape of the implementation.
+// End-to-end tests for the multi-round and ranking-grade governance machinery. They use deterministic
+// in-process fakes, and each test checks one invariant rather than the shape of the implementation.
 
 import (
 	"context"
@@ -25,9 +24,9 @@ import (
 // --- the example multi-round governed mode (an unregistered spec, so these tests exercise the machinery
 // itself rather than any registered mode's configuration of it) ---
 
-// exampleLaterRound is the app-owned contract for a mediated round 2+ (mode.LaterRoundContract). It accepts ONLY
-// the pooled confirmed-canonical uniques at the current artifact schema version, and it embeds the host's
-// already-framed untrusted-data block VERBATIM — a contract cannot re-frame or re-label it.
+// exampleLaterRound is a mode.LaterRoundContract for a mediated later round. It accepts only the pooled
+// confirmed canonical uniques at the current schema version and embeds the host's untrusted-data block
+// verbatim.
 type exampleLaterRound struct {
 	accepts round.Accepts
 }
@@ -57,10 +56,9 @@ func (exampleLaterRound) ExplorerSchema() schema.Schema {
 	}}
 }
 
-// governedSpec builds the example GOVERNED mode spec: Catalog's app-owned round-1 + canonicalizing contract (so
-// the deterministic fakes drive it end-to-end) with a RANKING-GRADE canonicalization policy and an optional
-// later round. It is intentionally NOT registered: it exercises the governance machinery without pinning
-// any registered mode's policy.
+// governedSpec builds an unregistered governed mode: Catalog's round-1 and canonicalizing contracts, so the
+// fakes can drive it, with the given canonicalization policy and optional later round. Leaving it
+// unregistered tests the machinery without depending on any registered mode's policy.
 func governedSpec(dual, confirm bool, rounds int, later mode.LaterRoundContract) mode.ModeSpec {
 	cat, _ := mode.Lookup(mode.Catalog)
 	return mode.ModeSpec{
@@ -86,8 +84,8 @@ func runSpec(t *testing.T, reg Registry, plan roster.Plan, spec mode.ModeSpec, o
 
 // --- test adapters ---
 
-// countingAdapter wraps an adapter and tallies invocations PER PHASE — how a test proves a halt fired BEFORE the
-// explorer fan-out rather than after it.
+// countingAdapter wraps an adapter and counts invocations per phase, so a test can show a halt came before
+// the explorer fan-out.
 type countingAdapter struct {
 	inner model.Adapter
 	mu    sync.Mutex
@@ -118,8 +116,8 @@ func (c *countingAdapter) count(phase string) int {
 	return c.calls[phase]
 }
 
-// total is every invocation that reached this adapter, whatever the phase — what a caller is billed for, and
-// the figure the dry-run shape is measured against (see shape_test.go).
+// total returns the invocations across all phases, the figure the dry-run shape is checked against (see
+// shape_test.go).
 func (c *countingAdapter) total() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -130,7 +128,7 @@ func (c *countingAdapter) total() int {
 	return n
 }
 
-// swappedIdentityAdapter always reports a DIFFERENT model than requested — a provider that silently fell back.
+// swappedIdentityAdapter reports a different model than requested, like a provider that silently fell back.
 type swappedIdentityAdapter struct{ inner model.Adapter }
 
 func (s swappedIdentityAdapter) Name() string                    { return s.inner.Name() }
@@ -142,11 +140,9 @@ func (s swappedIdentityAdapter) Invoke(ctx context.Context, call model.Call) (mo
 	return r, err
 }
 
-// driftingAdapter is the REALISTIC mid-exploration model swap: the run requests the ALIAS `opus`, the provider
-// resolves it to `claude-opus-4-1` on the pre-flight probe and to `claude-opus-4-5` afterwards. Both resolutions
-// alias-match the requested name, so per-call identity classification passes BOTH times (no mismatch) — the swap
-// is invisible to per-call verification and only the same-identity invariant catches it. That is exactly why the
-// invariant exists in addition to per-call classification.
+// driftingAdapter swaps models mid-run: the alias `opus` resolves to `claude-opus-4-1` on the pre-flight
+// probe and to `claude-opus-4-5` afterwards. Both match the alias, so per-call identity checks pass and only
+// the same-identity invariant catches the swap.
 type driftingAdapter struct {
 	inner model.Adapter
 	mu    sync.Mutex
@@ -169,8 +165,8 @@ func (d *driftingAdapter) Invoke(ctx context.Context, call model.Call) (model.Re
 	return r, err
 }
 
-// failAfterPreflight passes the identity pre-flight and then FAILS every later call — a collator that becomes
-// unavailable AFTER the fan-out, the case the degraded terminal artifact exists for.
+// failAfterPreflight passes the identity pre-flight and fails every later call: a collator lost after the
+// fan-out, which produces the degraded terminal artifact.
 type failAfterPreflight struct{ inner model.Adapter }
 
 func (f failAfterPreflight) Name() string                    { return f.inner.Name() }
@@ -205,10 +201,8 @@ func panelOf(t *testing.T, explorers []fake.Scenario, collator fake.Scenario) (R
 
 // --- 1. Typed round artifacts + the multi-round pipeline ---
 
-// TestRunSpec_MultiRound_CarriesPriorArtifactAsUntrustedData pins the multi-round machinery: round 1 is BLIND
-// and immutable, round 2 is mediated, the round-2 prompt carries the prior artifact as explicitly-delimited
-// UNTRUSTED DATA (never instructions), explorers never see raw peer output, and the exact digest shown is
-// recorded per explorer.
+// Round 1 is blind and round 2 mediated; the round-2 prompt carries the prior artifact as delimited untrusted
+// data rather than raw peer output, and the digest shown is recorded per explorer.
 func TestRunSpec_MultiRound_CarriesPriorArtifactAsUntrustedData(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	res, err := runSpec(t, reg, plan, governedSpec(false, true, 2, exampleLaterRound{}), Options{})
@@ -225,7 +219,7 @@ func TestRunSpec_MultiRound_CarriesPriorArtifactAsUntrustedData(t *testing.T) {
 	if len(res.Rounds[0].Envelopes()) != 2 || len(res.Envelopes) != 2 {
 		t.Errorf("the blind baseline must keep exactly its 2 envelopes: round1=%d result=%d", len(res.Rounds[0].Envelopes()), len(res.Envelopes))
 	}
-	// The round-2 prompt frames the carried artifact as DATA, with the host's delimiters + preamble.
+	// The round-2 prompt frames the carried artifact as data, with the host's delimiters and preamble.
 	if len(res.LaterRoundPrompts) != 1 {
 		t.Fatalf("expected 1 later-round prompt, got %d", len(res.LaterRoundPrompts))
 	}
@@ -235,7 +229,7 @@ func TestRunSpec_MultiRound_CarriesPriorArtifactAsUntrustedData(t *testing.T) {
 			t.Errorf("round-2 prompt missing the untrusted-data framing %q", want)
 		}
 	}
-	// It carries the CANONICAL items, not raw peer bodies.
+	// It carries the canonical items, not raw peer bodies.
 	if !strings.Contains(p, "Postgres") {
 		t.Errorf("round-2 prompt should carry the pooled canonical items:\n%s", p)
 	}
@@ -274,8 +268,8 @@ func TestRunSpec_MultiRound_CarriesPriorArtifactAsUntrustedData(t *testing.T) {
 	}
 }
 
-// TestRunSpec_IncompatibleRoundEdge_RejectedBeforeSpend pins the edge check: a later round that accepts a
-// DIFFERENT artifact kind is rejected BEFORE any round-2 model call — an incompatible edge must cost zero tokens.
+// A later round that accepts a different artifact kind or schema version is rejected before any round-2 model
+// call.
 func TestRunSpec_IncompatibleRoundEdge_RejectedBeforeSpend(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	// Count explorer calls so we can prove round 2 never dispatched.
@@ -293,7 +287,7 @@ func TestRunSpec_IncompatibleRoundEdge_RejectedBeforeSpend(t *testing.T) {
 	if !strings.Contains(err.Error(), "edge rejected before any model call") || !strings.Contains(err.Error(), "rejected before spend") {
 		t.Errorf("the halt must name the rejected edge, got: %v", err)
 	}
-	// Exactly ONE explore call per explorer (round 1) — round 2 was never dispatched.
+	// One explore call per explorer (round 1): round 2 was never dispatched.
 	for name, c := range map[string]*countingAdapter{"A": cA, "B": cB} {
 		if got := c.count(schema.PhaseExplore); got != 1 {
 			t.Errorf("explorer %s: expected 1 explore call (round 1 only), got %d — round 2 must not spend tokens on a rejected edge", name, got)
@@ -308,9 +302,8 @@ func TestRunSpec_IncompatibleRoundEdge_RejectedBeforeSpend(t *testing.T) {
 	}
 }
 
-// TestRunSpec_FixedRoundCount_TerminatesAndFailsOverCap pins the termination rule: the round count is FIXED by
-// the mode contract (no data-dependent rule), it terminates exactly there, and a contract over the hard maximum
-// is an ERROR — never clamped.
+// A run executes exactly the round count its contract fixes; a count over the maximum is an error, never
+// clamped, and multi-round contracts without a later round or canonicalization are refused.
 func TestRunSpec_FixedRoundCount_TerminatesAndFailsOverCap(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	res, err := runSpec(t, reg, plan, governedSpec(false, true, 3, exampleLaterRound{}), Options{})
@@ -341,9 +334,8 @@ func TestRunSpec_FixedRoundCount_TerminatesAndFailsOverCap(t *testing.T) {
 
 // --- 2. Dual-canonicalizer merge-agreement ---
 
-// TestRunSpec_DualCanonicalizer_AgreedMergesHoldAndAgreedByRecorded: two independent canonicalizers that AGREE
-// produce the agreed partition, and every ledger row records BOTH proposing calls while the DECIDING call is the
-// versioned host rule.
+// Two agreeing canonicalizers produce the agreed partition; each ledger row records both proposers and names
+// the versioned host rule as the deciding call.
 func TestRunSpec_DualCanonicalizer_AgreedMergesHoldAndAgreedByRecorded(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	res, err := runSpec(t, reg, plan, governedSpec(true, false, 1, nil), Options{})
@@ -356,8 +348,7 @@ func TestRunSpec_DualCanonicalizer_AgreedMergesHoldAndAgreedByRecorded(t *testin
 	if res.Canonicalization.AgreementRuleVersion != canon.DualRuleVersion {
 		t.Errorf("the partition must record the dual agreement rule, got %q", res.Canonicalization.AgreementRuleVersion)
 	}
-	// TWO separately-verified canonicalizer calls with DIFFERENT identities (a second opinion from the same
-	// weights would not be a second opinion).
+	// Two separately verified canonicalizer calls with different identities.
 	if len(res.CanonicalizerCalls) != 2 {
 		t.Fatalf("expected 2 canonicalizer call records, got %d: %+v", len(res.CanonicalizerCalls), res.CanonicalizerCalls)
 	}
@@ -400,12 +391,11 @@ func TestRunSpec_DualCanonicalizer_AgreedMergesHoldAndAgreedByRecorded(t *testin
 	}
 }
 
-// TestRunSpec_DualCanonicalizer_ContestedSplitsAndWithholdsCorroborated is the headline governance invariant: a
-// merge only ONE canonicalizer proposes is CONTESTED → SPLIT, the refused merge is recorded with its proposer,
-// and every dependent count becomes CONDITIONAL with the definitive `corroborated` label WITHHELD.
+// A merge only one canonicalizer proposes is contested and split, recorded with its proposer, and every
+// dependent count is conditional with `corroborated` withheld.
 func TestRunSpec_DualCanonicalizer_ContestedSplitsAndWithholdsCorroborated(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
-	// Canonicalizer B merges EVERYTHING (the aggressive merger the dual rule exists to neutralize).
+	// Canonicalizer B merges everything.
 	reg["merger"] = fake.New("merger", "M", fake.CanonMergeAll)
 	opts := Options{Canonicalizers: []roster.Explorer{
 		{Adapter: "collator", Model: "collator-model"},
@@ -415,7 +405,7 @@ func TestRunSpec_DualCanonicalizer_ContestedSplitsAndWithholdsCorroborated(t *te
 	if err != nil {
 		t.Fatalf("dual+confirm governed run: %v", err)
 	}
-	// B's unilateral merges were REFUSED: the partition stays at A's 3 entities, singletons single-source.
+	// B's unilateral merges were refused: the partition stays at A's 3 entities.
 	if got := len(res.Canonicalization.Clusters); got != 3 {
 		t.Fatalf("a merge only one canonicalizer proposed must be SPLIT (3 entities expected), got %d", got)
 	}
@@ -427,7 +417,7 @@ func TestRunSpec_DualCanonicalizer_ContestedSplitsAndWithholdsCorroborated(t *te
 	if !strings.Contains(contested[0].ProposedBy.Call, "canonicalizer-b") {
 		t.Errorf("the contested record must name WHICH canonicalizer proposed it: %+v", contested[0].ProposedBy)
 	}
-	// A contested mapping makes every dependent count CONDITIONAL: a range, and the definitive label withheld.
+	// A contested mapping makes every dependent count conditional: a range, with the definitive label withheld.
 	if res.Confirmation == nil || res.Confirmation.Settled() {
 		t.Fatal("a refused dual merge must leave the run un-settled")
 	}
@@ -450,9 +440,7 @@ func TestRunSpec_DualCanonicalizer_ContestedSplitsAndWithholdsCorroborated(t *te
 	}
 }
 
-// TestRunSpec_DualCanonicalizer_UnreachableHalts: a canonicalizer that cannot be INVOKED halts — caught
-// at the pre-flight probe, i.e. before the explorer fan-out is paid for. The dual path needs two working
-// canonicalizers, so discovering the second one is dead after paying for a panel is pure waste.
+// A canonicalizer that cannot be invoked halts the run at the pre-flight probe, before the explorer fan-out.
 func TestRunSpec_DualCanonicalizer_UnreachableHalts(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	cA := counted(reg["explorer-A"])
@@ -474,13 +462,9 @@ func TestRunSpec_DualCanonicalizer_UnreachableHalts(t *testing.T) {
 	}
 }
 
-// TestRunSpec_DualWithoutIndependentIdentity_FailsClosed: with no distinct second identity available at all —
-// every seat is the collator's own adapter AND model — the dual path REFUSES to run, because the alternative
-// is inventing the second identity, which would manufacture the corroboration the rule exists to test.
-//
-// This is NOT the same case as a pair sharing a model behind two different adapters: that one is allowed and
-// recorded as shared_model (see TestCanonicalizerSharedModelIsRecordedNotRefused). What is missing here is a
-// distinct identity to name, not independence in the abstract.
+// When every seat uses the collator's adapter and model, there is no second canonicalizer identity and the
+// dual path refuses to run. A model shared behind two different adapters is allowed instead (see
+// TestCanonicalizerSharedModelIsRecordedNotRefused).
 func TestRunSpec_DualWithoutIndependentIdentity_FailsClosed(t *testing.T) {
 	// Every panel member shares the collator's adapter+model (distinguished only by effort).
 	reg := Registry{"shared": fake.New("shared", "A", fake.Valid)}
@@ -500,11 +484,10 @@ func TestRunSpec_DualWithoutIndependentIdentity_FailsClosed(t *testing.T) {
 
 // --- 3. Binding host-adjudicated confirmation round ---
 
-// TestRunSpec_Confirmation_WrongMergeSplitsAsNewRevision pins the confirmation round end-to-end: the provisional
-// partition is shown in a persisted randomized order, ONE explorer's typed wrong_merge splits the merge, and the
-// split is a NEW append-only ledger revision while the provisional revision is retained.
+// The provisional partition is shown in a persisted randomized order, one explorer's wrong_merge challenge
+// splits the merge, and the split is a new ledger revision while the provisional one is retained.
 func TestRunSpec_Confirmation_WrongMergeSplitsAsNewRevision(t *testing.T) {
-	// The canonicalizer merges EVERYTHING (so there is a real conflation to challenge); explorer A challenges it.
+	// The canonicalizer merges everything, so there is a conflation for explorer A to challenge.
 	reg, plan := panelOf(t, []fake.Scenario{fake.ChallengeWrongMerge, fake.Valid}, fake.CanonMergeAll)
 	res, err := runSpec(t, reg, plan, governedSpec(false, true, 1, nil), Options{})
 	if err != nil {
@@ -521,7 +504,7 @@ func TestRunSpec_Confirmation_WrongMergeSplitsAsNewRevision(t *testing.T) {
 	if len(conf.Resolutions) != 1 || conf.Resolutions[0].Action != canon.ActionSplit {
 		t.Fatalf("a single wrong_merge flag must SPLIT the merge: %+v", conf.Resolutions)
 	}
-	// The HOST rule resolved it (versioned), not the canonicalizer.
+	// The versioned host rule resolved it, not the canonicalizer.
 	if conf.RuleVersion != canon.HostConfirmationRuleVersion || conf.Resolutions[0].RuleVersion != canon.HostConfirmationRuleVersion {
 		t.Errorf("the resolution must persist the versioned HOST rule: %+v", conf.Resolutions[0])
 	}
@@ -530,7 +513,7 @@ func TestRunSpec_Confirmation_WrongMergeSplitsAsNewRevision(t *testing.T) {
 			t.Errorf("a revision row's deciding call must be the host rule, got %q", row.DecidedByCall)
 		}
 	}
-	// A NEW revision, chained to the retained provisional one.
+	// A new revision, chained to the retained provisional one.
 	if res.Provisional.PartitionRevisionHash == res.Canonicalization.PartitionRevisionHash {
 		t.Error("the confirmed revision must have a NEW partition revision hash")
 	}
@@ -547,11 +530,11 @@ func TestRunSpec_Confirmation_WrongMergeSplitsAsNewRevision(t *testing.T) {
 	if got := len(res.Canonicalization.Clusters); got != 3 {
 		t.Errorf("the split must yield one entity per distinct raw nomination, got %d: %+v", got, res.Canonicalization.Clusters)
 	}
-	// The presented order is PERSISTED and covers the provisional entities.
+	// The presented order is persisted and covers the provisional entities.
 	if len(conf.Presentation.Order) != len(res.Provisional.Clusters) || conf.Presentation.Seed == "" {
 		t.Errorf("the presentation order + seed must be persisted: %+v", conf.Presentation)
 	}
-	// The panel actually saw the ledger WITH attribution, in that order.
+	// The panel saw the attributed ledger in that order.
 	for _, want := range []string{"CONFIRMATION ROUND", "sourceExplorer", "wrong_merge", "RANDOMIZED order"} {
 		if !strings.Contains(res.ConfirmationPrompt, want) {
 			t.Errorf("the confirmation prompt shown to the panel is missing %q", want)
@@ -563,9 +546,8 @@ func TestRunSpec_Confirmation_WrongMergeSplitsAsNewRevision(t *testing.T) {
 	}
 }
 
-// TestRunSpec_Confirmation_NoChallenges_SettledAndCorroborated: with no challenge and no dual disagreement the
-// partition is SETTLED, so the definitive label is permitted — the control case that proves withholding is
-// caused by contest, not by the machinery always withholding.
+// With no challenge and no dual disagreement the partition is settled and the definitive label is allowed,
+// showing that withholding is caused by contest.
 func TestRunSpec_Confirmation_NoChallenges_SettledAndCorroborated(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	res, err := runSpec(t, reg, plan, governedSpec(true, true, 1, nil), Options{})
@@ -599,9 +581,8 @@ func TestRunSpec_Confirmation_NoChallenges_SettledAndCorroborated(t *testing.T) 
 
 // --- 4. Anti-echo: counts stay over the immutable blind round 1 ---
 
-// TestRunSpec_AntiEcho_LaterRoundNeverRaisesCounts is the anti-echo invariant end-to-end: round 2 is shown the
-// pooled canonical set and ECHOES it back, and no count moves — because independence counts are computed only
-// over the immutable blind round-1 artifacts, and a later round cannot become a counting baseline at all.
+// A later round that echoes the pooled canonical set back moves no count: counts use only the blind round-1
+// artifacts, and a later round cannot be a counting baseline.
 func TestRunSpec_AntiEcho_LaterRoundNeverRaisesCounts(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	single, err := runSpec(t, reg, plan, governedSpec(false, true, 1, nil), Options{})
@@ -621,7 +602,7 @@ func TestRunSpec_AntiEcho_LaterRoundNeverRaisesCounts(t *testing.T) {
 	if len(cands) == 0 {
 		t.Fatal("the round-2 fake must echo the pooled candidates back for this test to be meaningful")
 	}
-	// Counts are IDENTICAL to the single-round run: the echo added nothing.
+	// Counts match the single-round run: the echo added nothing.
 	bySubject := map[string]int{}
 	for _, c := range single.Governance.Claims {
 		bySubject[c.Subject] = c.Value
@@ -655,9 +636,7 @@ func TestRunSpec_AntiEcho_LaterRoundNeverRaisesCounts(t *testing.T) {
 
 // --- 5. Robustness invariants ---
 
-// TestRun_Preflight_UnreachableRoleHaltsBeforeFanout: a collator that cannot be INVOKED at all is caught
-// by the pre-flight probe, before any explorer token is spent. That is what pre-flight is for — spending
-// a whole panel on a run whose collator was never going to answer wastes real money.
+// A collator that cannot be invoked halts the run at the pre-flight probe, before any explorer call.
 func TestRun_Preflight_UnreachableRoleHaltsBeforeFanout(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	cA, cB := counted(reg["explorer-A"]), counted(reg["explorer-B"])
@@ -685,10 +664,8 @@ func TestRun_Preflight_UnreachableRoleHaltsBeforeFanout(t *testing.T) {
 	}
 }
 
-// TestRun_Preflight_SwappedIdentityIsRecordedNotHalted: a collator that silently resolved to a DIFFERENT
-// model is detected at pre-flight and recorded there — and the run proceeds to a full synthesis. The
-// probe's job is to prove the role is reachable and to capture whatever it says about itself; it is not
-// a gate on what that answer turns out to be.
+// A collator that resolves to a different model is recorded as a mismatch at pre-flight, and the run still
+// completes: pre-flight checks reachability, not the identity it reports.
 func TestRun_Preflight_SwappedIdentityIsRecordedNotHalted(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	reg["collator"] = swappedIdentityAdapter{fake.New("collator", "C", fake.Valid)}
@@ -712,13 +689,12 @@ func TestRun_Preflight_SwappedIdentityIsRecordedNotHalted(t *testing.T) {
 	}
 }
 
-// TestRun_MidRunIdentityChange_Halts pins the same-identity invariant: a role that passes pre-flight and then
-// resolves to a DIFFERENT model mid-exploration halts — artifacts from two different models cannot be honestly
-// combined into one result.
+// A role that passes pre-flight and then resolves to a different model halts under the same-identity
+// invariant, and the degraded terminal artifact is still emitted.
 func TestRun_MidRunIdentityChange_Halts(t *testing.T) {
 	reg, _ := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
-	// The collator is requested by ALIAS through the claude-code adapter, whose alias matching accepts any
-	// concrete opus version — so the swap passes per-call verification and only the invariant catches it.
+	// The collator is requested by alias through claude-code, whose alias matching accepts any opus version,
+	// so only the invariant can catch the swap.
 	reg["claude-code"] = &driftingAdapter{inner: fake.New("claude-code", "C", fake.Valid)}
 	plan, perr := roster.Roster{
 		Explorers: []roster.Explorer{
@@ -747,9 +723,8 @@ func TestRun_MidRunIdentityChange_Halts(t *testing.T) {
 	}
 }
 
-// TestRun_DualDenominators_WithAbstainingExplorer pins the dual denominators end-to-end: an explorer that
-// DELIBERATELY abstains leaves the PANEL denominator at 3 while the RESPONDENTS denominator drops to 2, with the
-// absence categories tallied distinctly.
+// An abstaining explorer leaves the panel denominator at 3 and drops the respondents denominator to 2, with
+// the absence categories counted separately.
 func TestRun_DualDenominators_WithAbstainingExplorer(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid, fake.Abstain}, fake.Valid)
 	res, err := runSpec(t, reg, plan, governedSpec(false, true, 1, nil), Options{})
@@ -789,10 +764,8 @@ func TestRun_DualDenominators_WithAbstainingExplorer(t *testing.T) {
 	}
 }
 
-// TestRun_DegradedTerminalArtifact_EmergentSpaceIsRawAndLabeled pins the per-mode-class degraded artifact for an
-// EMERGENT-space mode: the raw attributed blind round-1 envelopes plus a MECHANICAL typed-claim index, labeled
-// `uncollated — no entity resolution performed`. It must NOT be a synthesized register (that would itself be
-// covert entity resolution by the host).
+// For an emergent-space mode the degraded artifact is the attributed round-1 envelopes plus a mechanical
+// claim index, labeled uncollated, and no host register, which would be covert entity resolution.
 func TestRun_DegradedTerminalArtifact_EmergentSpaceIsRawAndLabeled(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	reg["collator"] = failAfterPreflight{fake.New("collator", "C", fake.Valid)}
@@ -828,7 +801,7 @@ func TestRun_DegradedTerminalArtifact_EmergentSpaceIsRawAndLabeled(t *testing.T)
 	if len(d.Register) != 0 {
 		t.Error("an emergent-space degraded artifact must NOT contain a host register (that would be covert entity resolution)")
 	}
-	// The index is mechanical: every entry is attributed to one envelope + field, and NOTHING is grouped.
+	// The index is mechanical: every entry is attributed to one envelope and field, and nothing is grouped.
 	for _, tc := range d.ClaimIndex {
 		if tc.EnvelopeRef == "" || tc.Field == "" || tc.Explorer.Model == "" {
 			t.Errorf("claim-index entry must be fully attributed: %+v", tc)
@@ -839,16 +812,15 @@ func TestRun_DegradedTerminalArtifact_EmergentSpaceIsRawAndLabeled(t *testing.T)
 	}
 }
 
-// TestRunSpec_DegradedTerminalArtifact_FixedSpaceIsRealRegister pins the OTHER half of the per-mode-class rule: a
-// FIXED-space mode (its key universe is GIVEN to the explorers) gets a REAL host register — grouping by an exact
-// value in a declared universe is arithmetic, not judgment.
+// For a fixed-space mode the degraded artifact is a real host register: grouping by exact values of a declared
+// key field is arithmetic, not judgment.
 func TestRunSpec_DegradedTerminalArtifact_FixedSpaceIsRealRegister(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	reg["collator"] = failAfterPreflight{fake.New("collator", "C", fake.Valid)}
 	cat, _ := mode.Lookup(mode.Catalog)
 	mapSpec, _ := mode.Lookup(mode.Map)
-	// An example FIXED-space mode: the explorers answer over a declared key field ("candidates" here), and the
-	// terminal collation is a plain collate — so losing the collator triggers the degraded path.
+	// An example fixed-space mode keyed on "candidates" with a plain collate, so losing the collator triggers
+	// the degraded path.
 	fixed := mode.ModeSpec{
 		Name: "example-fixed", FormulationFree: true,
 		Prompt: cat.Prompt, ExplorerSchema: cat.ExplorerSchema,
@@ -869,7 +841,7 @@ func TestRunSpec_DegradedTerminalArtifact_FixedSpaceIsRealRegister(t *testing.T)
 	if len(d.ClaimIndex) != 0 || d.Label == schema.UncollatedLabel {
 		t.Error("a fixed-space register is a genuine comparison — it is not the uncollated emergent artifact")
 	}
-	// The register is keyed on the DECLARED field's exact values, with attributed positions per key.
+	// The register is keyed on the declared field's exact values, with attributed positions per key.
 	found := false
 	for _, e := range d.Register {
 		if e.Key == "Postgres" && len(e.Positions) == 2 {
@@ -888,8 +860,8 @@ func TestRunSpec_DegradedTerminalArtifact_FixedSpaceIsRealRegister(t *testing.T)
 
 // --- 6. Regression: the registered modes are unaffected by the governance machinery ---
 
-// TestRun_Catalog_GovernanceOptOutUnchanged pins that Catalog does NOT silently acquire the ranking-grade layers:
-// one canonicalizer, no confirmation round, no revision, no governance claims, one round.
+// Catalog uses none of the ranking-grade layers: one canonicalizer, one round, no confirmation, no revision
+// and no governance claims.
 func TestRun_Catalog_GovernanceOptOutUnchanged(t *testing.T) {
 	reg, plan := panelOf(t, []fake.Scenario{fake.Valid, fake.Valid}, fake.Valid)
 	res, err := Run(context.Background(), reg, plan,
@@ -932,8 +904,7 @@ func TestRun_Catalog_GovernanceOptOutUnchanged(t *testing.T) {
 	}
 }
 
-// TestRun_MapAndSynthesize_UnaffectedByGovernance pins that the plain-collate modes produce exactly their own
-// terminal output and acquire none of the governance machinery.
+// Map and Synthesize produce their own terminal output and none of the governance artifacts.
 func TestRun_MapAndSynthesize_UnaffectedByGovernance(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -980,7 +951,7 @@ func TestRun_MapAndSynthesize_UnaffectedByGovernance(t *testing.T) {
 			if res.Degraded != nil {
 				t.Error("a successful run emits no degraded artifact")
 			}
-			// The frozen panel is recorded for every run (it is free and it is the counting substrate).
+			// Every run records the frozen panel.
 			if res.Panel.Selected != 2 || res.Panel.PolicyHash == "" {
 				t.Errorf("the frozen panel must be recorded: %+v", res.Panel)
 			}

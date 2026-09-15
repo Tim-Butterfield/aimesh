@@ -1,33 +1,16 @@
-// Package canon is exploremesh's canonicalization component: it maps the raw candidate
-// nominations gathered from a blind explorer fan-out onto CANONICAL entities via a decoupled
-// canonicalizer MODEL call, and records that judgment in an APPEND-ONLY, revision-hashed merge-ledger —
-// the partition is made visible + attributable, never asserted as correct (entity
-// resolution is RELOCATED + RECORDED, not eliminated).
+// Package canon maps the raw nominations from a blind explorer fan-out onto canonical entities, using a
+// canonicalizer model call, and records the result in an append-only, hash-chained merge ledger. The
+// partition is recorded and attributable, not asserted to be correct.
 //
-// Two hard invariants hold BY CONSTRUCTION:
-//   - The merge-ledger is APPEND-ONLY: rows are only ever appended (via the unexported append, called
-//     once per nomination inside Canonicalize); the "current partition" is a VIEW over those rows
-//     (partitionView), never an in-place rewrite. There is no exported setter or index-mutation path.
-//   - The SURJECTIVITY GATE: every raw nomination lands in EXACTLY one ledger row, and every canonical
-//     ID is reachable from >=1 nomination. A violation is an ERROR (never a silent pass) — the
-//     mechanical form of minority carry-through: de-dup may CLUSTER, never DROP a nomination. A
-//     singleton nomination therefore survives into its own canonical entity, tagged single-source.
+//   - The ledger is append-only; the current partition is a view over its rows.
+//   - The surjectivity gate requires every nomination to appear in exactly one row and every canonical ID
+//     to have at least one nomination, so de-duplication can cluster but never drop a nomination.
 //
-// SCOPE: Canonicalize is the SINGLE decoupled-identity canonicalizer path — it is what the
-// observe-posture Catalog mode uses. dual.go and confirm.go hold the two RANKING-GRADE governance layers a
-// count/ballot-bearing mode needs:
+// Canonicalize runs a single canonicalizer. CanonicalizeDual (dual.go) keeps only merges two independent
+// canonicalizers both propose, splitting the rest. Confirm (confirm.go) resolves explorer challenges with a
+// host rule and produces a new revision.
 //
-//   - CanonicalizeDual (dual.go): TWO independent canonicalizer proposals, keeping ONLY merges BOTH
-//     propose; a merge only one proposes is CONTESTED → SPLIT (the conservative direction — splitting can
-//     undercount corroboration but can never manufacture it), with `agreedBy` on every ledger row.
-//   - Confirm (confirm.go): the BINDING confirmation round — typed explorer challenges resolved by a
-//     VERSIONED HOST rule (never by the canonicalizer, which must not review complaints about itself),
-//     producing a NEW append-only ledger revision and, where a dispute stands, a CONTESTED mapping that
-//     makes dependent counts conditional.
-//
-// canon depends on schema ONLY — the canonicalizer's identity verification is the CALLER's responsibility
-// (the pipeline classifies each model call and halts on a strong-evidence mismatch), so canon stays free of
-// the identity engine.
+// Identity verification of the canonicalizer call is the caller's responsibility.
 package canon
 
 import (
@@ -41,30 +24,23 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/explore/schema"
 )
 
-// Nomination is one raw candidate proposed by one explorer in the blind round-1 fan-out:
-// the raw text as the explorer wrote it, plus the SOURCE explorer identity + envelope ref so every
-// ledger row is attributable. The nominations passed to Canonicalize are indexed by position — the
-// canonicalizer proposes clusters by member index, and the surjectivity gate is checked over that index.
+// Nomination is one raw candidate from one explorer's blind round-1 response, with its source explorer and
+// envelope ref. Clusters refer to nominations by their index in the slice passed to Canonicalize.
 type Nomination struct {
 	Raw            string                  `json:"raw"`
 	SourceExplorer schema.ExplorerIdentity `json:"sourceExplorer"`
 	EnvelopeRef    string                  `json:"envelopeRef"`
 }
 
-// CanonicalizerCall is the DECOUPLED canonicalizer MODEL-call seam: a distinct call
-// whose identity is verified SEPARATELY from the collator (a strong-evidence mismatch halts). It
-// proposes a partition over the nominations. The pipeline implements it with a real meshcore model call
-// (isolated WorkDir, identity classified); tests implement it with a deterministic in-process fake — no
-// real model needed. It may reuse the collator adapter but is NEVER the collate call itself.
+// CanonicalizerCall proposes a partition over nominations. The pipeline implements it with a model call
+// separate from the collate call; tests use a fake.
 type CanonicalizerCall interface {
 	Propose(ctx context.Context, nominations []Nomination) (Proposal, error)
 }
 
-// Proposal is the canonicalizer's proposed partition + the distinguishing axes it extracted. Clusters
-// reference nominations by INDEX (into the slice handed to Canonicalize) so the host can mechanically
-// check surjectivity. DecidedByCall + DecidedByIdentity attribute the deciding call on every ledger row
-// (the caller stamps them from the verified model call). ProposedDimensions/CoverageNotes are the
-// canonicalizer's observations — for Catalog they are PROPOSED axes, never promoted to decision criteria.
+// Proposal is a canonicalizer's proposed partition. Clusters refer to nominations by index.
+// DecidedByCall and DecidedByIdentity attribute the call on every ledger row. ProposedDimensions and
+// CoverageNotes are observations, not decision criteria.
 type Proposal struct {
 	Clusters           []ProposedCluster       `json:"clusters"`
 	ProposedDimensions []string                `json:"proposedDimensions"`
@@ -73,27 +49,22 @@ type Proposal struct {
 	DecidedByIdentity  schema.ExplorerIdentity `json:"decidedByIdentity"`
 }
 
-// ProposedCluster is one proposed canonical entity: a stable ID + human label + the indices of the raw
-// nominations the canonicalizer clustered under it. Members must reference in-range nomination indices
-// and, across all clusters, partition the nominations EXACTLY (the surjectivity gate enforces this).
+// ProposedCluster is one proposed canonical entity: an ID, a label and the indices of its nominations.
+// Across all clusters the members must partition the nominations exactly.
 type ProposedCluster struct {
 	CanonicalID string `json:"canonicalId"`
 	Name        string `json:"name"`
 	Members     []int  `json:"members"`
 }
 
-// Attribution is one canonicalizer CALL's attribution: the call reference plus the identity that call was
-// verified as. It is the unit recorded in a row's AgreedBy, so "which canonicalizer(s) proposed this
-// mapping" is answerable from the ledger alone.
+// Attribution identifies a canonicalizer call and the identity it was verified as.
 type Attribution struct {
 	Call     string                  `json:"call"`
 	Identity schema.ExplorerIdentity `json:"identity"`
 }
 
-// LedgerRow is one raw nomination → canonical ID mapping decision. It is APPEND-ONLY — a row
-// is never updated in place; a later revision (the confirmation round, confirm.go) builds a NEW ledger
-// whose rows supersede these, and this row is retained unchanged. It records the deciding call + identity so
-// the partition is attributable.
+// LedgerRow records one nomination's mapping to a canonical ID and the call that decided it. Rows are
+// never updated; a later revision is a new ledger.
 type LedgerRow struct {
 	RawNomination     string                  `json:"rawNomination"`
 	CanonicalID       string                  `json:"canonicalId"`
@@ -101,24 +72,15 @@ type LedgerRow struct {
 	EnvelopeRef       string                  `json:"envelopeRef"`
 	DecidedByCall     string                  `json:"decidedByCall"`
 	DecidedByIdentity schema.ExplorerIdentity `json:"decidedByIdentity"`
-	// AgreedBy names the canonicalizer call(s) that PROPOSED this mapping.
-	// It is populated on the DUAL path — where the deciding authority is the host merge-agreement rule and
-	// the model proposals are the evidence, so DecidedByCall names the RULE and AgreedBy names the models.
-	// It is nil (omitted) on the single-canonicalizer path, where DecidedByCall/Identity already name the
-	// one deciding call — so a Catalog ledger row's bytes are unchanged.
+	// AgreedBy names the canonicalizer calls that proposed this mapping. It is set when a host rule decided
+	// the row (dual path or confirmation), in which case DecidedByCall names the rule.
 	AgreedBy []Attribution `json:"agreedBy,omitempty"`
-	// Revision is the ledger revision this row belongs to, present only from revision 2 onward (a
-	// confirmation-round revision). Omitted on the provisional revision, so an unconfirmed (Catalog) row's
-	// bytes are unchanged.
+	// Revision is the ledger revision, set only from revision 2 onward.
 	Revision int `json:"revision,omitempty"`
 }
 
-// Ledger is the APPEND-ONLY, revision-hashed merge-ledger. Its rows are unexported and
-// there is NO exported way to mutate or replace a row — the only write path is the unexported append,
-// invoked once per nomination inside Canonicalize. revisionHash is a hash CHAIN over the appended rows
-// (each append folds the row bytes into the prior hash), so the head hash pins the exact partition every
-// count/claim is computed at; any reordering or edit of the rows changes it. A stray in-place update is
-// impossible by construction.
+// Ledger is the append-only merge ledger. Rows are unexported and only this package appends them. Each
+// append extends a hash chain, so the head hash identifies the exact partition.
 type Ledger struct {
 	rows         []LedgerRow
 	contested    []ContestedMerge
@@ -127,16 +89,13 @@ type Ledger struct {
 	revisionHash string
 }
 
-// newLedger starts a ledger revision. revision 1 with an empty prior is the PROVISIONAL revision (and the
-// only one a single-canonicalizer run ever has); a later revision seeds its hash chain with the prior
-// revision's head hash, so revisions are themselves chained — a confirmation revision is provably a
-// successor of the exact partition it was computed from, and the prior revision is never touched.
+// newLedger starts a ledger revision whose hash chain is seeded with the prior revision's head hash.
+// Revision 1 with an empty prior is the provisional revision.
 func newLedger(revision int, prior string) *Ledger {
 	return &Ledger{revision: revision, prior: prior, revisionHash: prior}
 }
 
-// append folds one row into the append-only ledger, extending the revision hash chain. Unexported: its only
-// callers are this package's ledger builders, so no downstream code can grow or rewrite a ledger out of band.
+// append adds a row and extends the hash chain.
 func (l *Ledger) append(r LedgerRow) {
 	l.rows = append(l.rows, r)
 	b, _ := json.Marshal(r)
@@ -144,10 +103,8 @@ func (l *Ledger) append(r LedgerRow) {
 	l.revisionHash = hex.EncodeToString(sum[:])
 }
 
-// appendContested folds one CONTESTED-merge decision into the same append-only chain (the
-// merge one canonicalizer proposed and the other did not is a recorded DECISION, not a discarded opinion).
-// Contested records do not participate in the surjectivity gate — they describe merges that were REFUSED,
-// not nomination→canonical mappings. Unexported, like append.
+// appendContested records a refused merge and extends the hash chain. Contested records are not part of
+// the surjectivity gate.
 func (l *Ledger) appendContested(c ContestedMerge) {
 	l.contested = append(l.contested, c)
 	b, _ := json.Marshal(c)
@@ -155,16 +112,14 @@ func (l *Ledger) appendContested(c ContestedMerge) {
 	l.revisionHash = hex.EncodeToString(sum[:])
 }
 
-// Contested returns a COPY of the contested-merge decisions recorded in this revision (empty on the
-// single-canonicalizer path).
+// Contested returns a copy of the refused merges recorded in this revision.
 func (l *Ledger) Contested() []ContestedMerge {
 	out := make([]ContestedMerge, len(l.contested))
 	copy(out, l.contested)
 	return out
 }
 
-// Revision is this ledger's revision number (1 = the provisional partition; 2+ = a confirmation-round
-// revision produced by the versioned host rule).
+// Revision returns the revision number: 1 for the provisional partition, 2 or more after confirmation.
 func (l *Ledger) Revision() int {
 	if l.revision == 0 {
 		return 1
@@ -172,29 +127,24 @@ func (l *Ledger) Revision() int {
 	return l.revision
 }
 
-// PriorRevisionHash is the head hash of the revision this one supersedes ("" for the first revision). The
-// superseded revision is RETAINED — a revision is a new ledger, never an edit of the old one.
+// PriorRevisionHash returns the head hash of the revision this one supersedes, or "".
 func (l *Ledger) PriorRevisionHash() string { return l.prior }
 
-// Rows returns a COPY of the ledger rows in append order (a read-only view — mutating the copy cannot
-// touch the ledger). It is the append-only system of record persisted as merge-ledger.jsonl.
+// Rows returns a copy of the rows in append order.
 func (l *Ledger) Rows() []LedgerRow {
 	out := make([]LedgerRow, len(l.rows))
 	copy(out, l.rows)
 	return out
 }
 
-// Len reports the number of ledger rows (one per raw nomination once the surjectivity gate has passed).
+// Len returns the number of rows.
 func (l *Ledger) Len() int { return len(l.rows) }
 
-// RevisionHash returns the head of the ledger's revision hash chain — the partitionRevisionHash every
-// count/claim computed over this partition must pin.
+// RevisionHash returns the head of the hash chain, which claims record as partitionRevisionHash.
 func (l *Ledger) RevisionHash() string { return l.revisionHash }
 
-// MarshalJSON emits the ledger as {rows, revisionHash} — plus the revision chain + contested-merge
-// decisions when they exist — so a Result serializes fully for --json / capture despite the append-only
-// rows being unexported. The extra fields are omitempty, so a single-canonicalizer (Catalog) ledger
-// serializes as {rows, revisionHash} alone.
+// MarshalJSON encodes the ledger as {rows, revisionHash}, adding the revision, prior hash and contested
+// merges when present.
 func (l *Ledger) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Rows              []LedgerRow      `json:"rows"`
@@ -205,8 +155,7 @@ func (l *Ledger) MarshalJSON() ([]byte, error) {
 	}{l.rows, l.revisionHash, revisionIfSuperseding(l), l.prior, l.contested})
 }
 
-// revisionIfSuperseding reports the revision number for serialization ONLY when it supersedes another
-// revision — the provisional revision omits it so its bytes are unchanged.
+// revisionIfSuperseding returns the revision number when it is above 1, else 0 so JSON omits it.
 func revisionIfSuperseding(l *Ledger) int {
 	if l.revision > 1 {
 		return l.revision
@@ -214,9 +163,7 @@ func revisionIfSuperseding(l *Ledger) int {
 	return 0
 }
 
-// Member is one raw nomination within a canonical entity — the same attribution the ledger row carries,
-// plus SingleSource: whether the entity is backed by exactly ONE distinct source explorer (minority
-// carry-through). SingleSource is a property of the ENTITY, inherited by each member.
+// Member is one nomination within a canonical entity. SingleSource is inherited from the entity.
 type Member struct {
 	CanonicalID    string                  `json:"canonicalId"`
 	RawNomination  string                  `json:"rawNomination"`
@@ -225,9 +172,8 @@ type Member struct {
 	SingleSource   bool                    `json:"singleSource"`
 }
 
-// Cluster is one confirmed canonical entity — a VIEW over the ledger: its members are the
-// nominations mapped to this canonical ID. SingleSource marks an entity backed by a single distinct
-// source explorer — a carried minority (salience, not corroboration).
+// Cluster is one canonical entity, a view over the ledger. SingleSource marks an entity backed by only one
+// distinct explorer.
 type Cluster struct {
 	CanonicalID  string   `json:"canonicalId"`
 	Name         string   `json:"name"`
@@ -235,40 +181,29 @@ type Cluster struct {
 	SingleSource bool     `json:"singleSource"`
 }
 
-// Result is the canonicalization outcome (returned ONLY when the surjectivity gate passed): the
-// append-only Ledger, the partition VIEW (Clusters), the PROPOSED distinguishing dimensions +
-// coverage notes, and the partitionRevisionHash pinning the partition.
+// Result is a canonicalization that passed the surjectivity gate: the ledger, the partition view, the
+// proposed dimensions and notes, and the partition revision hash.
 type Result struct {
 	Clusters              []Cluster `json:"clusters"`
 	ProposedDimensions    []string  `json:"proposedDimensions"`
 	CoverageNotes         string    `json:"coverageNotes"`
 	PartitionRevisionHash string    `json:"partitionRevisionHash"`
 	Ledger                *Ledger   `json:"ledger"`
-	// Canonicalizers names every canonicalizer call that contributed a PROPOSAL to this partition (one on
-	// the single path, two on the dual path). omitempty keeps a Catalog result's bytes unchanged.
+	// Canonicalizers names the calls that proposed this partition, when a host rule combined proposals.
 	Canonicalizers []Attribution `json:"canonicalizers,omitempty"`
-	// AgreementRuleVersion is the versioned HOST rule that turned the proposal(s) into this partition — set
-	// on the dual path (DualRuleVersion) and, after a confirmation round, the confirmation rule version.
-	// Empty on the single-canonicalizer path, where the partition IS the single proposal.
+	// AgreementRuleVersion names the host rule that produced the partition; empty for a single proposal.
 	AgreementRuleVersion string `json:"agreementRuleVersion,omitempty"`
-	// Nominations is the exact nomination list this partition was computed over, retained so a later
-	// revision (the confirmation round) can re-partition the SAME inputs without re-deriving them, and so a
-	// count can resolve a canonical ID back to its attributed blind round-1 sources. omitempty keeps a
-	// single-canonicalizer result's bytes unchanged (the pipeline sets it only on the governed paths).
+	// Nominations are the inputs the partition was computed over, kept so a confirmation revision can
+	// re-partition them and counts can trace entities to their sources.
 	Nominations []Nomination `json:"nominations,omitempty"`
 }
 
-// Canonicalize maps raw nominations onto canonical entities via the decoupled canonicalizer call, records
-// the append-only merge-ledger, and enforces the surjectivity gate. It returns an error —
-// never a silent pass — when the canonicalizer call fails/halts (identity mismatch propagates from the
-// caller's Propose) or the proposed partition violates surjectivity (a dropped/double-counted nomination,
-// an out-of-range member, an empty/duplicate canonical ID). On success the Result's ledger is complete
-// (one row per nomination) and its partition view tags single-source entities.
+// Canonicalize asks canonicalizer for a partition of nominations, records it in a new ledger, and
+// enforces the surjectivity gate. It returns an error if the call fails or the partition drops,
+// duplicates or invents a nomination or ID.
 func Canonicalize(ctx context.Context, nominations []Nomination, canonicalizer CanonicalizerCall) (Result, error) {
 	prop, err := canonicalizer.Propose(ctx, nominations)
 	if err != nil {
-		// A canonicalizer identity halt / call failure propagates unchanged (the caller wraps it with a
-		// fault halt class); %w keeps any underlying fault reachable via errors.As.
 		return Result{}, fmt.Errorf("canonicalizer proposal: %w", err)
 	}
 
@@ -289,15 +224,10 @@ func Canonicalize(ctx context.Context, nominations []Nomination, canonicalizer C
 	}, nil
 }
 
-// buildLedger builds ONE append-only ledger revision from a partition over the nominations and enforces the
-// SURJECTIVITY GATE. It is the single authority for partition integrity, shared by every path that produces
-// a partition (single canonicalizer, dual merge-agreement, confirmation revision) so the gate can never be
-// bypassed by adding a path. stamp fills each row's attribution fields (deciding call / identity / agreedBy /
-// revision), which is the only thing that differs between the paths.
+// buildLedger builds a ledger revision from clusters and enforces the surjectivity gate. Every path that
+// produces a partition goes through it. stamp sets each row's attribution fields.
 func buildLedger(nominations []Nomination, clusters []ProposedCluster, revision int, prior string, stamp func(*LedgerRow)) (*Ledger, error) {
-	// assigned[i] counts how many ledger rows claim nomination i — it must end EXACTLY 1 for every
-	// nomination (the surjectivity gate). Reject an empty or duplicate canonical ID and an out-of-range
-	// member index up front — a fabricated/unreachable ID or a phantom member would corrupt the partition.
+	// assigned[i] counts the rows that claim nomination i; each must end at exactly 1.
 	led := newLedger(revision, prior)
 	assigned := make([]int, len(nominations))
 	seenID := map[string]bool{}
@@ -311,8 +241,6 @@ func buildLedger(nominations []Nomination, clusters []ProposedCluster, revision 
 		}
 		seenID[id] = true
 		if len(c.Members) == 0 {
-			// An unreachable canonical ID (no nomination maps to it) fails surjectivity — never manufacture
-			// a candidate the panel did not nominate.
 			return nil, fmt.Errorf("surjectivity gate: canonical ID %q has no nominations (every canonical ID must be reachable from >=1 nomination)", id)
 		}
 		for _, idx := range c.Members {
@@ -337,9 +265,7 @@ func buildLedger(nominations []Nomination, clusters []ProposedCluster, revision 
 		}
 	}
 
-	// SURJECTIVITY GATE (hard invariant, host-checked): every nomination in EXACTLY one ledger row. A
-	// count of 0 means the canonicalizer DROPPED a nomination (the failure minority carry-through exists
-	// to catch — de-dup may cluster, never drop); a count >1 means it was double-counted.
+	// Surjectivity gate: 0 means a dropped nomination, more than 1 a double-counted one.
 	for i, count := range assigned {
 		switch {
 		case count == 0:
@@ -351,10 +277,8 @@ func buildLedger(nominations []Nomination, clusters []ProposedCluster, revision 
 	return led, nil
 }
 
-// partitionView projects the proposed clusters into the confirmed partition, tagging minority
-// carry-through: an entity whose members come from a SINGLE distinct source explorer is single-source
-// (salience, not corroboration). It runs only after the surjectivity gate has passed, so every member
-// index is valid.
+// partitionView builds the clusters for a partition, marking entities with a single distinct source. It
+// must run after the surjectivity gate, which guarantees every member index is valid.
 func partitionView(noms []Nomination, clusters []ProposedCluster) []Cluster {
 	out := make([]Cluster, 0, len(clusters))
 	for _, c := range clusters {

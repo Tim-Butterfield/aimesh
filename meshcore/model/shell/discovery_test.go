@@ -10,9 +10,8 @@ import (
 	"time"
 )
 
-// Parser fixtures are sanitized captures of the real CLIs (2026-07-03). Default tests
-// never run the real discovery commands — ListModels is exercised only against fake
-// executables below.
+// Parser fixtures are sanitized captures of the real CLIs. Tests never run the real discovery
+// commands; ListModels runs only against fake executables.
 
 const ollamaListFixture = `NAME                 ID              SIZE      MODIFIED
 gemma3:27b           a418f5838eaf    17 GB     8 weeks ago
@@ -169,6 +168,6 @@ func TestPreviewArgs_MatchesRecipes(t *testing.T) {
 			}
 		}
 	}
-	// Note: claude's `--effort` is a REQUESTED level — the CLI may silently downgrade and
-	// does not report the effective level, so reviewmesh labels it requested/unverified.
+	// claude's `--effort` is a requested level: the CLI may downgrade it without reporting the
+	// effective level, so callers label it requested and unverified.
 }

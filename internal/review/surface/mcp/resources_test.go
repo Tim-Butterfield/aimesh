@@ -16,18 +16,15 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// This file covers how an MCP caller collects a `patch` remediation's diff: the receipt names the
-// artifact and hashes it, `runDir` is deliberately withheld and stdout is the JSON-RPC transport, so
-// `resources/*` is the only route to the bytes the caller paid for.
-//
-// What is asserted here is the whole round trip: remediate → link → fetch → the same bytes. Plus the two
-// properties that must survive it — no host path on the wire, and nothing readable but this run's own
-// published artifacts.
+// These tests cover collecting a patch remediation's diff over MCP. The receipt names and hashes the
+// artifact, runDir is withheld and stdout carries the protocol, so resources/* is the only route to
+// the bytes. They check the round trip (remediate, link, fetch, same bytes), that no host path is
+// sent, and that only this run's published artifacts are readable.
 
 const fixturePatch = "--- a/sample.go\n+++ b/sample.go\n@@ -1 +1 @@\n-package sample\n+package sample // fixed\n"
 
-// patchingReviewer writes a REAL patch into a real run directory, so the resource round trip has actual
-// bytes to deliver rather than a fixture path that never existed.
+// patchingReviewer writes a real patch into a real run directory, so the round trip has bytes to
+// deliver.
 type patchingReviewer struct {
 	fakeReviewer
 	runDir string
@@ -46,8 +43,7 @@ func newPatchingReviewer(t *testing.T) *patchingReviewer {
 	return &patchingReviewer{runDir: dir, sha: sha256Of(fixturePatch)}
 }
 
-// sha256Of is the receipt's own digest form, so the store re-verifies against exactly what the receipt
-// publishes rather than against a differently-spelled hash.
+// sha256Of returns the digest in the receipt's form.
 func sha256Of(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -71,7 +67,7 @@ func (p *patchingReviewer) Remediate(ctx context.Context, r run.RemediateRequest
 	}, nil
 }
 
-// callResult is c.call's result map, for a probe that only cares about the payload.
+// callResult returns c.call's result map.
 func callResult(t *testing.T, c *client, method string, params any) map[string]any {
 	t.Helper()
 	resp, _ := c.call(t, method, params)
@@ -112,8 +108,7 @@ func remediateForPatch(t *testing.T, c *client, ws string) *response {
 	return resp
 }
 
-// The whole point. A patch-mode remediation returns a link the caller can actually resolve, and resolving
-// it yields the very bytes the receipt hashed.
+// A patch remediation returns a link that resolves to the exact bytes the receipt hashed.
 func TestPatchIsRetrievableEndToEndOverTheProtocol(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := newPatchingReviewer(t)
@@ -130,8 +125,7 @@ func TestPatchIsRetrievableEndToEndOverTheProtocol(t *testing.T) {
 		t.Fatalf("receipt.patchSha256 = %v, want %v", receipt["patchSha256"], rv.sha)
 	}
 
-	// The same URI also rides the result as a resource_link block, for a client that reads content
-	// rather than structuredContent.
+	// The same URI rides the result as a resource_link block for clients that read content.
 	var linked string
 	for _, b := range contentBlocks(t, resp) {
 		if b["type"] == "resource_link" {
@@ -142,7 +136,7 @@ func TestPatchIsRetrievableEndToEndOverTheProtocol(t *testing.T) {
 		t.Fatalf("resource_link block = %q, want the receipt's own %q", linked, uri)
 	}
 
-	// FETCH IT. This is the step that did not exist.
+	// Fetch it.
 	read, _ := c.call(t, "resources/read", map[string]any{"uri": uri})
 	if read.Error != nil {
 		t.Fatalf("resources/read(%s): %+v", uri, read.Error)
@@ -157,9 +151,8 @@ func TestPatchIsRetrievableEndToEndOverTheProtocol(t *testing.T) {
 	}
 }
 
-// The deliberate decision this preserves: no host filesystem path reaches the wire. It is asserted over
-// the RAW frames, because a path leaking through a title or a description would be as much a leak as one
-// in the URI.
+// No host path reaches the wire, checked over raw frames so a path in a title or description is
+// caught too.
 func TestPatchResourceURICarriesNoHostPath(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := newPatchingReviewer(t)
@@ -191,8 +184,8 @@ func TestPatchResourceURICarriesNoHostPath(t *testing.T) {
 	}
 }
 
-// Only this run's own published artifacts are readable. Everything else is unaddressable, not merely
-// checked — the store resolves a registration, never a caller-supplied path.
+// Only this run's published artifacts are readable: the store resolves registrations, never
+// caller-supplied paths.
 func TestResourcesRefuseAnythingOutsideTheRunsOwnArtifacts(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := newPatchingReviewer(t)
@@ -225,8 +218,7 @@ func TestResourcesRefuseAnythingOutsideTheRunsOwnArtifacts(t *testing.T) {
 	}
 }
 
-// A run with no patch publishes nothing, and `resources/list` says so honestly rather than advertising a
-// link to an artifact that does not exist.
+// A run with no patch publishes nothing, and resources/list is empty.
 func TestResourcesListIsEmptyBeforeAnythingIsProduced(t *testing.T) {
 	ws := workspaceFixture(t)
 	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} }))
@@ -240,8 +232,7 @@ func TestResourcesListIsEmptyBeforeAnythingIsProduced(t *testing.T) {
 	}
 }
 
-// The `resources` capability is declared, because something backs it. A client that cannot see the
-// capability will never call the method, so the declaration is load-bearing rather than decorative.
+// The resources capability is declared, since clients only call methods whose capability they see.
 func TestResourcesCapabilityIsDeclared(t *testing.T) {
 	ws := workspaceFixture(t)
 	s := newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling = []string{ws} })

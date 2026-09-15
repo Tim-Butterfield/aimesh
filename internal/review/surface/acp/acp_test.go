@@ -19,13 +19,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/fault"
 )
 
-// noRemediation is the FROM-RUN half of Reviewer, stubbed to REFUSE.
-//
-// A write turn carrying `fromRun` does not run a review cycle: it resolves the handle and applies
-// the decision set that run recorded. Most fakes here are about dispatch, mode gating, sessions or
-// authority and never reach a write, so they embed this. Refusing rather than quietly succeeding is
-// the fail-closed default — a stub that answered "sure, applied" would let a from-run assertion pass
-// without a decision set ever being read.
+// noRemediation is the fromRun half of Reviewer, stubbed to refuse. Fakes that never reach a
+// write embed it; refusing rather than succeeding keeps a fromRun assertion from passing without
+// a decision set being read.
 type noRemediation struct{}
 
 func (noRemediation) ReadDecisionSetFor(string, string) (*run.StoredDecisionSet, string, error) {
@@ -37,9 +33,8 @@ func (noRemediation) Remediate(context.Context, run.RemediateRequest) (run.Remed
 	return run.RemediateOutcome{}, fault.New(fault.Internal, "this fake performs no remediation")
 }
 
-// stubDecisionSet is a minimal, always-remediable set for the fakes that DO answer a handle. `ws` is
-// the directory the harness substituted for wsPlaceholder — the fake has to claim it, because a
-// from-run turn that named a workspace is checked against the source run's.
+// stubDecisionSet returns a minimal remediable set whose workspace is ws, the directory the
+// harness substituted for wsPlaceholder.
 func stubDecisionSet(handle, ws string) *run.StoredDecisionSet {
 	return &run.StoredDecisionSet{
 		SchemaVersion: 1, RunID: filepath.Base(handle),
@@ -51,9 +46,8 @@ func stubDecisionSet(handle, ws string) *run.StoredDecisionSet {
 	}
 }
 
-// canonicalForTest resolves symlinks the way the surface's workspace check does (on macOS every
-// t.TempDir() is under a symlinked /var, so a test that skipped this would compare two spellings of
-// one directory and call them different).
+// canonicalForTest resolves symlinks as the surface's workspace check does; on macOS t.TempDir()
+// is under a symlinked /var.
 func canonicalForTest(p string) string {
 	if c, err := filepath.EvalSymlinks(p); err == nil {
 		return c
@@ -61,9 +55,7 @@ func canonicalForTest(p string) string {
 	return p
 }
 
-// workspaceAware lets runServer tell a fake which directory it substituted for wsPlaceholder. The
-// harness invents that path, so a fake that has to answer "which tree did the source run judge?"
-// cannot know it any other way.
+// workspaceAware lets runServer tell a fake which directory it substituted for wsPlaceholder.
 type workspaceAware interface{ setWorkspace(string) }
 
 // fakeReviewer is a deterministic Manager stand-in for the ACP harness. It reaches no write.
@@ -110,8 +102,7 @@ func harnessAdapters(t *testing.T) launchflags.Set {
 	)
 }
 
-// defaultPanel is the panel a review turn carries when a test does not name one: every review turn
-// composes its own seats, and most tests here are about something other than the panel.
+// defaultPanel returns the panel a review turn carries when a test does not name one.
 func defaultPanel() map[string]any {
 	seat := map[string]any{"adapter": "fake", "model": "m1"}
 	return map[string]any{"reviewers": []any{seat}, "author_remediator": seat}
@@ -168,16 +159,15 @@ func withDefaultPanel(line string) string {
 // for a real absolute directory, because a turn's workspace must exist and be absolute.
 const wsPlaceholder = `"/ws"`
 
-// runServer feeds lines to srv and decodes the response frames, substituting wsPlaceholder with a
-// real directory and adding the default panel to run-forming lines that name none.
-// fromRunHandle matches a slash-rooted literal `fromRun` handle in a test line.
+// fromRunHandle matches a slash-rooted literal fromRun handle in a test line.
 var fromRunHandle = regexp.MustCompile(`"fromRun":"/([^"]*)"`)
 
+// runServer feeds lines to srv and decodes the response frames, substituting wsPlaceholder with a real
+// directory and adding the default panel to run-forming lines that name none.
 func runServer(t *testing.T, srv *Server, lines ...string) []map[string]any {
 	t.Helper()
 	dir := t.TempDir()
-	// A from-run fake has to be able to claim this directory as the source run's workspace: the
-	// harness invents the path, so the fake cannot know it any other way. See workspaceAware.
+	// Let a fromRun fake claim the substituted directory as the source run's workspace.
 	if wa, ok := srv.Manager.(workspaceAware); ok {
 		wa.setWorkspace(dir)
 	}
@@ -185,8 +175,8 @@ func runServer(t *testing.T, srv *Server, lines ...string) []map[string]any {
 	subst := make([]string, len(lines))
 	for i, l := range lines {
 		l = strings.ReplaceAll(l, wsPlaceholder, ws)
-		// A literal handle like "/runs/prior-report-run" is absolute only on Unix; a real host's runDir is
-		// absolute on its own platform, so the harness roots it under this test's temp directory.
+		// A literal handle such as "/runs/prior-report-run" is absolute only on Unix, so root it under
+		// the test's temp directory.
 		l = fromRunHandle.ReplaceAllStringFunc(l, func(m string) string {
 			rel := fromRunHandle.FindStringSubmatch(m)[1]
 			return `"fromRun":` + strconv.Quote(filepath.Join(dir, filepath.FromSlash(rel)))
@@ -209,16 +199,16 @@ func runServer(t *testing.T, srv *Server, lines ...string) []map[string]any {
 	return resps
 }
 
-// serveStore runs a Server wired with a durable SessionStore (nil = none) — for cross-instance
-// resume tests, where a fresh Server sharing the same store stands in for a restarted agent.
+// serveStore runs a Server with a durable SessionStore (nil for none). A fresh Server sharing the
+// store stands in for a restarted agent.
 func serveStore(t *testing.T, mgr Reviewer, store SessionStore, lines ...string) []map[string]any {
 	t.Helper()
 	return runServer(t, &Server{Manager: mgr, Caps: review.SurfaceCaps{FileRead: true, FileWrite: true},
 		Sessions: store, Adapters: harnessAdapters(t)}, lines...)
 }
 
-// serveCaps runs a server launched with --allow-writes, with explicit host caps and degrade policy
-// (for mode-gating tests).
+// serveCaps runs a server launched with --allow-writes, with explicit host capabilities and
+// degrade policy.
 func serveCaps(t *testing.T, mgr Reviewer, caps review.SurfaceCaps, degrade bool, lines ...string) []map[string]any {
 	t.Helper()
 	return serveWrites(t, mgr, caps, true, degrade, lines...)
@@ -231,17 +221,12 @@ func serveWrites(t *testing.T, mgr Reviewer, caps review.SurfaceCaps, allowWrite
 		AllowWrites: allowWrites, Adapters: harnessAdapters(t)}, lines...)
 }
 
-// recordReviewer captures the mode + workspace the Manager was actually called with — on BOTH
-// halves of Reviewer.
-//
-// The from-run half is not padding: a write turn carrying `fromRun` reaches Remediate and never
-// RunContext, so a fake that recorded only the review call would make every mode-gating assertion
-// about `apply` fail for a reason that has nothing to do with mode gating.
+// recordReviewer records the mode and workspace the manager was called with, on both halves of
+// Reviewer: a fromRun write turn reaches Remediate, never RunContext.
 type recordReviewer struct {
 	mode review.Mode
 	ws   string
-	// source is the workspace the harness substituted for wsPlaceholder, claimed as the source
-	// run's so a from-run turn naming it is not refused as a mismatch.
+	// source is the substituted workspace, claimed as the source run's.
 	source string
 }
 
@@ -262,8 +247,7 @@ func (r *recordReviewer) Remediate(_ context.Context, req run.RemediateRequest) 
 	return run.RemediateOutcome{RunID: "run-remediate", RunDir: "/tmp/run-remediate", Mode: req.Mode}, nil
 }
 
-// fakeRemediator is the stand-in for the OTHER half: a from-run write turn whose outcome the test
-// dictates. It answers any handle with a remediable set and hands back the outcome it was given.
+// fakeRemediator answers any handle with a remediable set and returns the outcome it was given.
 type fakeRemediator struct {
 	out    run.RemediateOutcome
 	err    error
@@ -289,8 +273,8 @@ func (f *fakeRemediator) Remediate(_ context.Context, req run.RemediateRequest) 
 	return out, f.err
 }
 
-// A read-only host (no FileWrite) requesting apply degrades to patch (it has diff), with a
-// reason — and the Manager is invoked with the capped mode (so no live write can occur).
+// A host without FileWrite requesting apply degrades to patch with a reason, and the manager
+// runs with the capped mode.
 func TestModeGating_ReadOnlyHost_ApplyDegradesToPatch(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveCaps(t, rec, review.SurfaceCaps{FileRead: true, DiffContext: true}, true,
@@ -321,8 +305,7 @@ func TestModeGating_ReadOnlyHost_ApplyFailsWhenDegradeDisabled(t *testing.T) {
 	}
 }
 
-// An unknown mode is rejected with a usage error before any run (the resolver does not
-// validate modes, so the surface must).
+// An unknown mode is rejected before any run; the resolver does not validate modes.
 func TestModeGating_UnknownModeRejected(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveCaps(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true}, true,
@@ -336,8 +319,7 @@ func TestModeGating_UnknownModeRejected(t *testing.T) {
 	}
 }
 
-// A patch turn is always permitted: it changes no project content, so neither the write grant nor
-// the host's capabilities gate it.
+// A patch turn is always permitted: it changes no project content.
 func TestModeGating_PatchIsAlwaysPermitted(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true}, false, true,
@@ -368,16 +350,15 @@ func TestModeGating_WriteCapableHost_ApplyAllowed(t *testing.T) {
 	}
 }
 
-// initialize narrows caps from host-advertised clientCapabilities (writeTextFile=false),
-// which both reports a lower modeCeiling and gates a later apply request.
+// initialize narrows capabilities from the host's clientCapabilities, which caps a later apply
+// request.
 func TestModeGating_InitializeNarrowsCapsFromHost(t *testing.T) {
 	rec := &recordReviewer{}
 	full := review.SurfaceCaps{WorkspaceRoot: true, FileRead: true, FileWrite: true, DiffContext: true, ArtifactDir: true}
 	r := serveCaps(t, rec, full, true,
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":false}}}}`,
 		`{"jsonrpc":"2.0","id":2,"method":"review","params":{"workspace":"/ws","mode":"apply"}}`)
-	// initialize narrows fileWrite (not echoed in the ACP v1 result); the narrowing is proven
-	// behaviorally: the later apply request degrades to patch.
+	// The narrowing is not echoed in the result; the degraded apply below proves it.
 	if result(t, r[0])["protocolVersion"] != float64(1) {
 		t.Errorf("initialize should return protocolVersion 1, got %v", result(t, r[0])["protocolVersion"])
 	}
@@ -387,9 +368,7 @@ func TestModeGating_InitializeNarrowsCapsFromHost(t *testing.T) {
 	}
 }
 
-// session/load is NOT implemented (loadSession:false; its ACP contract mandates replaying a
-// conversation a stateless reviewer has none of) → method-not-found. Reconnect uses
-// session/resume instead.
+// session/load is not implemented and returns method-not-found.
 func TestSessionLoad_MethodNotFound(t *testing.T) {
 	r := serve(t, fakeReviewer{},
 		`{"jsonrpc":"2.0","id":1,"method":"session/new"}`,
@@ -399,8 +378,8 @@ func TestSessionLoad_MethodNotFound(t *testing.T) {
 	}
 }
 
-// materializeInline writes safe inline content to an isolated temp workspace and rejects
-// unsafe/excluded/empty maps without leaving files outside the temp dir.
+// materializeInline writes safe inline content to a temp workspace and rejects unsafe, excluded
+// or empty maps without writing outside it.
 func TestMaterializeInline(t *testing.T) {
 	dir, err := materializeInline(map[string]string{"main.go": "package main\n", "sub/x.go": "package sub\n"})
 	if err != nil {
@@ -413,8 +392,8 @@ func TestMaterializeInline(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dir, "sub", "x.go")); string(b) != "package sub\n" {
 		t.Error("sub/x.go not materialized")
 	}
-	// Rejected on EVERY platform (shared cross-platform path-safety invariant): traversal,
-	// POSIX-rooted, backslash-rooted, UNC, drive-letter, excluded, empty-key, empty-map.
+	// Rejected on every platform: traversal, POSIX-rooted, backslash-rooted, UNC, drive-letter,
+	// excluded, empty-key and empty-map inputs.
 	for name, files := range map[string]map[string]string{
 		"empty-map":   {},
 		"traversal":   {"../escape.go": "x"},
@@ -432,8 +411,8 @@ func TestMaterializeInline(t *testing.T) {
 	}
 }
 
-// session/prompt rejects an ambiguous (workspace + inlineWorkspace) request and an unsafe
-// inline path, before the Manager runs.
+// session/prompt rejects a request with both workspace and inlineWorkspace, and an unsafe inline
+// path, before the manager runs.
 func TestInlineWorkspace_RejectsAmbiguousAndUnsafe(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveCaps(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true}, true,
@@ -454,8 +433,8 @@ func TestInlineWorkspace_RejectsAmbiguousAndUnsafe(t *testing.T) {
 	}
 }
 
-// A host that denies write permission for THIS prompt degrades apply→patch (below the
-// connection's write capability), with a reason; the Manager receives the capped mode.
+// A host that denies write permission for this prompt degrades apply to patch with a reason; the
+// manager receives the capped mode.
 func TestPermissionGate_DenyWriteDegradesApply(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveCaps(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true}, true,
@@ -519,8 +498,8 @@ func TestPermissionGate_DenyWriteFailsWhenDegradeDisabled(t *testing.T) {
 	}
 }
 
-// Without --allow-writes, an apply turn on a fully write-capable host is REFUSED before any run, with a
-// message naming the grant and the patch turn that supplies the diff instead.
+// Without --allow-writes, an apply turn is refused before any run, with a message naming the grant
+// and the patch turn that supplies the diff.
 func TestWriteGrant_ApplyWithoutGrantIsRefused(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
@@ -553,8 +532,8 @@ func TestWriteGrant_OmittedModeIsReport(t *testing.T) {
 	}
 }
 
-// With degradation disabled, the same apply is refused with a usage error that names the grant,
-// BEFORE any run (no spend), not silently downgraded.
+// With degradation disabled, the same apply is refused with a usage error naming the grant, before
+// any run.
 func TestWriteGrant_ApplyWithoutGrantFailsWhenDegradeDisabled(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true},
@@ -593,8 +572,7 @@ func TestWriteGrant_GrantHonorsApply(t *testing.T) {
 	}
 }
 
-// The grant never WIDENS past what the host can do: the narrowest of grant / capability /
-// permission always wins.
+// The grant never widens past the host: the narrowest of grant, capability and permission wins.
 func TestWriteGrant_NeverWidensBeyondHostCapability(t *testing.T) {
 	rec := &recordReviewer{}
 	r := serveWrites(t, rec, review.SurfaceCaps{FileRead: true, DiffContext: true},
@@ -626,8 +604,7 @@ func rpcErr(t *testing.T, resp map[string]any) map[string]any {
 	return e
 }
 
-// promptMeta extracts an ACP v1 PromptResponse's `_meta.reviewmesh` block (where reviewmesh
-// result details — status/mode/findings/runDir — live, not at the ACP top level).
+// promptMeta returns a PromptResponse's _meta.reviewmesh block.
 func promptMeta(t *testing.T, resp map[string]any) map[string]any {
 	t.Helper()
 	meta, ok := result(t, resp)["_meta"].(map[string]any)
@@ -648,8 +625,8 @@ func stopReasonOf(t *testing.T, resp map[string]any) string {
 	return sr
 }
 
-// initialize returns an ACP v1-shaped result: integer protocolVersion 1, agentCapabilities,
-// authMethods, optional agentInfo — and NO reviewmesh-internal capabilities/serverInfo.
+// initialize returns an ACP v1 result: integer protocolVersion 1, agentCapabilities, authMethods
+// and agentInfo, with no reviewmesh-internal capabilities.
 func TestInitialize(t *testing.T) {
 	r := serve(t, fakeReviewer{}, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
 	res := result(t, r[0])
@@ -670,8 +647,8 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
-// initialize discloses who performs writes before the first prompt: `agent` without --allow-writes,
-// `aimesh` with it — and the diff is available either way.
+// initialize discloses who performs writes: agent without --allow-writes, aimesh with it. The diff
+// is available either way.
 func TestInitialize_DisclosesWhoWrites(t *testing.T) {
 	line := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`
 	for _, tc := range []struct {
@@ -687,8 +664,7 @@ func TestInitialize_DisclosesWhoWrites(t *testing.T) {
 	}
 }
 
-// agentCapabilities is honest + minimal: durable session load unsupported; text-only
-// prompts; no MCP (matching what is implemented, per the no-over-advertise rule).
+// agentCapabilities advertises only what is implemented: no session/load, text-only prompts, no MCP.
 func TestInitialize_AgentCapabilitiesHonest(t *testing.T) {
 	r := serve(t, fakeReviewer{}, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
 	ac := result(t, r[0])["agentCapabilities"].(map[string]any)
@@ -701,8 +677,7 @@ func TestInitialize_AgentCapabilitiesHonest(t *testing.T) {
 	}
 }
 
-// A missing, non-numeric, non-integer, or too-low protocolVersion is a deterministic error
-// — never silently answered with a different version (e.g. the old "0.1").
+// A missing, non-numeric, non-integer or too-low protocolVersion is an error.
 func TestInitialize_RejectsBadProtocolVersion(t *testing.T) {
 	for _, params := range []string{`{}`, `{"protocolVersion":"0.1"}`, `{"protocolVersion":0.1}`, `{"protocolVersion":0}`} {
 		r := serve(t, fakeReviewer{}, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":`+params+`}`)
@@ -712,7 +687,7 @@ func TestInitialize_RejectsBadProtocolVersion(t *testing.T) {
 	}
 }
 
-// A higher client protocol version negotiates DOWN to the agent's supported version (1).
+// A higher client protocol version negotiates down to 1.
 func TestInitialize_HigherVersionNegotiatesDown(t *testing.T) {
 	r := serve(t, fakeReviewer{}, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2}}`)
 	if result(t, r[0])["protocolVersion"] != float64(1) {
@@ -720,8 +695,7 @@ func TestInitialize_HigherVersionNegotiatesDown(t *testing.T) {
 	}
 }
 
-// A request shaped like the captured Zed initialize (sanitized) is accepted and yields a
-// valid ACP v1 result.
+// A request shaped like Zed's initialize yields a valid ACP v1 result.
 func TestInitialize_ZedSampleRequest(t *testing.T) {
 	r := serve(t, fakeReviewer{}, `{"jsonrpc":"2.0","id":"zed-1","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true},"clientInfo":{"name":"zed","title":"Zed","version":"x.y.z"}}}`)
 	res := result(t, r[0])
@@ -748,12 +722,12 @@ func TestACP_SessionNewAndPrompt(t *testing.T) {
 	}
 }
 
-// session/update notifications are ACP v1 SessionNotification-shaped: params {sessionId,
-// update} with the official `sessionUpdate` discriminator + a text content block; reviewmesh
-// audit details live ONLY under update._meta.reviewmesh — never as top-level params siblings.
+// session/update notifications carry params {sessionId, update}, with the sessionUpdate
+// discriminator and a text content block; reviewmesh details appear only under
+// update._meta.reviewmesh.
 func TestSessionUpdate_ACPv1Shape(t *testing.T) {
-	// A write-denied apply degrades → a `mode_degraded` session/update is emitted SYNCHRONOUSLY
-	// (before the run, no ctx gate), so the notification shape is deterministically testable.
+	// A write-denied apply degrades and emits mode_degraded synchronously, before the run, so the
+	// notification is deterministic.
 	r := serveCaps(t, &recordReviewer{}, review.SurfaceCaps{FileRead: true, FileWrite: true, DiffContext: true}, true,
 		`{"jsonrpc":"2.0","id":1,"method":"session/new"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s-0001","workspace":"/ws","mode":"apply","permissions":{"allowWrite":false}}}`)
@@ -793,9 +767,8 @@ func TestSessionUpdate_ACPv1Shape(t *testing.T) {
 	}
 }
 
-// Full Zed-shaped flow regression: initialize → session/new with cwd → session/prompt WITHOUT
-// workspace (+ prompt array) yields ACP v1-shaped session/update notifications and a
-// PromptResponse final, run against the session cwd.
+// Zed-shaped flow: initialize, session/new with cwd, then session/prompt without workspace yields
+// ACP v1 notifications and a PromptResponse, run against the session cwd.
 func TestACP_ZedFlow_SchemaShaped(t *testing.T) {
 	rec := &recordReviewer{}
 	cwd := t.TempDir()
@@ -810,9 +783,8 @@ func TestACP_ZedFlow_SchemaShaped(t *testing.T) {
 	if rec.ws != cwd {
 		t.Errorf("Zed flow should run against the session cwd %q, got %q (prompt text must NOT be parsed for scope)", cwd, rec.ws)
 	}
-	// Any session/update emitted must be ACP v1-shaped (carry params.update). Streamed-update
-	// presence + ordering is asserted reliably by the real-manager subprocess test
-	// (TestACP_SessionPromptProgress); the in-process serve() harness races EOF cancellation.
+	// Any session/update emitted must carry params.update. Update ordering is covered by
+	// TestACP_SessionPromptProgress; this in-process harness races EOF cancellation.
 	for _, resp := range r {
 		if resp["method"] == "session/update" {
 			if _, ok := resp["params"].(map[string]any)["update"].(map[string]any); !ok {
@@ -822,9 +794,8 @@ func TestACP_ZedFlow_SchemaShaped(t *testing.T) {
 	}
 }
 
-// WITHOUT a durable store, resume is unsupported: `sessionCapabilities.resume` is not
-// advertised and `session/resume` returns method-not-found (capability advertised only when
-// implemented). loadSession stays false on both paths (session/load mandates history replay).
+// Without a durable store, resume is not advertised and session/resume returns method-not-found.
+// loadSession stays false either way.
 func TestSessionResume_NotAdvertisedWithoutStore(t *testing.T) {
 	r := serve(t, fakeReviewer{}, `{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"sessionId":"s-0001","cwd":"/ws"}}`)
 	if rpcErr(t, r[0])["code"].(float64) != codeMethodNotFound {
@@ -840,11 +811,8 @@ func TestSessionResume_NotAdvertisedWithoutStore(t *testing.T) {
 	}
 }
 
-// With a durable store, initialize advertises sessionCapabilities.resume (empty object); a
-// session/new-created session is persisted and a NEW Server instance sharing the same store
-// resumes it and runs a subsequent session/prompt via the restored cwd — CROSS-INSTANCE
-// (restart) durability, not just in-process. resume returns an empty ResumeSessionResponse
-// and replays NO history.
+// With a durable store, initialize advertises resume, and a new Server sharing the store resumes a
+// persisted session and runs a prompt against its cwd. Resume returns an empty response.
 func TestSessionResume_CrossInstanceDurable(t *testing.T) {
 	store := NewFileSessionStore(t.TempDir())
 	cwd := t.TempDir()
@@ -880,7 +848,7 @@ func TestSessionResume_CrossInstanceDurable(t *testing.T) {
 	}
 }
 
-// Resuming an unknown / malformed persisted record is a structured error (never silently OK).
+// Resuming an unknown or malformed record is an error.
 func TestSessionResume_UnknownAndMalformedError(t *testing.T) {
 	r := serveStore(t, &recordReviewer{}, NewFileSessionStore(t.TempDir()),
 		`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"sessionId":"s-9999"}}`)
@@ -898,7 +866,7 @@ func TestSessionResume_UnknownAndMalformedError(t *testing.T) {
 	}
 }
 
-// session/new with a store persists ONLY safe metadata (no prompt/model/file content/secrets).
+// session/new persists only safe metadata: no prompt, model, file content or secrets.
 func TestSessionNew_PersistsOnlySafeMetadata(t *testing.T) {
 	dir, cwd := t.TempDir(), t.TempDir()
 	r := serveStore(t, &recordReviewer{}, NewFileSessionStore(dir),
@@ -926,8 +894,7 @@ func TestSessionNew_PersistsOnlySafeMetadata(t *testing.T) {
 	}
 }
 
-// Progress display text carries a trailing newline (so a host concatenating chunks renders
-// each line separately) while _meta.reviewmesh.message stays clean for programmatic use.
+// Progress display text ends in a newline while _meta.reviewmesh.message stays clean.
 func TestProgressUpdate_DisplayNewlineCleanMeta(t *testing.T) {
 	upd := acpProgressUpdate("run_started", "info", "review run started", "<TS>")
 	if got := upd["content"].(map[string]any)["text"]; got != "review run started\n" {
@@ -940,15 +907,14 @@ func TestProgressUpdate_DisplayNewlineCleanMeta(t *testing.T) {
 }
 
 func TestACP_SessionPromptUnknownSession(t *testing.T) {
-	// session/prompt without a session/new-created id is rejected (authoritative lifecycle)
+	// session/prompt with an id not created by session/new is rejected.
 	r := serve(t, fakeReviewer{}, `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"never-created","workspace":"/ws","mode":"report"}}`)
 	if rpcErr(t, r[0])["code"].(float64) != codeInvalidParams {
 		t.Errorf("session/prompt with an unknown sessionId should be invalid params, got %v", r[0])
 	}
 }
 
-// Zed flow: session/new supplies the workspace in params.cwd; a later session/prompt that
-// omits `workspace` (and `mode`) runs the Manager with Workspace == that cwd, mode report.
+// A session/prompt that omits workspace and mode runs against the session cwd in report mode.
 func TestACP_SessionPrompt_UsesCwdFallback(t *testing.T) {
 	rec := &recordReviewer{}
 	cwd := t.TempDir()
@@ -1046,8 +1012,7 @@ func TestACP_SessionCancelInFlight(t *testing.T) {
 	var sawCancelled, sawAck bool
 	for _, resp := range r {
 		if res, ok := resp["result"].(map[string]any); ok {
-			// The in-flight session/prompt response is an ACP v1 PromptResponse with
-			// stopReason "cancelled".
+			// The cancelled prompt's response has stopReason "cancelled".
 			if res["stopReason"] == "cancelled" {
 				sawCancelled = true
 			}
@@ -1062,8 +1027,7 @@ func TestACP_SessionCancelInFlight(t *testing.T) {
 }
 
 func TestACP_SessionBusyRejectsConcurrentPrompt(t *testing.T) {
-	// a second prompt for a session with an in-flight run is rejected, not silently
-	// overwritten (which would orphan the first run from session/cancel)
+	// A second prompt for a session with a run in flight is rejected.
 	mgr := fakeReviewer{block: true, out: review.RunOutcome{Status: "stable"}}
 	r := serve(t, mgr,
 		`{"jsonrpc":"2.0","id":0,"method":"session/new"}`,
@@ -1142,7 +1106,7 @@ func TestCancelNoActiveReturnsAck(t *testing.T) {
 }
 
 func TestNotificationsGetNoResponse(t *testing.T) {
-	// requests without an `id` member are notifications → no response
+	// Requests without an id member are notifications and get no response.
 	r := serve(t, fakeReviewer{out: review.RunOutcome{Status: "stable"}},
 		`{"jsonrpc":"2.0","method":"initialize"}`,
 		`{"jsonrpc":"2.0","method":"review","params":{"workspace":"/ws","mode":"report"}}`,
@@ -1153,7 +1117,7 @@ func TestNotificationsGetNoResponse(t *testing.T) {
 }
 
 func TestIDNullGetsResponse(t *testing.T) {
-	// `id: null` is a valid identifier (not a notification) → must get a response
+	// `id: null` is an identifier, not a notification, so it gets a response.
 	r := serve(t, fakeReviewer{}, `{"jsonrpc":"2.0","id":null,"method":"initialize","params":{"protocolVersion":1}}`)
 	if len(r) != 1 {
 		t.Fatalf("id:null should get exactly one response, got %v", r)
@@ -1178,17 +1142,17 @@ func TestContentLengthFramingRoundTrip(t *testing.T) {
 	if err := srv.Serve(strings.NewReader(in), &out); err != nil {
 		t.Fatalf("serve: %v", err)
 	}
-	// response must be Content-Length framed and parse back to a result
+	// The response must be Content-Length framed and parse back to a result.
 	got := out.String()
 	if !strings.HasPrefix(got, "Content-Length: ") {
 		t.Fatalf("response not Content-Length framed: %q", got)
 	}
-	i := strings.Index(got, "\r\n\r\n")
-	if i < 0 {
+	_, after, ok := strings.Cut(got, "\r\n\r\n")
+	if !ok {
 		t.Fatal("no header terminator in response")
 	}
 	var resp map[string]any
-	if err := json.Unmarshal([]byte(got[i+4:]), &resp); err != nil {
+	if err := json.Unmarshal([]byte(after), &resp); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
 	if _, ok := resp["result"]; !ok {
@@ -1204,7 +1168,7 @@ func TestContentLengthFramer_MalformedHeader(t *testing.T) {
 }
 
 func TestNewlineFramer_PartialThenComplete(t *testing.T) {
-	// two messages split oddly across the stream still read as two messages
+	// Two messages split oddly across the stream still read as two messages.
 	in := "{\"a\":1}\n{\"b\":2}\n"
 	f := NewFramer(FramingNewline, strings.NewReader(in), &bytes.Buffer{})
 	m1, err := f.ReadMessage()
@@ -1244,8 +1208,8 @@ func TestCancelInFlightReview(t *testing.T) {
 func itoa(n int) string { return strconv.Itoa(n) }
 
 func TestServe_EOFWithBlockedReviewDoesNotHang(t *testing.T) {
-	// A real workspace and a launched adapter: the review must actually START (and block) for this
-	// test to mean anything — a request refused pre-spend would never reach the in-flight state.
+	// A real workspace and a launched adapter, so the review actually starts and blocks; a request
+	// refused before spend would never be in flight.
 	ws := t.TempDir()
 	srv := &Server{Manager: fakeReviewer{block: true}, Adapters: harnessAdapters(t)}
 	line := withDefaultPanel(`{"jsonrpc":"2.0","id":1,"method":"review","params":{"workspace":` + strconv.Quote(ws) + `}}`)

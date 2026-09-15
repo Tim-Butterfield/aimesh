@@ -1,9 +1,6 @@
-// Package config is meshcore's DOMAIN-FREE configuration store: byte-atomic writes, YAML/JSON
-// format detection + conversion, pure map-level patch application, and a "validate before
-// write / load" mechanism where the SCHEMA VALIDATOR IS INJECTED by the caller. It knows
-// nothing of any app's typed schema (profiles, lanes, roles, explorers, collators) — an app
-// supplies a ValidateBytes closure that enforces its own schema. This is the ConfigAccess
-// contract: meshcore applies validated patches, never learns the roster schema.
+// Package config is meshcore's domain-free configuration store: atomic writes, YAML and JSON handling,
+// map-level patch application, and validation before load and write through a caller-supplied
+// ValidateBytes, so the store never learns an application's schema.
 package config
 
 import (

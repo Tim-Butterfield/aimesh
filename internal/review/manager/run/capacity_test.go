@@ -8,11 +8,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/clihint"
 )
 
-// TestIsCapacityFailure_SplitsBudgetFromPremises is the distinction the whole feature rests on.
-//
-// A quota wall or a wall clock is a fact about a billing relationship or a timer. A model-identity
-// mismatch, a containment refusal or an unresolvable adapter says the run's PREMISES are broken, and
-// no count over the survivors would mean anything. Only the first kind may degrade a panel.
+// TestIsCapacityFailure_SplitsBudgetFromPremises checks that only capacity failures (a quota or a
+// timeout) may degrade a panel. An identity mismatch, a containment refusal or an unresolvable adapter
+// means the run's premises are broken, so no count over the remaining seats would mean anything.
 func TestIsCapacityFailure_SplitsBudgetFromPremises(t *testing.T) {
 	capacity := []clihint.Signal{clihint.QuotaExhausted, clihint.Timeout}
 	for _, s := range capacity {
@@ -20,8 +18,8 @@ func TestIsCapacityFailure_SplitsBudgetFromPremises(t *testing.T) {
 			t.Errorf("%q is a provider running out, not a broken premise", s)
 		}
 	}
-	// INTEGRITY, and the default. A signal this file has not considered must HALT: adding a failure
-	// mode to clihint should never silently widen what a panel is willing to continue past.
+	// Integrity failures, and the default: an unconsidered signal halts, so a new clihint signal never
+	// widens what a panel continues past.
 	integrity := []clihint.Signal{
 		clihint.FolderTrust, clihint.LoginRequired, clihint.ModelInvalid, clihint.UpdatePrompt,
 	}
@@ -58,7 +56,7 @@ func TestPartialPanel_ReportsTheDenominatorItIsActuallyOver(t *testing.T) {
 			t.Errorf("the summary must contain %q: %s", want, s)
 		}
 	}
-	// The note has to refuse BOTH conclusions: that the result is untrustworthy, and that it is as
+	// The note has to refuse both conclusions: that the result is untrustworthy, and that it is as
 	// strong as a full panel's.
 	for _, phrase := range []string{"FEWER SEATS", "Nothing about the surviving findings changed", "re-run when capacity returns"} {
 		if !strings.Contains(p.Note, phrase) {
@@ -67,8 +65,8 @@ func TestPartialPanel_ReportsTheDenominatorItIsActuallyOver(t *testing.T) {
 	}
 }
 
-// TestPartialPanel_NilIsSilent. A full panel produces no disclosure at all, so its PRESENCE is the
-// signal — a consumer never has to compare two counts to notice a degraded run.
+// TestPartialPanel_NilIsSilent checks that a full panel produces no disclosure, so the disclosure's
+// presence alone signals a degraded run.
 func TestPartialPanel_NilIsSilent(t *testing.T) {
 	var p *PartialPanel
 	if p.Summary() != "" {

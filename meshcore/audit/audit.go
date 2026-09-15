@@ -15,9 +15,8 @@ import (
 type Run struct {
 	ID  string
 	Dir string
-	// OnEvent, if set, is called with every event as it is logged — a non-ACP, in-process
-	// progress sink. The Manager stays surface-agnostic: it only logs EventLines; a surface
-	// (e.g. ACP) may set this to stream progress. It must not block or panic.
+	// OnEvent, if set, is called with every event as it is logged, as an in-process progress sink.
+	// It must not block or panic.
 	OnEvent func(EventLine)
 }
 

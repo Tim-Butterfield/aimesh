@@ -240,7 +240,7 @@ func TestResultEnvelope_ModernOrderingIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		again, err := json.Marshal(s.result(modernEnv("tools/list"), map[string]any{"tools": []any{}, "nextCursor": "x"}))
 		if err != nil {
 			t.Fatal(err)
@@ -274,11 +274,9 @@ func TestAdvertisedResources_ModernURIsCarryTheDigestAndLegacyDoesNot(t *testing
 	if nodigest[0].URI != "aimesh://run/r1/log" {
 		t.Fatalf("an artifact with no recorded digest got a fabricated one: %s", nodigest[0].URI)
 	}
-	// ParseResourceURI must still split a digest-bearing URI: the digest is an addressing suffix, not a
-	// third path segment.
-	runID, name, ok := ParseResourceURI(modern[0].URI)
-	if !ok || runID != "r1" || name != "patch" {
-		t.Fatalf("ParseResourceURI(%q) = %q,%q,%v", modern[0].URI, runID, name, ok)
+	// The digest is a query suffix, so the path still names exactly the run and the artifact.
+	if base, _ := splitResourceDigest(modern[0].URI); base != "aimesh://run/r1/patch" {
+		t.Fatalf("digest-bearing URI %q does not split back to its base URI (got %q)", modern[0].URI, base)
 	}
 }
 

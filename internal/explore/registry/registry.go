@@ -1,13 +1,6 @@
-// Package registry builds exploremesh's adapter registry for a roster plan. Shell adapter support is
-// DISCOVERED from meshcore's fixed shell recipes (claude-code, codex-cli, ollama, agy-cli, devin-cli,
-// gemini-cli, cursor-cli); ACP adapters are USER-DEFINED instances (from the shared adapters.yaml
-// `acpAdapters`) passed in, since ACP is an open protocol with no fixed CLI list. A roster adapter
-// whose name matches a shell recipe or an ACP instance is backed by the REAL adapter. The ONE
-// explicit `fake` key is the HIDDEN internal test harness: it resolves only when the internal gate
-// (meshcore fake.Enabled, set by tests/golden runs — never by users) is on. Any OTHER name — and
-// `fake` itself when the gate is off — is FAIL-CLOSED: it is not registered and is returned as
-// `unknown` for the caller to surface (see Build) — a typo in a roster must never silently become a
-// fake "success".
+// Package registry builds the adapter registry for a roster plan. A name matching one of meshcore's shell
+// recipes or a user-defined ACP instance resolves to that adapter. The `fake` test adapter resolves only
+// when the internal test gate is on. Any other name is reported as unknown rather than registered.
 package registry
 
 import (
@@ -25,9 +18,8 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/model/shell"
 )
 
-// ResolveACPInstances loads the user-defined ACP adapter instances effective for cwd (the shared
-// adapters.yaml `acpAdapters`, user + root-anchored project scope) and converts them to acpagent
-// instances for Build. Detect falls back to the binary basename for PATH lookup.
+// ResolveACPInstances loads the user-defined ACP adapters effective for cwd, from the user and project
+// shared adapters.yaml, as acpagent instances for Build. Detect is the binary's basename when a path is set.
 func ResolveACPInstances(cwd string) (map[string]acpagent.Instance, error) {
 	locs, err := adapterlocations.ResolveACPInstances(cwd)
 	if err != nil {
@@ -44,21 +36,13 @@ func ResolveACPInstances(cwd string) (map[string]acpagent.Instance, error) {
 	return out, nil
 }
 
-// FakeAdapter is the ONE explicit deterministic test-harness adapter key. It is hidden and internal:
-// it resolves ONLY when the internal gate (corefake.Enabled — set by tests and the golden runs, never
-// by users) is on; otherwise it is an unrecognized name like any other (see Build).
+// FakeAdapter is the deterministic test adapter's key. It resolves only when corefake.Enabled, which
+// tests and golden runs set.
 const FakeAdapter = "fake"
 
-// Build resolves every adapter named in the plan (explorers + collator + explicit canonicalizers) to a runnable adapter: the
-// real meshcore adapter where the name matches a shell recipe or a user-defined ACP instance, and the
-// deterministic fake ONLY for the explicit `fake` key AND only when the internal test-harness gate is
-// on. paths supplies optional binary-path overrides for shell recipes; acpInsts is the set of ACP
-// adapter instances (nil → none).
-//
-// FAIL-CLOSED: any other unrecognized adapter name — including `fake` when the internal gate is off —
-// is NOT registered and is returned in `unknown` (sorted). It is a configuration error — a typo in a
-// roster must never silently become a fake "success". The caller surfaces `unknown` (doctor: a
-// failing check; a run: refuse before spending).
+// Build resolves every adapter the plan names (explorers, collator and explicit canonicalizers). paths
+// overrides shell recipe binaries and acpInsts supplies ACP instances. Names that resolve to nothing are
+// returned, sorted, as unknown, so a typo is a configuration error the caller reports before any model call.
 func Build(plan roster.Plan, paths map[string]string, acpInsts map[string]acpagent.Instance, timeout time.Duration) (pipeline.Registry, []string) {
 	real := shell.Registry(paths, timeout)
 	maps.Copy(real, acpagent.Registry(acpInsts, timeout)) // user-defined ACP-client adapters
@@ -81,9 +65,8 @@ func Build(plan roster.Plan, paths map[string]string, acpInsts map[string]acpage
 		resolve(e.Adapter, i)
 	}
 	resolve(plan.Collator.Adapter, len(plan.Explorers))
-	// The EXPLICIT canonicalizer identities are governed seats that make real model calls, so their adapters
-	// must resolve here too — otherwise an unconfigured canonicalizer adapter is only discovered at the
-	// pre-flight, after the caller was told the panel was fine.
+	// Explicit canonicalizers make model calls too, so an unconfigured one is reported here rather than at
+	// pre-flight.
 	for i, c := range plan.Canonicalizers {
 		resolve(c.Adapter, len(plan.Explorers)+1+i)
 	}

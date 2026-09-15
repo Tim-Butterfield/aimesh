@@ -1,34 +1,23 @@
 package acp
 
-// FROM-RUN EXECUTION — the ACP write turn that applies the set the host inspected.
+// This file implements the ACP write turn that applies a decision set the host inspected.
 //
-// A write turn CARRIES the run handle its report turn returned, so a write whose own response is lost
-// stays discoverable, and it goes through `Manager.Remediate`: the SAME governed write path, driven by
-// the SAME already-adjudicated decision set the source run recorded. No reviewers run, no second
-// adjudication happens, and `select` narrows the stored accepted set — so `fromRun` means "apply the
-// decision set you inspected" here exactly as it does on MCP and the CLI.
+// A write turn carries the runDir its report turn returned and applies that run's recorded
+// decision set through Manager.Remediate, the governed write path shared with MCP and the CLI. No
+// reviewers run, and select narrows the stored accepted set.
 //
-// WHERE THE SET COMES FROM. ACP reads the set from the source run's own DIRECTORY
-// (`run.ReadDecisionSetFor`), which survives a restart and is the artifact a host was already handed
-// a handle to. That also means this surface needs no job shape: no `runId` vocabulary, no
-// `run_status`, no `run_result`. The handle is the `runDir` a report turn returned.
-//
-// WHERE THE HANDLE IS JUDGED. It arrives from a peer, so it is verified against the turn workspace's
-// run records before anything is read — lexically first, so a path outside them is refused without the
-// filesystem being consulted, and a peer gains no existence oracle. Every way of failing answers with
-// one `run_handle_unknown`.
-//
-// WHAT GATES THE WRITE — deliberately not re-implemented here: the reviewed root's identity binding
-// (device+inode plus canonical path, carried durably on the set), the source run's base-hash pins
-// verified before the window opens, `governedWrite`'s per-destination content pins verified inside the
-// commit, the scope this turn declared, the protected-path denylist, the journal, the cancel/commit
-// gate and the receipt. A stored set applied against a tree that has moved on HALTS with
-// `stale_decision_set`; it does not write.
+// The handle comes from a peer, so it is verified against the turn workspace's run-record
+// locations before anything is read, lexically first; every failure answers run_handle_unknown.
+// The write itself is gated by the governed write path: the workspace identity binding, the
+// source run's base-hash pins, per-destination content pins, the turn's scope, the protected-path
+// denylist, the journal and the cancel gate. A tree that has changed halts with
+// stale_decision_set.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 
@@ -39,20 +28,18 @@ import (
 	"github.com/Tim-Butterfield/aimesh/meshcore/scope"
 )
 
-// Stable MACHINE reason codes this path owns (lower_snake, never sentences).
+// Reason codes for a refused fromRun turn.
 const (
-	// reasonFromRunArgsRefused — a run-forming argument (`panel`, `authority`) rode a
-	// `fromRun` turn. Those are the SOURCE run's and are not re-decided here, so the parameter is
-	// refused by name rather than ignored.
+	// reasonFromRunArgsRefused refuses a run-forming argument on a fromRun turn; those inputs belong
+	// to the source run.
 	reasonFromRunArgsRefused = "from_run_args_refused"
-	// reasonFromRunWorkspaceMismatch — this turn's workspace (named, or the session cwd) is not the tree the source
-	// run judged. The set is written to the tree it was adjudicated against; a caller that named a
-	// different one is told so rather than having its request silently redirected.
+	// reasonFromRunWorkspaceMismatch refuses a turn whose workspace (named, or the session cwd) is not
+	// the tree the source run reviewed.
 	reasonFromRunWorkspaceMismatch = "from_run_workspace_mismatch"
 )
 
-// fromRunWrite applies a prior run's decision set. It is reached only from runAndRespond, after the
-// mode ceiling, the run-handle rule and the authority DECLARATION check have all passed.
+// fromRunWrite applies a prior run's decision set. runAndRespond calls it after the mode ceiling,
+// the run-handle rule and the authority declaration check have passed.
 func (s *Server) fromRunWrite(ctx context.Context, req rpcRequest, notif bool, workspace string,
 	ownedWorkspace bool, effective, requested review.Mode, degradeReason, sessionID string,
 	sel reviewmeshMeta, wt writeTurn, turn *scope.Resolver, f Framer) *rpcResponse {
@@ -62,18 +49,13 @@ func (s *Server) fromRunWrite(ctx context.Context, req rpcRequest, notif bool, w
 			return nil
 		}
 		data := map[string]any{"reasonCode": reason}
-		for k, v := range extra {
-			data[k] = v
-		}
+		maps.Copy(data, extra)
 		return errResp(req.ID, codeInvalidParams, msg, data)
 	}
 
-	// RUN-FORMING ARGUMENTS ARE REFUSED, NOT IGNORED. Each names a governance input to the
-	// adjudication: which models judged, which panel composed the accepted set, which intent it was
-	// judged against. On this branch all three already exist — they came from the source run — so a
-	// turn that supplies different ones is asking for something this call cannot do, and accepting
-	// it would tell the host the opposite. (A MALFORMED authority declaration is refused earlier,
-	// by authority.Validate, with its own more specific code; both are refusals.)
+	// Run-forming arguments are refused by name rather than ignored: the panel and authority were
+	// settled by the source run. A malformed authority declaration was already refused by
+	// authority.Validate.
 	var named []string
 	if sel.Panel != nil {
 		named = append(named, "`panel`")
@@ -81,8 +63,7 @@ func (s *Server) fromRunWrite(ctx context.Context, req rpcRequest, notif bool, w
 	if len(sel.Authority) > 0 {
 		named = append(named, "`authority`")
 	}
-	// A dry run and a readiness probe belong to a review turn. A fromRun turn writes, so accepting either
-	// would read as "nothing will be written" while the stored set is applied.
+	// A dry run or readiness probe on a write turn would suggest nothing is written.
 	if sel.DryRun {
 		named = append(named, "`dryRun`")
 	}
@@ -95,16 +76,14 @@ func (s *Server) fromRunWrite(ctx context.Context, req rpcRequest, notif bool, w
 			"Nothing would be re-reviewed or re-judged, so the parameter is refused rather than ignored. Drop it, or run a fresh `report` turn with the panel and authority you want and apply THAT run.",
 			reasonFromRunArgsRefused, nil)
 	}
-	// An inline workspace is content this process materialized for THIS turn and deletes when the
-	// turn ends. There is no tree for a stored decision set to be applied to.
+	// An inline workspace is deleted when its turn ends, so there is no tree to apply a stored set to.
 	if ownedWorkspace {
 		return refuse("invalid params: `fromRun` cannot be combined with `inlineWorkspace` — the inline content is materialized into a directory this agent owns and deletes when the turn ends, so a decision set from an earlier run has nothing real to be written to.",
 			run.ReasonInlineWorkspaceNotRemediable, nil)
 	}
 
-	// THE HANDLE, verified rather than trusted. It must be absolute — this agent shares no working
-	// directory with its host — and it is resolved only among the run-record locations of the
-	// workspace this turn declared, so it can name nothing outside them. See the file comment.
+	// The handle must be absolute, since the agent shares no working directory with its host, and is
+	// resolved only among the declared workspace's run-record locations.
 	if !filepath.IsAbs(strings.TrimSpace(wt.FromRun)) {
 		return refuse("invalid params: `fromRun` must be the absolute `runDir` an earlier `report` turn returned",
 			run.ReasonRunHandleUnknown, nil)
@@ -117,19 +96,16 @@ func (s *Server) fromRunWrite(ctx context.Context, req rpcRequest, notif bool, w
 		return refuse("invalid params: "+rerr.Error(), fault.ReasonOf(rerr),
 			map[string]any{"sourceRunDir": sourceDir})
 	}
-	// The workspace this turn declared — named, or the session cwd — must be the tree the source run
-	// judged. The set is written to the tree it was adjudicated against, and a turn that declared a
-	// different one is refused rather than silently redirected.
+	// The declared workspace must be the tree the source run reviewed; a different one is refused,
+	// not redirected.
 	if !set.NamesWorkspace(workspace) {
 		return refuse(fmt.Sprintf(
 			"invalid params: this turn's workspace is %q, but run %q adjudicated %q. A `fromRun` write is applied to the tree its decisions were made against; declare that workspace, or apply a run that reviewed the tree you mean.",
 			workspace, set.RunID, set.Workspace),
 			reasonFromRunWorkspaceMismatch, map[string]any{"sourceRunDir": sourceDir})
 	}
-	// THE IDENTITY BINDING, re-established across the report→apply gap: the canonical path must
-	// still resolve to what it resolved to, and the durable device+inode key must still match. This
-	// is the check a pathname cannot make, and it is pre-spend — nothing has been copied and no
-	// model has been called, so a swapped tree costs a round trip rather than a run.
+	// Re-establish the identity binding before any spend: the canonical path and the device and inode
+	// key must still match what the source run recorded.
 	identity, ierr := set.BindWorkspace()
 	if ierr != nil {
 		return refuse("invalid params: "+ierr.Error(), fault.ReasonOf(ierr),
@@ -137,39 +113,30 @@ func (s *Server) fromRunWrite(ctx context.Context, req rpcRequest, notif bool, w
 	}
 
 	rq := run.RemediateRequest{
-		// The CANONICAL workspace, because BindWorkspace has just proven that is what the source
-		// run judged. `set.Workspace` is the path the run recorded and is kept for the audit trail;
-		// resolving the write against the canonical form removes a whole class of "same tree,
-		// different spelling" ambiguity from the one call that writes.
+		// Write against the canonical workspace, which BindWorkspace just verified.
 		Workspace:         set.WorkspaceCanonical,
 		WorkspaceIdentity: identity,
 		Mode:              effective,
 		Surface:           "acp",
-		// The SOURCE run's panel and role seats, so the plan resolves the same author_remediator lane
-		// the report run used. No reviewer seat is executed from them.
+		// The source run's panel and role seats, so the plan resolves the same author_remediator seat. No
+		// reviewer runs.
 		Profile:       set.Profile,
 		ReviewerPanel: set.Panel,
 		ComposedRoles: set.Roles,
-		// The scope THIS turn declared. A decision set is durable and can outlive the scope the run
-		// that produced it was judged under, so the write is re-gated against this turn's — enforced
-		// inside governedWrite, not merely carried.
+		// Re-gate the write against this turn's declared scope, which governedWrite enforces.
 		TrustedRoots: turn.Roots(),
 		SourceRunID:  set.RunID,
 		Findings:     set.Findings,
 		Decisions:    set.Decisions,
-		// The narrowing filter travels UNEXAMINED into the one governed write path — this surface
-		// resolves no fingerprint. That is what keeps `select` one rule rather than three.
+		// The selection passes unexamined to the governed write path.
 		Select:     wt.Select,
 		Shown:      set.ShownSet(),
 		BaseHashes: set.BaseHashes,
-		// The OPERATOR's launch waivers. A from-run apply reaches the same governed write path as a
-		// single-call apply, so it has to be governed by the same operator grants — otherwise the
-		// launch flag would mean one thing for `session/prompt` and another for a from-run turn.
+		// The operator's launch waivers apply here as they do to any governed write.
 		AllowProtectedPaths: s.AllowProtectedPaths,
 	}
 	if sessionID != "" {
-		// The same in-process progress sink the report path uses, gated on the run context so
-		// nothing is emitted after cancellation or after the terminal response.
+		// Forward progress while the run context is live, as the report path does.
 		rq.OnEvent = func(ev audit.EventLine) {
 			if ctx.Err() != nil {
 				return
@@ -180,9 +147,8 @@ func (s *Server) fromRunWrite(ctx context.Context, req rpcRequest, notif bool, w
 			})
 		}
 	}
-	// The turn budget wraps the request context (which a host `cancel` already cancels), so a
-	// remediation that outlives it is cancelled exactly as a host cancellation would cancel it —
-	// same path, same no-write-after-cancel gate.
+	// The turn budget wraps the request context, so a timeout cancels the remediation the same way a
+	// host cancel does.
 	runCtx, runCancel := context.WithTimeout(ctx, s.turnBudget())
 	defer runCancel()
 	out, rerr := s.Manager.Remediate(runCtx, rq)
@@ -192,13 +158,11 @@ func (s *Server) fromRunWrite(ctx context.Context, req rpcRequest, notif bool, w
 	return s.fromRunResponse(req, out, set, sourceDir, effective, requested, degradeReason, sessionID != "", rerr)
 }
 
-// fromRunResponse renders one from-run write turn.
+// fromRunResponse renders one fromRun write turn.
 //
-// CANCELLATION IS CHECKED FIRST, and that ordering is the contract rather than a preference: a
-// cancelled remediation returns a fault AND a receipt, and this surface answers a cancelled prompt
-// with a normal `PromptResponse` carrying the run handle — so the host can read the durable receipt
-// that says nothing was committed. Turning it into a `-32000` would tell a caller the turn failed
-// while the run directory says what actually happened.
+// Cancellation is checked first: a cancelled remediation returns a fault and a receipt, and the
+// turn answers with a normal PromptResponse carrying the run handle so the host can read the
+// receipt showing nothing was committed.
 func (s *Server) fromRunResponse(req rpcRequest, out run.RemediateOutcome, set *run.StoredDecisionSet,
 	sourceDir string, effective, requested review.Mode, degradeReason string, isSession bool, rerr error) *rpcResponse {
 
@@ -213,16 +177,11 @@ func (s *Server) fromRunResponse(req rpcRequest, out run.RemediateOutcome, set *
 		return okResp(req.ID, rm)
 	}
 	if rerr != nil {
-		// A refused or halted write is an ERROR response on both paths, carrying the halt taxonomy
-		// as MACHINE values — the same shape a halted review turn uses, so a host branches on one
-		// thing. `runDir` is the REMEDIATION run: its receipt is what says whether anything was
-		// committed (for a stale set, nothing was).
-		// The halt class comes off the fault itself. A remediation has no RunOutcome to carry one,
-		// and a class invented at the surface would be a second derivation of a fact the manager
-		// already decided.
+		// A refused or halted write is an error response carrying the halt taxonomy as machine values, the
+		// same shape as a halted review turn. runDir is the remediation run, whose receipt records whether
+		// anything was committed. The halt class comes from the fault.
 		halt := ""
-		var ft *fault.Fault
-		if errors.As(rerr, &ft) {
+		if ft, ok := errors.AsType[*fault.Fault](rerr); ok {
 			halt = ft.Halt
 		}
 		data := map[string]any{
@@ -239,18 +198,13 @@ func (s *Server) fromRunResponse(req rpcRequest, out run.RemediateOutcome, set *
 	rm := s.withWrites(map[string]any{
 		"status": "stable",
 		"mode":   string(effective),
-		// The REMEDIATION run's directory: this turn's journal, commit-attempt marker and receipt
-		// are under it. `sourceRunDir` is the run whose decisions were applied — two runs, two
-		// handles, neither standing in for the other.
-		//
-		// `sourceRunDir` is the CANONICAL directory, not the handle as the host spelled it: it names
-		// the run this write actually read. A host that wants to compare it with the handle it sent
-		// should compare resolved paths, because a symlinked temp or home directory makes the two
-		// spellings differ while naming one run.
+		// runDir is the remediation run (journal, commit marker, receipt); sourceRunDir is the canonical
+		// directory of the run whose decisions were applied. Compare resolved paths when matching it to the
+		// handle sent, since symlinks can make spellings differ.
 		"runDir":       out.RunDir,
 		"sourceRunDir": sourceDir,
 		"fromRun":      true,
-		// The findings count is the SOURCE run's set, not a fresh count: this turn raised none.
+		// The findings count is the source run's; this turn raised none.
 		"findings":      len(set.Findings),
 		"patchArtifact": out.RunDir + "/patches/changes.patch",
 		"outcome":       out.Outcome(),
@@ -284,9 +238,7 @@ func (s *Server) fromRunResponse(req rpcRequest, out run.RemediateOutcome, set *
 		rm["modeReason"] = degradeReason
 	}
 	if isSession {
-		// Partial refusal answers `refusal`, exactly as it does on a full-cycle write turn: the
-		// coarse signal over-states and `applied` sitting beside it is what keeps the fail-safe
-		// reading from becoming a wrong one.
+		// A partial refusal answers refusal, as on a full-cycle write turn; applied reports what was written.
 		if len(out.Refusals) > 0 {
 			return okResp(req.ID, promptResponse("refusal", rm))
 		}
@@ -295,8 +247,8 @@ func (s *Server) fromRunResponse(req rpcRequest, out run.RemediateOutcome, set *
 	return okResp(req.ID, rm)
 }
 
-// selectionPayload projects a selection into the three lists every write turn reports. All three are
-// always present — an absent `unmatched` and an empty one are different facts.
+// selectionPayload projects a selection into the requested, matched and unmatched lists. All three
+// are always present, since an absent unmatched list and an empty one mean different things.
 func selectionPayload(s *review.ApplySelection) map[string]any {
 	return map[string]any{
 		"requested": append([]string{}, s.Requested...),

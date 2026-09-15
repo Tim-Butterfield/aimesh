@@ -9,13 +9,9 @@ import (
 	"github.com/Tim-Butterfield/aimesh/internal/review/surface/mcp"
 )
 
-// The MCP half of the partial-refusal contract.
-//
-// A remediation that committed and refused one finding for a protected path must NOT read as a
-// clean success. `state` deliberately stays "complete" — the write did complete, and adding a
-// fifth value to one of the three run-status vocabularies already in this tree would make every
-// consumer's exhaustive switch wrong. The coarse signal goes where a consumer reads it without
-// parsing anything: `isError`.
+// A remediation that committed and refused one finding for a protected path must not read as clean.
+// state stays "complete", since the write completed and a new state value would break consumers'
+// exhaustive switches; the not-clean signal is isError.
 
 // oneRefusal is the protected-path refusal the fake remediation reports.
 func oneRefusal() []review.ApplyRefusal {
@@ -35,12 +31,11 @@ func TestRemediate_PartialRefusal_IsErrorAndCarriesTheSplit(t *testing.T) {
 	if res.rpc != nil {
 		t.Fatalf("a domain outcome must not be a protocol error: %+v", res.rpc)
 	}
-	// THE COARSE SIGNAL. A consumer that reads nothing else must not conclude this was clean.
+	// A consumer that reads only isError must not conclude the result was clean.
 	if !res.isError {
 		t.Fatal("a partial refusal must ride isError: true — under-signalling makes a caller believe findings were applied that were not")
 	}
-	// …and `state` is still "complete", because the commit succeeded. "halted" would be
-	// unambiguous about not-clean and catastrophically wrong about the facts.
+	// state is still "complete", because the commit succeeded.
 	if got, _ := res.structured["state"].(string); got != "complete" {
 		t.Errorf("state = %q, want complete — the write committed", got)
 	}
@@ -60,7 +55,7 @@ func TestRemediate_PartialRefusal_IsErrorAndCarriesTheSplit(t *testing.T) {
 	if applied, _ := counts["applied"].(float64); int(applied) != 1 {
 		t.Errorf("counts.applied = %v, want 1 — the rest of the run must still have been written", counts["applied"])
 	}
-	// The refusals array, keyed on the HOST-COMPUTED fingerprint.
+	// The refusals array, keyed by host-computed fingerprint.
 	refusals, _ := res.structured["refusals"].([]any)
 	if len(refusals) != 1 {
 		t.Fatalf("refusals = %+v, want one", res.structured["refusals"])
@@ -93,17 +88,15 @@ func TestRemediate_PartialRefusal_IsErrorAndCarriesTheSplit(t *testing.T) {
 	if r0, _ := na[0].(map[string]any); r0["reason"] != review.ApplyRefusalProtectedPath {
 		t.Errorf("receipt.notApplied[0].reason = %v, want protected_path", na[0])
 	}
-	// THE TEXT CHANNEL LEADS WITH THE REFUSAL. Some clients show the model nothing else, and a
-	// refusal buried under the applied summary is a refusal nobody reads.
-	first := strings.SplitN(res.text, "\n", 2)[0]
+	// The text rendering leads with the refusal, since some clients show the model nothing else.
+	first, _, _ := strings.Cut(res.text, "\n")
 	if !strings.Contains(first, "REFUSED") || !strings.Contains(first, ".env") {
 		t.Errorf("the first content line must name the refusal and the path, got %q\nfull text:\n%s", first, res.text)
 	}
 }
 
-// TestRunStatus_PartialRefusal_CannotReadAsClean is the polling path. A caller that never fetches
-// `run_result` sees only `run_status`, whose `state` is "complete" and always will be — so the
-// two facts that distinguish a partially-refused run are repeated there.
+// A caller that only polls sees run_status, whose state is "complete", so the refusal facts are
+// repeated there.
 func TestRunStatus_PartialRefusal_CannotReadAsClean(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{refusals: oneRefusal()}
@@ -134,9 +127,8 @@ func TestRunStatus_PartialRefusal_CannotReadAsClean(t *testing.T) {
 	}
 }
 
-// TestRunResult_PartialRefusal_ReplaysIsError pins that COLLECTING the answer later is the same
-// answer. The call that pays for a write is often not the call that collects it, and a replay
-// that dropped `isError` would hand the collector a clean-looking success.
+// Fetching the result later replays isError, since the collecting call is often not the one that
+// started the write.
 func TestRunResult_PartialRefusal_ReplaysIsError(t *testing.T) {
 	ws := workspaceFixture(t)
 	rv := &fakeReviewer{refusals: oneRefusal()}
@@ -154,8 +146,7 @@ func TestRunResult_PartialRefusal_ReplaysIsError(t *testing.T) {
 	}
 }
 
-// TestRemediate_NoRefusals_StaysClean is the blast radius: an ordinary remediation is untouched.
-// `isError` has to mean something, which requires the clean case to stay clean.
+// An ordinary remediation stays clean.
 func TestRemediate_NoRefusals_StaysClean(t *testing.T) {
 	ws := workspaceFixture(t)
 	c := serve(t, newServer(t, &fakeReviewer{}, func(s *mcp.Server) { s.Ceiling, s.AllowWrites = []string{ws}, true }))

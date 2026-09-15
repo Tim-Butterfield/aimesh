@@ -5,9 +5,8 @@ import (
 	"io"
 )
 
-// debugCtxKey carries an optional per-invocation debug writer. It lives in the model package so
-// every adapter family (shell, acpagent, …) reads the SAME key — an app enables diagnostics once
-// (behind a --debug flag) and any adapter it drives emits to the same writer.
+// debugCtxKey carries an optional per-invocation debug writer. It lives in model so every adapter
+// family reads the same key.
 type debugCtxKey struct{}
 
 // WithDebug returns a context that makes adapters emit a per-invocation diagnostic to w (resolved

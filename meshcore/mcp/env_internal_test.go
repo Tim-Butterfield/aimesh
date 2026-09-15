@@ -12,9 +12,6 @@ import (
 // Call.Log's two eras, tested by construction. The wire-level version of the same claim — zero
 // notifications/message across a whole modern transcript, under every shape of `_meta.logLevel` — is
 // in era_test.go, and the real-binary version is in each application's subprocess test.
-//
-// AGAINST A TREE WITH NO PER-REQUEST ERA THIS FAILS: Call.Log emitted unconditionally, because there
-// was no era to ask.
 func TestCallLog_TheEraDecidesWhetherAnythingIsEmitted(t *testing.T) {
 	var out bytes.Buffer
 	f := NewFramer(FramingNewline, strings.NewReader(""), &out)
@@ -41,9 +38,8 @@ func TestCallLog_TheEraDecidesWhetherAnythingIsEmitted(t *testing.T) {
 	}
 }
 
-// A Call built outside a dispatch has no protocol context. It must read as FAIL-CLOSED — no roots, a
-// resolver that refuses every path, provenance `none` — rather than as an absent restriction. This is
-// the one place a nil env can occur, so it is the one place the default matters.
+// A Call built outside a dispatch has no protocol context, so it fails closed: no roots, a resolver that
+// refuses every path, and provenance `none`.
 func TestCallEnv_ANilContextIsFailClosedNotUnrestricted(t *testing.T) {
 	var c *Call
 	env := c.Env()

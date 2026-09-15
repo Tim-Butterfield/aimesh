@@ -317,8 +317,8 @@ func TestClaim_HonestLabelingAndNarrativeSplit(t *testing.T) {
 		}
 	}
 	// The claim ledger is append-only + hash-chained, and Claims() copies.
-	if ledger.Len() != 2 || ledger.RevisionHash() == "" {
-		t.Fatalf("claim ledger must chain its emissions: len=%d hash=%q", ledger.Len(), ledger.RevisionHash())
+	if n := len(ledger.Claims()); n != 2 || ledger.RevisionHash() == "" {
+		t.Fatalf("claim ledger must chain its emissions: len=%d hash=%q", n, ledger.RevisionHash())
 	}
 	claims[0].Value = 99
 	if ledger.Claims()[0].Value == 99 {

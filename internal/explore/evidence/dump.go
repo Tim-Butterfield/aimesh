@@ -1,19 +1,8 @@
 package evidence
 
-// This file implements the DERIVABILITY INVARIANT: the evidence database is a DERIVED artifact,
-// so exporting the same run directory twice must produce the same thing. That is a checkable property, and
-// this is the check.
-//
-// It is verified at two strengths, deliberately:
-//
-//   - CONTENT: a canonical dump of every table, every row, every column, in a fixed order. This is the
-//     invariant that MATTERS — it says the export is a pure function of the run directory.
-//   - BYTES: the SHA-256 of the file itself. The export pins the page size and the journal mode and inserts
-//     in a fixed order with no timestamps, so this holds too. It is checked as well as the dump because a
-//     byte difference the dump cannot see would mean something non-deterministic slipped into the file.
-//
-// The dump is also the human-readable form of "what is in here", which is why Verify returns it rather than
-// only a boolean.
+// This file checks that the evidence database is derivable: exporting the same run directory twice gives
+// the same result. Verify compares two things: a canonical dump of every row, which shows the content is a
+// function of the run directory, and the file's SHA-256, which catches non-determinism the dump cannot see.
 
 import (
 	"crypto/sha256"
@@ -28,9 +17,8 @@ import (
 )
 
 // CanonicalDump renders every table of an evidence database as deterministic text: one line per row, with
-// the columns in declared order, the rows sorted, and the tables in the fixed exportTables order. It is the
-// comparison surface of the derivability invariant — two dumps that match mean two exports carry identical
-// content, whatever the file bytes happen to look like.
+// the columns in declared order, the rows sorted, and the tables in exportTables order. Two matching dumps
+// mean two exports hold identical content.
 func CanonicalDump(dbPath string) (string, error) {
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=foreign_keys(1)&mode=ro")
 	if err != nil {
@@ -52,9 +40,8 @@ func CanonicalDump(dbPath string) (string, error) {
 	return b.String(), nil
 }
 
-// dumpTable renders one table's rows as sorted `col=value` lines. Sorting the RENDERED rows (rather than
-// relying on a primary-key ORDER BY that differs per table) keeps the dump independent of both insert order
-// and SQLite's row layout — which is exactly what a content comparison should be.
+// dumpTable renders one table's rows as sorted `col=value` lines. Sorting the rendered rows keeps the dump
+// independent of insert order and row layout.
 func dumpTable(db *sql.DB, table string) ([]string, error) {
 	rows, err := db.Query("SELECT * FROM " + table)
 	if err != nil {
@@ -88,9 +75,8 @@ func dumpTable(db *sql.DB, table string) ([]string, error) {
 	return out, nil
 }
 
-// renderValue renders one scanned column deterministically. NULL is a distinct rendering from an empty
-// string — in a STRICT schema with typed columns those two mean different things, and a dump that conflated
-// them could not detect a change between them.
+// renderValue renders one scanned column deterministically, rendering NULL differently from an empty
+// string so a change between them is visible.
 func renderValue(v any) string {
 	switch t := v.(type) {
 	case nil:
@@ -104,7 +90,7 @@ func renderValue(v any) string {
 	}
 }
 
-// FileDigest is the SHA-256 of a database file — the byte-level half of the derivability check.
+// FileDigest returns the hex SHA-256 of the file at path.
 func FileDigest(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -118,17 +104,10 @@ func FileDigest(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// Verify re-exports runDir into a scratch database of its OWN and compares BOTH the canonical dump and the
-// file digest against an existing export. It is the runnable form of "the database's derivability is itself
-// a checkable invariant": a caller can hand an auditor a database and the run directory it came from,
-// and the auditor can check that one really does produce the other.
-//
-// The scratch database lives in a temporary directory this function CREATES and REMOVES, rather than beside
-// dbPath. Two reasons, both of them about the check not being able to hurt what it is
-// checking: a scratch path derived from the destination can collide with a real file the user owns, and a
-// check that leaves anything next to the artifact it verified is not a read-only check. Because the scratch
-// path is unobservable and disposable, it is built directly — the destination guard has nothing to protect
-// there, and Export's no-clobber rule would only be an obstacle to a file nobody else can see.
+// Verify re-exports runDir into a scratch database and compares its canonical dump and file digest with the
+// database at dbPath, so anyone holding both can check that one produces the other. The scratch database
+// is built in a temporary directory that Verify creates and removes, so the check writes nothing beside
+// dbPath and cannot collide with a user's file.
 func Verify(runDir, dbPath string) error {
 	rec, rerr := readRun(runDir)
 	if rerr != nil {

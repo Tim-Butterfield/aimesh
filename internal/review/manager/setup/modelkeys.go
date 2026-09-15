@@ -1,12 +1,10 @@
 package setup
 
-// Governed cleanup of user-layer generated model-catalog keys that embed an adapter-key prefix
-// (e.g. `codex-cli-gpt-5.5-high`) — a shape older web-UI batches materialized. The repair renames
-// them off the adapter prefix (`gpt-5.5-high`) and repoints the user-layer profile lanes that use
-// them, through SetupManager → SetupEngine → ConfigAccess. It is preview-first, idempotent, and
-// SAFE: it touches ONLY user-layer-owned, generated-shape, non-authoritative/non-default entries
-// whose lane references are ALL in the writable user layer, and it never coalesces onto a target
-// key that already holds different content.
+// Cleanup of user-layer generated catalog keys that embed an adapter-key prefix (for example
+// `codex-cli-gpt-5.5-high`): the repair renames them without the prefix (`gpt-5.5-high`) and repoints
+// the user-layer lanes that use them. It is preview-first and idempotent. It touches only user-layer,
+// generated-shape, non-authoritative, non-default entries whose references are all in the user layer,
+// and never merges onto a target key that holds different content.
 
 import (
 	"encoding/json"

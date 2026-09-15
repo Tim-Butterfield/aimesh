@@ -9,91 +9,69 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
 // --- typed refusals ---
 
-// Reason is the stable MACHINE code for a workspace refusal (code-shaped lower_snake, so
-// a caller can branch on it and persist it in an audit record).
+// Reason is the stable machine code for a workspace refusal, suitable for branching and audit
+// records.
 type Reason string
 
+// Workspace refusal reasons.
 const (
-	// ReasonRootDenied — the ROOT handed to a copy/collect is itself a protected path
-	// (e.g. a `.env` directory). Its children must never be judged only by their own
-	// names: the whole subtree is the secret.
+	// ReasonRootDenied — the root given to a copy or collection is itself a secret path, such
+	// as a `.env` directory, so its whole subtree is secret.
 	ReasonRootDenied Reason = "workspace_root_denied"
-	// ReasonHardlink — a regular file with more than one link. Its innocuous in-root name
-	// is only one of its names; another may be `~/.ssh/id_rsa`, so basename-based
-	// exclusion says nothing about what the bytes are.
+	// ReasonHardlink — a regular file with more than one link; another of its names may be a
+	// secret.
 	ReasonHardlink Reason = "workspace_hardlink_denied"
 	// ReasonReparse — a symlink/junction/mount point where a regular file was required.
 	ReasonReparse Reason = "workspace_reparse_denied"
 	// ReasonNotRegular — a device/socket/FIFO (or a directory) where a regular file was
 	// required.
 	ReasonNotRegular Reason = "workspace_not_regular_file"
-	// ReasonStagedUnreadable — a staged file in an isolated copy could not be read. It is
-	// never skipped silently: a commit that quietly drops part of the reviewed set is a
-	// half-applied remediation wearing a success return.
+	// ReasonStagedUnreadable — a staged file in an isolated copy could not be read; a commit
+	// never skips it.
 	ReasonStagedUnreadable Reason = "workspace_staged_unreadable"
-	// ReasonUnlinkFailed — the REQUIRED unlink before a live write failed. Writing anyway
+	// ReasonUnlinkFailed — the required unlink before a live write failed. Writing anyway
 	// could truncate whatever the existing entry links to.
 	ReasonUnlinkFailed Reason = "workspace_unlink_failed"
 	// ReasonPathMismatch — the write guard's canonical path for a destination is not the
 	// destination itself under the live root (an intermediate component resolves
 	// elsewhere, e.g. a symlinked directory).
 	ReasonPathMismatch Reason = "workspace_path_mismatch"
-	// ReasonExcludedAncestor — the ROOT handed to a copy/collect is itself, or sits under,
-	// a protected path (`.git`, `.vscode`, `.claude`, `.aimesh`, …). Judging exclusion on
-	// components RELATIVE to the root strips the protection: a root of `/trusted/.vscode`
-	// makes `mcp.json` an ordinary relative file.
+	// ReasonExcludedAncestor — the root given to a copy or collection is, or sits under, a
+	// protected path such as `.git` or `.vscode`.
 	ReasonExcludedAncestor Reason = "workspace_excluded_ancestor"
-	// ReasonExcluded — a path INSIDE the reviewed tree that the exclusion list drops: a
-	// build/artifact directory (`node_modules`, `dist`, `.cache`) or the agent/IDE client
-	// config family (`.vscode`, `.claude`, `.cursor`, `.aimesh`, …).
-	//
-	// It is a CAVEAT, never a refusal — dropping these is correct and the run proceeds, but not
-	// in silence, just as a hardlinked file gets a caveat for the same class of reason:
-	// `.claude/` and `.cursor/` hold rules and prompts that ARE source, so a user can reasonably ask a
-	// review to look at them and never learn it did not. docs/security.md makes the argument
-	// against exactly this — "a reviewer cannot object to a file it was never shown".
+	// ReasonExcluded — a path inside the workspace dropped by the exclusion list. It is
+	// recorded as a caveat, not a refusal; the run proceeds.
 	ReasonExcluded Reason = "workspace_excluded"
-	// ReasonRootChanged — the object actually opened as the os.Root boundary is not the
-	// object the containment checks were performed against (the path was swapped for a
-	// symlink/another directory in between). os.Root confines traversal INSIDE the
-	// boundary; it says nothing about which boundary got opened.
+	// ReasonRootChanged — the object opened as the os.Root boundary is not the object the
+	// containment checks approved; the path was swapped in between.
 	ReasonRootChanged Reason = "workspace_root_identity_changed"
 	// ReasonDestinationChanged — a live destination is not the object the pre-write check
 	// approved (it appeared, vanished, or was replaced in between). A commit fails rather
 	// than clobbering something it never inspected.
 	ReasonDestinationChanged Reason = "workspace_destination_changed"
-	// ReasonStagedUnenumerable — a staged subtree in an isolated copy could not be listed,
-	// so the files beneath it were never considered. Reporting success would be a commit
-	// that silently skipped part of the reviewed set.
+	// ReasonStagedUnenumerable — a staged subtree in an isolated copy could not be listed, so
+	// its files were never considered.
 	ReasonStagedUnenumerable Reason = "workspace_staged_unenumerable"
-	// ReasonDestinationContentChanged — a live destination's CONTENT is not the content the
-	// caller pinned when it decided what to write. Identity (device+inode) is unchanged, so
-	// ReasonDestinationChanged cannot see it: an editor that saves IN PLACE keeps the inode.
-	// The staged bytes were derived from the pinned content, so writing them would silently
-	// discard whatever was written in between.
+	// ReasonDestinationContentChanged — a live destination's content no longer matches the
+	// caller's pin although its identity is unchanged, as after an in-place save.
 	ReasonDestinationContentChanged Reason = "workspace_destination_content_changed"
-	// ReasonDestinationUnpinned — the caller supplied a content pin set and a destination is
-	// not in it. A write with no recorded "what did this file look like when I decided" is
-	// exactly the write a pin set exists to forbid, so an unpinned destination is refused
-	// rather than written unchecked.
+	// ReasonDestinationUnpinned — a commit with a pin set has a destination that is not in it.
 	ReasonDestinationUnpinned Reason = "workspace_destination_unpinned"
 )
 
 // --- content pins ---
 //
-// A pin is a caller's record of what a live destination looked like when the caller DECIDED
-// what to write to it. Identity re-verification (verifyDestination) answers "is this still
-// the same object"; a pin answers "is it still the same bytes" — the question an in-place
-// save (same inode, new content) leaves open. See CommitExpecting.
+// A pin records a live destination's content when the caller decided what to write to it. See
+// CommitExpecting.
 
-// ContentAbsent is the pin value for a destination that did NOT exist when the pin was
-// taken. It is a value rather than an omission so that "this file appeared in between" is a
-// mismatch like any other rather than an untracked key.
+// ContentAbsent is the pin value for a destination that did not exist when the pin was taken, so
+// a file created in between is a mismatch.
 const ContentAbsent = "absent"
 
 // ContentPin is the pin format for existing bytes: "sha256:" + lowercase hex.
@@ -107,7 +85,7 @@ func ContentPin(b []byte) string {
 // agree on Windows.
 func pinKey(rel string) string { return filepath.ToSlash(rel) }
 
-// verifyPinned checks a live destination's CONTENT against the caller's pin, immediately
+// verifyPinned checks a live destination's content against the caller's pin, immediately
 // before the destination is replaced. `existed` and `data` are what the pre-write inspection
 // just read (data is nil when the destination was absent).
 func verifyPinned(op, rel string, existed bool, data []byte, pins map[string]string) error {
@@ -144,6 +122,7 @@ type Refusal struct {
 	Detail string
 }
 
+// Error renders the refusal with its reason, rule and detail.
 func (r *Refusal) Error() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s refused for %q [%s]", r.Op, r.Path, r.Reason)
@@ -158,8 +137,7 @@ func (r *Refusal) Error() string {
 
 // AsRefusal extracts a *Refusal from an error chain.
 func AsRefusal(err error) (*Refusal, bool) {
-	var r *Refusal
-	if errors.As(err, &r) {
+	if r, ok := errors.AsType[*Refusal](err); ok {
 		return r, true
 	}
 	return nil, false
@@ -175,33 +153,16 @@ func ReasonOf(err error) Reason {
 
 // --- root-relative filesystem access ---
 //
-// Every file operation in this package goes through an *os.Root opened once on the
-// workspace root. Path-STRING traversal (check a path, then re-open it by name) is
-// racy by construction: a component swapped to a symlink between the check and the use
-// is followed. os.Root resolves each component against the open root and refuses to
-// leave it, so the check and the use are the same act.
-
-// os.Root hardens traversal INSIDE the boundary; it does not decide WHICH boundary is
-// opened. Opening the root by path after the containment checks ran against that same path
-// leaves a window: swap the approved directory for a symlink in between and the
-// REPLACEMENT becomes the boundary, after which every interior operation is faithfully
-// confined to the attacker's tree. openRootBound closes that window by binding the checks
-// to the opened object.
+// Every file operation in this package goes through an *os.Root opened once on a root, so a
+// component swapped to a symlink between a check and its use cannot be followed out of the root.
 //
-// Mechanism: capture the approved object's identity with a stat BEFORE the open, then
-// stat the OPENED root (an fstat on the descriptor, not a second path lookup) and require
-// the two to be the same file. os.SameFile is the binding primitive rather than hand-rolled
-// syscall code because it is exactly this comparison on every platform — device+inode on
-// unix, volume serial + file index on Windows — so no build tag is needed and Windows is
-// covered by the same code path. Swapping the path back after the open cannot help an
-// attacker: the second stat goes through the already-open handle, so it reports what was
-// opened, not what the name points at now.
+// os.Root confines traversal inside a boundary but does not choose which boundary is opened: a
+// directory swapped for a symlink between the checks and the open would become the boundary.
+// openRootBound therefore compares, with os.SameFile, the identity captured before the open with a
+// stat of the opened handle.
 
-// The two hooks below are the package's only test seams. Each names a check→use window
-// this package narrows but cannot make atomic, and each exists ONLY so that window can be
-// entered deterministically in a test: staging a real race would make the test flaky and
-// would prove nothing when it passed. Both are nil in every non-test build, and neither is
-// reachable from any exported API.
+// The two hooks below are test seams for check-to-use windows that cannot be made atomic, so a test
+// can enter each window deterministically. Both are nil outside tests.
 //
 // testHookBeforeOpenRoot runs between the root identity capture and the open.
 var testHookBeforeOpenRoot func(dir string)
@@ -256,18 +217,14 @@ func openRootDir(dir string) (*os.Root, error) {
 // form the os.Root methods take.
 func toRootPath(rel string) string { return filepath.FromSlash(filepath.ToSlash(rel)) }
 
-// openRegular opens rel through r for reading and returns the file together with the
-// *opened object's* FileInfo — validation is performed on what was actually opened
-// (f.Stat(), an fstat on the descriptor), never on a pre-open path lookup that a racing
-// rename could invalidate. It refuses symlinks/reparse points (O_NOFOLLOW on the final
-// component), non-regular files, and — when checkLinks is set — hardlinked regular files.
-//
-// checkLinks is off only for the commit-time backup read, whose bytes are never shown to
-// a model and are written back to the very path they came from.
+// openRegular opens rel through r for reading and returns the file with the opened descriptor's
+// FileInfo, so validation applies to what was opened. It refuses symlinks and reparse points
+// (O_NOFOLLOW), non-regular files and, when checkLinks is set, hardlinked files. checkLinks is off
+// only for the commit backup read, whose bytes go back to the same path and are never shown to a
+// model.
 func openRegular(r *os.Root, op, rel string, checkLinks bool) (*os.File, fs.FileInfo, error) {
 	name := toRootPath(rel)
-	// Lstat first so a symlink is reported as a REPARSE refusal (teaching) rather than
-	// as the platform's raw ELOOP from the O_NOFOLLOW open below.
+	// Lstat first so a symlink is refused with a reparse reason rather than the platform's ELOOP.
 	if fi, err := r.Lstat(name); err == nil && isReparse(fi) {
 		return nil, nil, &Refusal{Op: op, Path: rel, Reason: ReasonReparse, Rule: "symlinks/reparse points are never followed"}
 	}
@@ -339,10 +296,8 @@ func mkdirParents(r *os.Root, rel string) error {
 	return r.MkdirAll(dir, 0o755)
 }
 
-// mkdirParentsTracked creates rel's parent directories through r and returns the ones it
-// actually CREATED, outermost first, so a rolled-back commit can remove them again.
-// MkdirAll cannot be used here: it reports nothing about which components were new, and a
-// rollback that leaves behind directories the commit invented has not restored the tree.
+// mkdirParentsTracked creates rel's parent directories through r and returns those it created,
+// outermost first, so a rolled-back commit can remove them. MkdirAll does not report which were new.
 func mkdirParentsTracked(r *os.Root, rel string) ([]string, error) {
 	dir := filepath.Dir(toRootPath(rel))
 	if dir == "." || dir == "" || dir == string(filepath.Separator) {
@@ -350,7 +305,7 @@ func mkdirParentsTracked(r *os.Root, rel string) ([]string, error) {
 	}
 	var created []string
 	cur := ""
-	for _, part := range strings.Split(filepath.ToSlash(dir), "/") {
+	for part := range strings.SplitSeq(filepath.ToSlash(dir), "/") {
 		if part == "" || part == "." {
 			continue
 		}
@@ -374,30 +329,17 @@ func mkdirParentsTracked(r *os.Root, rel string) ([]string, error) {
 	return created, nil
 }
 
-// removeCreatedDirs undoes mkdirParentsTracked, deepest first. It is BEST EFFORT by
-// design: a directory that is no longer empty holds something this commit did not create,
-// and removing it would destroy a third party's file — the opposite of a rollback.
+// removeCreatedDirs undoes mkdirParentsTracked, deepest first. It is best effort: a directory that
+// is no longer empty holds a file this commit did not create.
 func removeCreatedDirs(r *os.Root, created []string) {
-	for i := len(created) - 1; i >= 0; i-- {
-		_ = r.Remove(created[i])
+	for _, c := range slices.Backward(created) {
+		_ = r.Remove(c)
 	}
 }
 
-// verifyDestination re-checks, immediately before a replacement, that the destination is
-// still the object the pre-write inspection approved: the same file (compared by identity,
-// not by name), or still absent when it was absent.
-//
-// It is what makes "fail rather than clobber" true for a destination CREATED after the
-// pre-write Lstat, which would otherwise be recorded as "did not exist" and then unlinked by
-// the rollback, and for one redirected to a different object.
-//
-// What identity alone does NOT prove: that the bytes are unchanged. An in-place save keeps
-// the inode, and on filesystems that recycle inode numbers (ext4 does, immediately) even a
-// delete-and-recreate comes back with the same identity. CommitExpecting therefore also
-// re-reads every existing destination and compares it with the backup; this function is the
-// cheap first gate, not the whole check.
-//
-// want == nil means "the destination did not exist at check time".
+// verifyDestination re-checks, immediately before a replacement, that the destination is still the
+// inspected object (by identity) or, when want is nil, still absent. Identity does not prove the
+// bytes are unchanged, so CommitExpecting also compares content with the backup.
 func verifyDestination(r *os.Root, op, rel string, want fs.FileInfo) error {
 	got, err := r.Lstat(toRootPath(rel))
 	switch {
@@ -432,9 +374,8 @@ func verifyDestination(r *os.Root, op, rel string, want fs.FileInfo) error {
 	return nil
 }
 
-// removeExisting unlinks rel through r. A failure other than "does not exist" is a HALT,
-// never an ignored error: if the existing entry survives, the subsequent write could
-// truncate whatever it links to (a hardlink to a protected file outside the workspace).
+// removeExisting unlinks rel through r. Any failure other than not-exist is a refusal: if the entry
+// survives, the following write could truncate whatever it links to.
 func removeExisting(r *os.Root, op, rel string) error {
 	err := r.Remove(toRootPath(rel))
 	if err == nil || errors.Is(err, fs.ErrNotExist) {
@@ -448,9 +389,8 @@ func removeExisting(r *os.Root, op, rel string) error {
 }
 
 // rollbackRemove undoes the creation of a destination that did not exist before a commit.
-// It is deliberately more forgiving than removeExisting: the write it is undoing may have
-// failed BEFORE creating anything (it may even have been refused for leaving the root), so
-// "nothing is there" is success, however the removal itself was answered.
+// It is more forgiving than removeExisting: the write being undone may have failed before creating
+// anything, so nothing at the path is success.
 func rollbackRemove(r *os.Root, rel string) error {
 	name := toRootPath(rel)
 	err := r.Remove(name)
@@ -467,11 +407,9 @@ func rollbackRemove(r *os.Root, rel string) error {
 	}
 }
 
-// writeThroughRootTracked replaces rel with data: required unlink, then an exclusive
-// no-follow create. It never truncates an existing entry in place. It also returns the
-// parent directories it CREATED (outermost first) so a rolled-back commit can remove them;
-// the list is returned even on failure, because a partially-created chain still has to be
-// undone.
+// writeThroughRootTracked replaces rel with data by unlinking it and then creating it exclusively
+// without following links, so an existing entry is never truncated in place. It returns the parent
+// directories it created, outermost first, even on failure, so a rollback can remove them.
 func writeThroughRootTracked(r *os.Root, op, rel string, data []byte, perm fs.FileMode) ([]string, error) {
 	created, err := mkdirParentsTracked(r, rel)
 	if err != nil {

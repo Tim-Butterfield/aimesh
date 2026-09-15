@@ -1,7 +1,6 @@
-// Package meshcore is the root of the aimesh meshcore module: the headless,
-// domain-agnostic governed model-operations substrate. Its packages hold adapter
-// invocation, model-identity verification, containment, config primitives, doctor
-// readiness, the ACP transport/child-process harness, the halt taxonomy, and audit
-// plumbing. meshcore imports NEITHER app (reviewmesh, exploremesh) and carries no
-// UI/HTTP/frontend dependency and no app-domain vocabulary in its exported API.
+// Package meshcore is the root of the aimesh meshcore module: the headless, domain-agnostic substrate
+// for governed model operations. Its packages cover adapter invocation, model-identity verification,
+// containment, configuration primitives, readiness checks, the ACP and MCP transports, the fault
+// taxonomy and audit plumbing. meshcore imports neither application, has no UI or HTTP dependency,
+// and uses no application vocabulary in its exported API.
 package meshcore

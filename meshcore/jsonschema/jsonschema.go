@@ -1,43 +1,17 @@
-// Package jsonschema is a small, dependency-free JSON Schema (draft 2020-12) validator.
+// Package jsonschema is a small, dependency-free validator for a subset of JSON Schema draft 2020-12.
 //
-// It is primarily a TEST / VERIFICATION utility: the tool the build uses to hold DECLARED schemas to
-// what the code actually emits. It is deliberately too small to be trusted as a general-purpose
-// validator, and nothing may depend on it to decide whether an INPUT is acceptable — a subset validator
-// that silently accepts what it does not implement is not an input boundary.
-//
-// It has exactly ONE runtime caller, and the exception is narrow and stated: meshcore/mcp's opt-in
-// send-time check (Server.StrictSchema), which validates a payload THIS PROCESS JUST BUILT against a
-// schema THIS PROCESS declares. Both sides are ours; the check answers "did we emit what we promised",
-// never "is this stranger's input safe". It is off by default, so the default import-graph posture is
-// unchanged in effect even though the package is now reachable from a shipped binary.
-//
-// It exists for ONE reason: this repo declares schemas — the MCP tools' `outputSchema`, the files
-// under `docs/schema/` — and until it existed nothing checked that the payloads the code actually
-// emits satisfy them. A declaration nothing validates drifts silently, and it drifted: MCP
-// `structuredContent` payloads matched no branch of the very `oneOf` their tool advertised. The
-// point of this package is that the drift is now a FAILING TEST rather than a discovery.
-//
-// It lives in meshcore because JSON Schema is domain-free and because every application's
-// conformance tests must judge payloads by the SAME rules — a validator that differed per app
-// would let two surfaces drift apart while both looked green. It was briefly duplicated per app,
-// only because the original copy was `internal/` to one application module and an app-to-app
-// import fails scripts/boundarycheck.
-//
-// # THIS IS A SUBSET VALIDATOR. IT IS NOT A CONFORMANT 2020-12 IMPLEMENTATION.
-//
-// That sentence is the vocabulary declaration, and it is deliberately the first thing here rather
-// than a caveat at the end. Nothing in this repo may be documented, tested or advertised in a way
-// that implies otherwise.
+// It is not a conformant 2020-12 implementation, and nothing may rely on it to decide whether untrusted
+// input is acceptable. It checks that payloads this repo emits satisfy the schemas this repo declares
+// (MCP tool output schemas and the files under docs/schema/), in tests and in meshcore/mcp's opt-in
+// send-time check (Server.StrictSchema), where both schema and payload come from the same process. It
+// lives in meshcore so every application's conformance tests apply the same rules.
 //
 // # Dialect
 //
-// The only dialect handled is JSON Schema draft 2020-12, and only the subset below. Every schema this
-// repo compiles is one this repo wrote, all of them use the default dialect, and no client-supplied
-// schema is ever compiled — this package is never an input boundary (see the paragraph above).
-// A `$schema` naming any other dialect is IGNORED rather than honoured, which is safe only because of
-// that scope; it would not be safe for a validator that consumed strangers' schemas.
+// Only draft 2020-12 is handled, and only the subset below. A `$schema` naming another dialect is
+// ignored, which is safe only because every compiled schema is written in this repo.
 //
-// # Implemented — the keywords this validator acts on
+// # Implemented keywords
 //
 //	$ref (in-document JSON pointers and same-directory file names), $defs,
 //	type, const, enum, oneOf, anyOf, allOf, not,
@@ -45,38 +19,28 @@
 //	items, prefixItems, minItems, maxItems, uniqueItems,
 //	minLength, maxLength, pattern, minimum, maximum
 //
-// # Deliberately ignored — annotations that cannot change a verdict
+// # Ignored annotations
 //
 //	$schema, $id, $comment, title, description, default, examples,
 //	format, deprecated, readOnly, writeOnly
 //
-// Both lists are exported by Vocabulary(), and a test asserts that this comment and that function
-// agree, so the declaration and the code cannot drift.
+// Vocabulary returns both lists, and a test checks them against this comment.
 //
-// # Everything else fails the build, and this is the reason
+// # Other keywords
 //
-// The specification says an UNKNOWN keyword is an annotation, and ignoring one is correct. A
-// KNOWN-AND-UNIMPLEMENTED keyword is a different thing wearing the same clothes: declare
-// `patternProperties` or `dependentRequired` in a published schema and this validator would ignore
-// it, our own strict send-time check would pass a payload a compliant client rejects, and the build
-// would stay green. So UnsupportedKeywords walks every schema this repo publishes and fails CI on any
-// keyword that is in neither list above. That check protects OUR schemas from drifting outside OUR
-// vocabulary; it establishes nothing about general 2020-12 support, and must not be cited as though
-// it did.
+// A keyword the specification defines but this validator does not implement, such as
+// `patternProperties`, would be ignored here while a compliant client enforces it. UnsupportedKeywords
+// reports such keywords, and CI fails if a published schema uses one.
 //
-// # Non-goal, stated as a rule rather than an omission
+// # References and bounds
 //
-// This package NEVER dereferences a `$ref` over the network, and implements no opt-in mode that
-// would. A schema is a declaration; a declaration that reaches the network is a fetch nobody
-// authorized. A `$ref` carrying a URI scheme, a network-path prefix, an absolute path or any path
-// separator is refused at compile time with a named error (see bounds.go), so a `$ref` can neither
-// reach the network nor walk out of its own directory. Compile-time depth, subschema and `$ref`-cycle
-// bounds are enforced in the same place and for the same reason: on a runtime path, an unbounded
-// validator is a hole whether or not anything currently reaches it.
+// A `$ref` is never dereferenced over the network. A `$ref` with a URI scheme, a network-path prefix, an
+// absolute path or a path separator is refused at compile time (see bounds.go), as is a schema that
+// exceeds the depth, subschema or `$ref`-cycle bounds.
 //
-// Instances are JSON-DECODED values (`map[string]any`, `[]any`, `string`, `float64`, `bool`, nil).
-// Use ValidateJSON, or Validate on a value you round-tripped through encoding/json — a Go `int` is
-// not a JSON number and this package will not pretend otherwise.
+// Instances are JSON-decoded values (`map[string]any`, `[]any`, `string`, `float64`, `bool`, nil). Use
+// ValidateJSON or ValidateGo, or Validate on a value round-tripped through encoding/json; a Go `int` is
+// not a JSON number.
 package jsonschema
 
 import (
@@ -97,7 +61,7 @@ type Schema struct {
 	docs map[string]any
 }
 
-// Compile parses a schema literal and BOUNDS it (see bounds.go): a non-local `$ref`, a `$ref` cycle,
+// Compile parses a schema literal and bounds it (see bounds.go): a non-local `$ref`, a `$ref` cycle,
 // or nesting past the compile-time limits is refused here, once, rather than discovered per call. It
 // has no directory, so a `$ref` naming a sibling file still fails at validation, loudly, with the
 // error that says why.
@@ -382,13 +346,10 @@ func (s *Schema) checkArrayKeywords(m map[string]any, doc string, inst any, path
 	if n, ok := numberOf(m["maxItems"]); ok && float64(len(arr)) > n {
 		fail(errs, path, "has %d items, more than the maximum %v", len(arr), n)
 	}
-	// uniqueItems is implemented rather than ignored because a published schema in this repo
-	// DECLARES it (exploremesh's `explore_compare.options`, where a repeated option would silently
-	// change what the panel was asked to compare). The allowlist test found it: it was declared,
-	// ignored here, and enforced by any compliant client — the two disagreeing about the same
-	// payload, with the build green. That is the whole case for the allowlist.
+	// uniqueItems is implemented because a published schema declares it; ignoring it would pass a
+	// payload a compliant client rejects.
 	if u, ok := m["uniqueItems"].(bool); ok && u {
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			for j := i + 1; j < len(arr); j++ {
 				if jsonEqual(arr[i], arr[j]) {
 					fail(errs, path, "items[%d] and items[%d] are both %s, but uniqueItems is true", i, j, render(arr[i]))
@@ -435,13 +396,10 @@ func (s *Schema) checkNumberKeywords(m map[string]any, inst any, path string, er
 
 // --- $ref resolution ---
 
-// resolve returns the schema a `$ref` names, plus the document it lives in (so a nested `$ref`
-// inside a referenced file resolves against THAT file, not the one that pointed at it).
+// resolve returns the schema a `$ref` names, plus the document it lives in, so a nested `$ref` in a
+// referenced file resolves against that file.
 func (s *Schema) resolve(ref, doc string) (any, string, error) {
-	// The same refusal the compile walk makes, repeated at the point of use. It is not redundant:
-	// compile-time is where a bad schema is REPORTED, and this is where it would otherwise be ACTED
-	// ON, and a boundary that exists in only one of those two places is a boundary one refactor away
-	// from not existing.
+	// The compile-time refusal is repeated where the reference is acted on.
 	if err := checkLocalRef(ref); err != nil {
 		return nil, "", err
 	}
@@ -468,7 +426,7 @@ func (s *Schema) resolve(ref, doc string) (any, string, error) {
 	if pointer == "" || pointer == "/" {
 		return node, target, nil
 	}
-	for _, tok := range strings.Split(strings.TrimPrefix(pointer, "/"), "/") {
+	for tok := range strings.SplitSeq(strings.TrimPrefix(pointer, "/"), "/") {
 		tok = strings.ReplaceAll(strings.ReplaceAll(tok, "~1", "/"), "~0", "~")
 		switch cur := node.(type) {
 		case map[string]any:

@@ -1,18 +1,8 @@
-// Package mcpflags declares the LAUNCH flags both MCP servers share, once.
+// Package mcpflags declares the launch flags both MCP servers share.
 //
-// They are one declaration rather than two copies because these flags state POSTURE, not preference:
-// `--protocol legacy` decides whether this process is a conformant 2026-07-28 server or a
-// compatibility fallback, and `--strict-schema` decides whether a non-conforming payload is shipped
-// or refused. An operator reads the help text to learn what they are agreeing to, and two
-// descriptions of the same switch would drift.
-//
-// It is also what makes `aimesh mcp` possible. A composed server registers both domains' flags on
-// ONE flag set, and a duplicate name panics; declaring the shared ones here is what leaves each
-// name registered exactly once.
-//
-// Everything here is launch-only by nature. Anything a caller may vary per run — the workspace, the
-// panel, waitSeconds, maxParallel — is a tool parameter instead, so a single configured server can
-// serve many workspaces without the operator editing a host config and restarting.
+// Declaring them once gives each switch a single description and lets `aimesh mcp` register both
+// domains' flags on one flag set, where a duplicate name would panic. Anything a caller may vary per
+// run is a tool parameter instead.
 package mcpflags
 
 import (
@@ -25,7 +15,7 @@ import (
 	proto "github.com/Tim-Butterfield/aimesh/meshcore/mcp"
 )
 
-// DefaultTurnTimeout is the wall-clock budget for ONE run when the operator names none.
+// DefaultTurnTimeout is the wall-clock budget for one run when the operator names none.
 const DefaultTurnTimeout = 10 * time.Minute
 
 // Shared holds the parsed values. The fields are pointers because Register binds them into a
@@ -42,23 +32,14 @@ type Shared struct {
 // this package does not become a third place that number is written down.
 func Register(fs *flag.FlagSet, defaultWait int) *Shared {
 	return &Shared{
-		// THE ERA POSTURE. `dual` (the default) serves whichever MCP revision the client opens with
-		// and then commits to it for the life of the process. `legacy` makes this process a
-		// pre-2026-07-28 server in every observable respect.
-		//
-		// `legacy` exists so an operator whose host misbehaves has a documented rollback that is not
-		// "downgrade the binary". There is deliberately no `modern`: a modern-only pin would strand
-		// legacy hosts, which have no fall-forward mechanism, and buys nothing an operator cannot get
-		// by simply not sending `initialize`.
+		// Protocol is the era posture. dual serves whichever MCP revision the client opens with;
+		// legacy is a pre-2026-07-28 server, a rollback for hosts that misbehave. There is no
+		// modern-only pin, because it would strand legacy hosts.
 		//
 		// SUNSET-PATH (MCP26-SUNSET): the whole flag goes with the era.
 		Protocol: fs.String("protocol", string(proto.ProtocolDual),
 			"MCP era posture: dual (serve whichever revision the client opens with — the sessionless 2026-07-28 revision or a legacy `initialize` handshake — and commit to it) | legacy (be a pre-2026-07-28 server in every observable respect: `server/discover` is an unknown method and no modern request is served). A legacy-mode process is a documented compatibility fallback, NOT a conformant 2026-07-28 deployment; the `doctor` tool reports which mode is in force"),
-		// WIRE FRAMING IS A PROPERTY OF THE PROCESS, not of a domain — it decides how bytes are
-		// delimited on the one stdio stream both domains share, so it belongs beside --protocol.
-		//
-		// Declared here, it is accepted under `aimesh mcp --only explore` and by `aimesh explore mcp`,
-		// so an explore-only deployment can choose content-length as a review one can.
+		// Framing applies to the whole process, because both domains share one stdio stream.
 		Framing: fs.String("framing", "",
 			"wire framing: newline (the MCP stdio default) | content-length. It applies to the whole process, so it is accepted whichever domain(s) are being served"),
 		WaitSeconds: fs.Int("wait-seconds", defaultWait,
@@ -70,11 +51,8 @@ func Register(fs *flag.FlagSet, defaultWait int) *Shared {
 	}
 }
 
-// Era validates --protocol and returns the posture, announcing a legacy pin on errw.
-//
-// An unrecognized value is a CONFIG ERROR refused before serving, never a fallback to the default:
-// an operator who typed `--protocol modern` asked for a pin and would otherwise silently get the
-// opposite. prefix names the command in the message ("aimesh mcp", "reviewmesh mcp", …).
+// Era validates --protocol and returns the posture, announcing a legacy pin on errw. An unrecognized
+// value is refused rather than defaulted. prefix names the command in messages.
 func (s *Shared) Era(errw io.Writer, prefix string) (proto.ProtocolMode, bool) {
 	if !proto.ValidProtocolMode(*s.Protocol) {
 		fmt.Fprintf(errw, "%s: unknown --protocol %q (want dual or legacy)\n", prefix, *s.Protocol)
@@ -87,12 +65,8 @@ func (s *Shared) Era(errw io.Writer, prefix string) (proto.ProtocolMode, bool) {
 	return era, true
 }
 
-// Strict combines the flag with the environment form.
-//
-// The ENV form exists because an MCP server is usually launched by a HOST's config file, and many
-// hosts let an operator set `env` for a server but not extra argv (Claude Desktop's
-// `claude_desktop_config.json` is the common case). A diagnostic-only switch that the people who
-// most need it cannot reach would be a switch in name only.
+// Strict combines the flag with its environment form, which reaches hosts that can set a server's
+// environment but not its arguments.
 func (s *Shared) Strict() bool { return *s.StrictSchema || proto.StrictSchemaFromEnv() }
 
 // AnnounceStrict prints the strict-schema disclosure when it is on.
